@@ -1,0 +1,21 @@
+[package]
+name = "theo-pod"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+
+[dependencies]
+esp-backtrace = { version = "0.20", features = ["esp32s3", "panic-handler", "println"] }
+esp-bootloader-esp-idf = { version = "0.6", features = ["esp32s3"] }
+esp-hal = { version = "~1.2", features = ["esp32s3"] }
+esp-println = { version = "0.18", features = ["esp32s3", "log-04"] }
+
+[profile.release]
+opt-level = "s"
+lto = "thin"
+codegen-units = 1
+debug = 2
+
+[profile.dev]
+debug = 2
+opt-level = "s"

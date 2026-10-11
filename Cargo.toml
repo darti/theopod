@@ -20,8 +20,8 @@ esp-hal = { version = "~1.2", features = ["esp32s3", "unstable"] }
 esp-println = { version = "0.18", features = ["esp32s3", "log-04"] }
 esp-rtos = { version = "0.4", features = ["embassy", "esp32s3"] }
 log = "0.4"
-slint = { version = "1.16", default-features = false, features = ["compat-1-2", "unsafe-single-threaded", "libm", "renderer-software"] }
-slint-build = "1.16"
+slint = { version = "1.18", default-features = false, features = ["compat-1-2", "unsafe-single-threaded", "libm", "renderer-software"] }
+slint-build = "1.18"
 speculoos = "0.13"
 theo-drivers = { path = "crates/theo-drivers" }
 

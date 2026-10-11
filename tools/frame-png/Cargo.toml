@@ -1,0 +1,12 @@
+[package]
+name = "frame-png"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+png.workspace = true
+theo-frame-dump.workspace = true
+
+[dev-dependencies]
+speculoos.workspace = true

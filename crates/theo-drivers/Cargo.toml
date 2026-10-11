@@ -5,7 +5,6 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-bytemuck.workspace = true
 embedded-hal.workspace = true
 embedded-hal-async.workspace = true
 

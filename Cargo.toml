@@ -1,13 +1,16 @@
 [workspace]
-members = ["crates/theo-drivers"]
+members = ["crates/theo-drivers", "crates/theo-frame-dump", "tools/frame-png"]
 
 [workspace.package]
 edition = "2024"
 rust-version = "1.95"
 
 [workspace.dependencies]
+allocator-api2 = { version = "0.3", default-features = false, features = ["alloc"] }
 bytemuck = "1"
 embassy-executor = "0.10"
+embassy-futures = "0.1"
+embassy-sync = "0.8"
 embassy-time = "0.5"
 embedded-hal = "1.0"
 embedded-hal-async = "1.0"
@@ -20,10 +23,12 @@ esp-hal = { version = "~1.2", features = ["esp32s3", "unstable"] }
 esp-println = { version = "0.18", features = ["esp32s3", "log-04"] }
 esp-rtos = { version = "0.4", features = ["embassy", "esp32s3"] }
 log = "0.4"
+png = "0.18"
 slint = { version = "1.18", default-features = false, features = ["compat-1-2", "unsafe-single-threaded", "libm", "renderer-software"] }
 slint-build = "1.18"
 speculoos = "0.13"
 theo-drivers = { path = "crates/theo-drivers" }
+theo-frame-dump = { path = "crates/theo-frame-dump" }
 
 [package]
 name = "theo-pod"
@@ -32,8 +37,11 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+allocator-api2.workspace = true
 bytemuck.workspace = true
 embassy-executor.workspace = true
+embassy-futures.workspace = true
+embassy-sync.workspace = true
 embassy-time.workspace = true
 embedded-hal.workspace = true
 embedded-hal-async.workspace = true
@@ -46,6 +54,12 @@ esp-rtos.workspace = true
 log.workspace = true
 slint.workspace = true
 theo-drivers.workspace = true
+theo-frame-dump = { workspace = true, optional = true }
+
+[features]
+# Prints the framebuffer to the serial log after the first frame and after
+# each BOOT press; `just frame-png` turns the log into a PNG.
+frame-dump = ["dep:theo-frame-dump"]
 
 [build-dependencies]
 slint-build.workspace = true

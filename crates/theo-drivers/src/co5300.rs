@@ -2,6 +2,7 @@
 //!
 //! - [`Co5300`]: initializes the panel and streams RGB565 pixels over any
 //!   [`QspiBus`], with delays from any `embedded-hal-async` [`DelayNs`].
+//!   Pixel payloads longer than [`QspiBus::MAX_TRANSFER_LEN`] are split.
 //! - [`PanelGeometry`]: visible size and RAM offset of the attached panel.
 //! - [`Error`]: bus failures and rejected geometry, areas or pixel counts.
 //!
@@ -168,29 +169,36 @@ impl<B: QspiBus> Co5300<B> {
     ///
     /// Returns [`Error::Bus`] on the first failed register write.
     pub async fn init(&mut self, delay: &mut impl DelayNs) -> Result<(), Error<B::Error>> {
-        self.write_register(CMD_SOFTWARE_RESET, &[])?;
+        self.write_register(CMD_SOFTWARE_RESET, &[]).await?;
         delay.delay_ms(RESET_SETTLE_MS).await;
-        self.write_register(CMD_SLEEP_OUT, &[])?;
+        self.write_register(CMD_SLEEP_OUT, &[]).await?;
         delay.delay_ms(SLEEP_OUT_SETTLE_MS).await;
-        self.write_register(CMD_PAGE_SELECT, &[PAGE_USER])?;
-        self.write_register(CMD_SPI_MODE_CONTROL, &[SPI_MODE_RAM_WRITE])?;
-        self.write_register(CMD_PIXEL_FORMAT, &[PIXEL_FORMAT_RGB565])?;
-        self.write_register(CMD_WRITE_CTRL_DISPLAY, &[CTRL_DISPLAY_BRIGHTNESS])?;
-        self.write_register(CMD_HBM_BRIGHTNESS, &[HBM_BRIGHTNESS_MAX])?;
-        self.write_register(CMD_DISPLAY_ON, &[])?;
-        self.write_register(CMD_BRIGHTNESS, &[BRIGHTNESS])?;
-        self.write_register(CMD_CONTRAST_ENHANCEMENT, &[CONTRAST_ENHANCEMENT_OFF])?;
+        self.write_register(CMD_PAGE_SELECT, &[PAGE_USER]).await?;
+        self.write_register(CMD_SPI_MODE_CONTROL, &[SPI_MODE_RAM_WRITE])
+            .await?;
+        self.write_register(CMD_PIXEL_FORMAT, &[PIXEL_FORMAT_RGB565])
+            .await?;
+        self.write_register(CMD_WRITE_CTRL_DISPLAY, &[CTRL_DISPLAY_BRIGHTNESS])
+            .await?;
+        self.write_register(CMD_HBM_BRIGHTNESS, &[HBM_BRIGHTNESS_MAX])
+            .await?;
+        self.write_register(CMD_DISPLAY_ON, &[]).await?;
+        self.write_register(CMD_BRIGHTNESS, &[BRIGHTNESS]).await?;
+        self.write_register(CMD_CONTRAST_ENHANCEMENT, &[CONTRAST_ENHANCEMENT_OFF])
+            .await?;
         delay.delay_ms(DISPLAY_ON_SETTLE_MS).await;
-        self.write_register(CMD_MEMORY_ACCESS_CONTROL, &[MADCTL_RGB])?;
-        self.write_register(CMD_INVERSION_OFF, &[])
+        self.write_register(CMD_MEMORY_ACCESS_CONTROL, &[MADCTL_RGB])
+            .await?;
+        self.write_register(CMD_INVERSION_OFF, &[]).await
     }
 
-    fn write_register(&mut self, command: u8, data: &[u8]) -> Result<(), Error<B::Error>> {
+    async fn write_register(&mut self, command: u8, data: &[u8]) -> Result<(), Error<B::Error>> {
         self.transfer(OPCODE_WRITE_REGISTER, command, Lanes::Single, data)
+            .await
     }
 
     /// Commands travel in the middle byte of the 24-bit address phase.
-    fn transfer(
+    async fn transfer(
         &mut self,
         opcode: u8,
         command: u8,
@@ -199,6 +207,7 @@ impl<B: QspiBus> Co5300<B> {
     ) -> Result<(), Error<B::Error>> {
         self.bus
             .write(opcode, u32::from(command) << 8, lanes, data)
+            .await
             .map_err(Error::Bus)
     }
 }
@@ -211,7 +220,7 @@ impl<B: QspiBus> Panel for Co5300<B> {
     }
 
     /// Opens the area; both ranges must start even and have an even length.
-    fn begin_area(&mut self, x: Range<u16>, y: Range<u16>) -> Result<(), Self::Error> {
+    async fn begin_area(&mut self, x: Range<u16>, y: Range<u16>) -> Result<(), Self::Error> {
         let aligned = |range: &Range<u16>, limit: u16| {
             !range.is_empty()
                 && range.start.is_multiple_of(2)
@@ -230,28 +239,43 @@ impl<B: QspiBus> Panel for Co5300<B> {
         let [ys_high, ys_low] = y.start.to_be_bytes();
         let [ye_high, ye_low] = (y.end - 1).to_be_bytes();
         self.remaining = 0;
-        self.write_register(CMD_COLUMN_ADDRESS, &[xs_high, xs_low, xe_high, xe_low])?;
-        self.write_register(CMD_ROW_ADDRESS, &[ys_high, ys_low, ye_high, ye_low])?;
-        self.write_register(CMD_MEMORY_WRITE, &[])?;
+        self.write_register(CMD_COLUMN_ADDRESS, &[xs_high, xs_low, xe_high, xe_low])
+            .await?;
+        self.write_register(CMD_ROW_ADDRESS, &[ys_high, ys_low, ye_high, ye_low])
+            .await?;
+        self.write_register(CMD_MEMORY_WRITE, &[]).await?;
         // Fits: bounded by width * height * 2, which `PanelGeometry` keeps within u32.
         self.remaining = x.len() * y.len() * 2;
         Ok(())
     }
 
-    fn write_pixels(&mut self, pixels: &[u8]) -> Result<(), Self::Error> {
+    /// Sends `pixels` in transfers of at most [`QspiBus::MAX_TRANSFER_LEN`]
+    /// bytes; bytes sent before a failed transfer stay counted.
+    async fn write_pixels(&mut self, pixels: &[u8]) -> Result<(), Self::Error> {
+        // Whole pixels per transfer.
+        let chunk_len = const {
+            assert!(
+                B::MAX_TRANSFER_LEN >= 2,
+                "QspiBus::MAX_TRANSFER_LEN below one pixel"
+            );
+            B::MAX_TRANSFER_LEN & !1
+        };
         if pixels.len() > self.remaining || !pixels.len().is_multiple_of(2) {
             return Err(Error::PixelOverflow {
                 remaining: self.remaining,
                 submitted: pixels.len(),
             });
         }
-        self.transfer(
-            OPCODE_WRITE_PIXELS,
-            CMD_MEMORY_WRITE_CONTINUE,
-            Lanes::Quad,
-            pixels,
-        )?;
-        self.remaining -= pixels.len();
+        for chunk in pixels.chunks(chunk_len) {
+            self.transfer(
+                OPCODE_WRITE_PIXELS,
+                CMD_MEMORY_WRITE_CONTINUE,
+                Lanes::Quad,
+                chunk,
+            )
+            .await?;
+            self.remaining -= chunk.len();
+        }
         Ok(())
     }
 }

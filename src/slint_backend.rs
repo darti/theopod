@@ -1,22 +1,20 @@
-//! Slint platform and renderer glue for any [`Panel`].
+//! Slint platform and framebuffer rendering.
 //!
 //! - [`TheoPlatform`]: minimal Slint platform backed by one software window.
-//! - [`LineBuffer`]: line scratch memory reused across frames.
-//! - [`render_frame`]: renders a whole frame and streams it to a [`Panel`].
+//! - [`FrameBuffer`]: full-panel framebuffer Slint renders into, in the
+//!   panel's big-endian RGB565 byte order.
 //!
-//! The streaming rules (line order, full-panel area, byte order) live in
-//! [`FrameStreamer`], which is host-tested; this module only adapts Slint's
-//! line renderer to it.
+//! Sending the dirty rows to a panel is [`theo_drivers::flush_rows`]' job,
+//! which is host-tested; this module only adapts Slint's renderer.
 
-use alloc::{rc::Rc, vec::Vec};
+use alloc::rc::Rc;
 use core::{fmt, ops::Range, time::Duration};
 
 use embassy_time::Instant;
 use slint::platform::{
     Platform, WindowAdapter,
-    software_renderer::{LineBufferProvider, MinimalSoftwareWindow, Rgb565Pixel, SoftwareRenderer},
+    software_renderer::{MinimalSoftwareWindow, Rgb565BigEndianPixel, SoftwareRenderer},
 };
-use theo_drivers::{FrameError, FrameStreamer, Panel};
 
 /// Slint platform exposing a single software-rendered window.
 pub struct TheoPlatform {
@@ -46,51 +44,67 @@ impl Platform for TheoPlatform {
     }
 }
 
-/// Scratch memory for one rendered line, reused across frames.
-#[derive(Debug, Default)]
-pub struct LineBuffer {
-    pixels: Vec<Rgb565Pixel>,
+/// Full-panel framebuffer kept between frames.
+///
+/// The window must use `RepaintBufferType::ReusedBuffer`: Slint then only
+/// redraws what changed since the previous frame.
+pub struct FrameBuffer {
+    pixels: &'static mut [Rgb565BigEndianPixel],
+    width: u16,
+    height: u16,
 }
 
-/// Renders a full frame with `renderer` and streams it to `panel`.
-///
-/// The window must use `RepaintBufferType::NewBuffer` so every line is
-/// delivered whole and in order. `buffer` grows to the panel width on first
-/// use.
-///
-/// # Errors
-///
-/// Returns the [`FrameError`] that made the frame drop.
-pub fn render_frame<P: Panel>(
-    renderer: &SoftwareRenderer,
-    panel: &mut P,
-    buffer: &mut LineBuffer,
-) -> Result<(), FrameError<P::Error>> {
-    let width = usize::from(panel.size().0);
-    buffer.pixels.resize(width, Rgb565Pixel(0));
-    let mut streamer = FrameStreamer::new(panel, bytemuck::cast_slice_mut(&mut buffer.pixels))?;
-    renderer.render_by_line(SlintLines {
-        streamer: &mut streamer,
-    });
-    streamer.finish()
+impl FrameBuffer {
+    /// Wraps `pixels`, a row-major `width` x `height` RGB565 buffer.
+    ///
+    /// The slots are reinterpreted as [`Rgb565BigEndianPixel`]: they hold
+    /// the panel's byte order, not native-endian values.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `pixels` does not hold exactly `width * height` pixels.
+    pub fn new(pixels: &'static mut [u16], (width, height): (u16, u16)) -> Self {
+        assert_eq!(
+            pixels.len(),
+            usize::from(width) * usize::from(height),
+            "framebuffer size does not match the panel"
+        );
+        Self {
+            pixels: bytemuck::cast_slice_mut(pixels),
+            width,
+            height,
+        }
+    }
+
+    /// Redraws what changed with `renderer` and returns the dirty rows.
+    pub fn render(&mut self, renderer: &SoftwareRenderer) -> Range<u16> {
+        let region = renderer.render(self.pixels, usize::from(self.width));
+        let top = i64::from(region.bounding_box_origin().y);
+        let bottom = top + i64::from(region.bounding_box_size().height);
+        self.row(top)..self.row(bottom)
+    }
+
+    /// Every row of the frame.
+    pub fn all_rows(&self) -> Range<u16> {
+        0..self.height
+    }
+
+    /// The frame as big-endian RGB565 bytes, ready for the panel.
+    pub fn as_bytes(&self) -> &[u8] {
+        bytemuck::cast_slice(self.pixels)
+    }
+
+    /// Clamps a rendered row coordinate to the frame.
+    fn row(&self, y: i64) -> u16 {
+        u16::try_from(y.clamp(0, i64::from(self.height))).unwrap_or(self.height)
+    }
 }
 
-/// Adapts Slint's line callbacks to a [`FrameStreamer`].
-struct SlintLines<'s, 'a, P: Panel> {
-    streamer: &'s mut FrameStreamer<'a, P>,
-}
-
-impl<P: Panel> LineBufferProvider for SlintLines<'_, '_, P> {
-    type TargetPixel = Rgb565Pixel;
-
-    fn process_line(
-        &mut self,
-        line: usize,
-        range: Range<usize>,
-        render_fn: impl FnOnce(&mut [Self::TargetPixel]),
-    ) {
-        self.streamer.stream_line(line, range, |pixels| {
-            render_fn(bytemuck::cast_slice_mut(pixels));
-        });
+impl fmt::Debug for FrameBuffer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FrameBuffer")
+            .field("width", &self.width)
+            .field("height", &self.height)
+            .finish_non_exhaustive()
     }
 }

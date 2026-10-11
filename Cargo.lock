@@ -1942,6 +1942,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "frame-png"
+version = "0.1.0"
+dependencies = [
+ "png",
+ "speculoos",
+ "theo-frame-dump",
+]
+
+[[package]]
 name = "fugit"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5167,9 +5176,15 @@ checksum = "f18aa187839b2bdb1ad2fa35ead8c4c2976b64e4363c386d45ac0f7ee85c9233"
 name = "theo-drivers"
 version = "0.1.0"
 dependencies = [
- "bytemuck",
  "embedded-hal 1.0.0",
  "embedded-hal-async",
+ "speculoos",
+]
+
+[[package]]
+name = "theo-frame-dump"
+version = "0.1.0"
+dependencies = [
  "speculoos",
 ]
 
@@ -5177,8 +5192,11 @@ dependencies = [
 name = "theo-pod"
 version = "0.1.0"
 dependencies = [
+ "allocator-api2 0.3.1",
  "bytemuck",
  "embassy-executor",
+ "embassy-futures",
+ "embassy-sync 0.8.0",
  "embassy-time",
  "embedded-hal 1.0.0",
  "embedded-hal-async",
@@ -5192,6 +5210,7 @@ dependencies = [
  "slint",
  "slint-build",
  "theo-drivers",
+ "theo-frame-dump",
 ]
 
 [[package]]

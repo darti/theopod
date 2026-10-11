@@ -9,26 +9,44 @@ the ESP toolchain and target are defined in `rust-toolchain.toml`.
 ## Conventions
 
 - Preserve the existing `no_std`/`no_main` model and ESP-HAL startup conventions.
-- Display pin assignments, panel geometry, and the TCA9554 power sequence are
-  implemented in `src/device/mod.rs`, the single source of truth for board
-  wiring. Do not assume touch or audio pin assignments: they are not yet
-  documented or implemented.
+- Display pin assignments, panel geometry, the BOOT button, PSRAM mode, and
+  the TCA9554 power-up values are defined in `src/device/mod.rs`, the single
+  source of truth for board wiring; the power-up sequence itself is
+  `PanelPower` in `crates/theo-drivers`. Do not assume touch or audio pin
+  assignments: they are not yet documented or implemented.
 - Keep ESP- and board-specific code in `src/device/`. Drivers in
   `crates/theo-drivers` must stay HAL-independent (`embedded-hal` traits and
   `QspiBus` only) and keep their host unit tests passing.
 - Keep changes compatible with the `xtensa-esp32s3-none-elf` target and the
   dependency versions declared in `Cargo.toml`.
+- Record significant technical decisions in `docs/adr/`.
+- Layout: `README.md`; driver map in `crates/theo-drivers/ARCHITECTURE.md`.
+  Debug tooling: `crates/theo-frame-dump` (`no_std`, shared by the firmware
+  and the host) and the host-only `tools/frame-png`.
 - Use `just` for firmware operations; its recipes configure the required ESP
   environment.
+
+## Gotchas
+
+- The display DMA must never read PSRAM: it sends stale data (a band on the
+  panel) despite esp-hal's cache writeback. `EspQspi` copies through an
+  internal-RAM bounce buffer; keep it (ADR-0004).
+- `.cargo/config.toml` forces the xtensa target: host builds need
+  `RUSTUP_TOOLCHAIN=stable cargo <cmd> --target $(rustc +stable -vV | sed -n 's/^host: //p')`.
+- Firmware `log` output is silent unless `ESP_LOG` (e.g. `info`) is set at
+  build time (`init_logger_from_env`).
+- To see what the firmware renders: `just flash-dump` (records from boot,
+  Ctrl-C after `theo-frame-end`), then `just frame-png` → `target/frame.png`.
+  Capturing after boot misses the first rows.
 
 ## Verification
 
 - Run `just fmt` to format the code.
 - Run `just check` to verify compilation with the ESP toolchain.
-- Run `just test` to run the driver unit tests on the host.
+- Run `just test` to run the host unit tests (drivers, frame dump, frame-png).
+- Run `just lint` to run clippy on the firmware and the host crates.
 - Run `just build` to produce a release firmware image.
 
 Flashing and the serial monitor (`just flash`, `just monitor`, `just run`,
-`just flash-monitor`)
-require the board to be connected and must not be run without an explicit
-request.
+`just flash-monitor`, `just flash-dump`, `just monitor-log`) require the board
+to be connected and must not be run without an explicit request.

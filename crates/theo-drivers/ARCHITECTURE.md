@@ -1,20 +1,24 @@
 # theo-drivers
 
 HAL-independent drivers for the Theo Pod hardware. The crate is `no_std`,
-depends only on `embedded-hal` / `embedded-hal-async` (plus `bytemuck` for
-safe pixel-to-byte views), and is unit-tested on the host (`just test`).
+depends only on `embedded-hal` / `embedded-hal-async`, and is unit-tested on the host (`just test`).
+See `docs/adr/0001` and `0002` for why.
 
 ## Contents
 
-- `panel.rs`: `Panel` trait, the pixel-stream abstraction the Slint backend
-  renders into (open an area, then stream big-endian RGB565 rows).
-- `frame.rs`: `FrameStreamer`, which turns a line renderer's output into one
-  full-panel area per frame (line order, full width, big-endian RGB565).
-- `qspi.rs`: `QspiBus` trait (8-bit opcode, 24-bit address, single or quad
-  data). `embedded-hal` has no Quad-SPI trait, hence this local one.
+- `panel.rs`: async `Panel` trait (open an area, stream big-endian RGB565).
+- `framebuffer.rs`: `flush_rows`, which sends dirty rows of a full-panel
+  framebuffer as one full-width, even-row-aligned area.
+- `qspi.rs`: async `QspiBus` trait (8-bit opcode, 24-bit address, single or
+  quad data, `MAX_TRANSFER_LEN`). `embedded-hal` has no Quad-SPI trait.
 - `co5300.rs`: CO5300 AMOLED controller. Implements `Panel` over any
-  `QspiBus`; validates geometry, 2x2 area alignment, and pixel counts.
-- `tca9554.rs`: TCA9554 I2C I/O expander over `embedded_hal::i2c::I2c`.
+  `QspiBus`; validates geometry, 2x2 alignment and pixel counts, and splits
+  pixel payloads into bus-sized transfers.
+- `tca9554.rs`: TCA9554 I/O expander, per pin (`Pin`) or by mask; every
+  change is a read-modify-write, outputs latch levels before direction.
+- `panel_power.rs`: `PanelPower`, the panel rail/reset pulse through the
+  expander. Board values live in `src/device/`.
+- `button.rs`: `DebouncedButton`, cancel-safe debounced press/release.
 
 ## Extension points
 
@@ -28,10 +32,8 @@ safe pixel-to-byte views), and is unit-tested on the host (`just test`).
 
 ## Tests
 
-Side-by-side `*_tests.rs` files use recording `QspiBus` and `Panel` fakes
-from `test_support.rs`. Regression tests cover the driver's opcode and lane
-choices, the CO5300 2x2 alignment rule, and full-frame streaming.
-
-Not covered on the host: the single-line command/address phases are set by
-the `QspiBus` implementation (`src/device/esp_qspi.rs`) and are only verified
-on hardware.
+Side-by-side `*_tests.rs` files use fakes from `test_support.rs`: recording
+`QspiBus` and `Panel`, and `FakeTca9554`, which models the chip's registers
+and replays which pins are driven low. Not covered on the host: the
+single-line command/address phases and DMA behaviour of
+`src/device/esp_qspi.rs`, only verified on hardware.

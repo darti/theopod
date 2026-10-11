@@ -140,7 +140,7 @@ fn init_bus_failure_returns_bus_error_and_stops() {
 fn begin_area_applies_column_offset_and_inclusive_ends() {
     let mut panel = panel();
 
-    panel.begin_area(0..2, 4..6).unwrap();
+    block_on(panel.begin_area(0..2, 4..6)).unwrap();
 
     assert_that!(panel.release().transfers).is_equal_to(vec![
         Transfer::register(0x2A, &[0x00, 0x10, 0x00, 0x11]),
@@ -153,7 +153,7 @@ fn begin_area_applies_column_offset_and_inclusive_ends() {
 fn begin_area_full_panel_spans_offset_columns() {
     let mut panel = panel();
 
-    panel.begin_area(0..368, 0..448).unwrap();
+    block_on(panel.begin_area(0..368, 0..448)).unwrap();
 
     let transfers = panel.release().transfers;
     // Columns 16..=383 and rows 0..=447.
@@ -167,7 +167,7 @@ fn begin_area_full_panel_spans_offset_columns() {
 fn begin_area_single_row_returns_invalid_area() {
     let mut panel = panel();
 
-    let result = panel.begin_area(0..368, 4..5);
+    let result = block_on(panel.begin_area(0..368, 4..5));
 
     assert_that!(result.err()).is_equal_to(Some(Error::InvalidArea { x: 0..368, y: 4..5 }));
     assert_that!(panel.release().transfers.is_empty()).is_true();
@@ -177,7 +177,7 @@ fn begin_area_single_row_returns_invalid_area() {
 fn begin_area_odd_start_returns_invalid_area() {
     let mut panel = panel();
 
-    let result = panel.begin_area(1..3, 0..2);
+    let result = block_on(panel.begin_area(1..3, 0..2));
 
     assert_that!(result.err()).is_equal_to(Some(Error::InvalidArea { x: 1..3, y: 0..2 }));
 }
@@ -186,7 +186,7 @@ fn begin_area_odd_start_returns_invalid_area() {
 fn begin_area_odd_column_count_returns_invalid_area() {
     let mut panel = panel();
 
-    let result = panel.begin_area(0..3, 0..2);
+    let result = block_on(panel.begin_area(0..3, 0..2));
 
     assert_that!(result.err()).is_equal_to(Some(Error::InvalidArea { x: 0..3, y: 0..2 }));
 }
@@ -195,7 +195,7 @@ fn begin_area_odd_column_count_returns_invalid_area() {
 fn begin_area_empty_returns_invalid_area() {
     let mut panel = panel();
 
-    let result = panel.begin_area(0..0, 0..2);
+    let result = block_on(panel.begin_area(0..0, 0..2));
 
     assert_that!(result.err()).is_equal_to(Some(Error::InvalidArea { x: 0..0, y: 0..2 }));
 }
@@ -204,7 +204,7 @@ fn begin_area_empty_returns_invalid_area() {
 fn begin_area_beyond_panel_returns_invalid_area() {
     let mut panel = panel();
 
-    let result = panel.begin_area(0..370, 0..2);
+    let result = block_on(panel.begin_area(0..370, 0..2));
 
     assert_that!(result.err()).is_equal_to(Some(Error::InvalidArea { x: 0..370, y: 0..2 }));
 }
@@ -212,10 +212,10 @@ fn begin_area_beyond_panel_returns_invalid_area() {
 #[test]
 fn begin_area_bus_failure_closes_previous_area() {
     let mut panel = Co5300::new(RecordingBus::failing(3), GEOMETRY).unwrap();
-    panel.begin_area(0..2, 0..2).unwrap();
+    block_on(panel.begin_area(0..2, 0..2)).unwrap();
 
-    let reopened = panel.begin_area(0..2, 0..2);
-    let result = panel.write_pixels(&[0; 2]);
+    let reopened = block_on(panel.begin_area(0..2, 0..2));
+    let result = block_on(panel.write_pixels(&[0; 2]));
 
     assert_that!(reopened.err()).is_equal_to(Some(Error::Bus(BusFault)));
     assert_that!(result.err()).is_equal_to(Some(Error::PixelOverflow {
@@ -230,9 +230,9 @@ fn begin_area_bus_failure_closes_previous_area() {
 #[test]
 fn write_pixels_sends_quad_data_with_memory_write_continue() {
     let mut panel = panel();
-    panel.begin_area(0..2, 0..2).unwrap();
+    block_on(panel.begin_area(0..2, 0..2)).unwrap();
 
-    panel.write_pixels(&[0xF8, 0x00, 0x07, 0xE0]).unwrap();
+    block_on(panel.write_pixels(&[0xF8, 0x00, 0x07, 0xE0])).unwrap();
 
     let transfers = panel.release().transfers;
     assert_that!(transfers.last().cloned())
@@ -240,14 +240,60 @@ fn write_pixels_sends_quad_data_with_memory_write_continue() {
         .is_equal_to(Transfer::pixels(&[0xF8, 0x00, 0x07, 0xE0]));
 }
 
+// `RecordingBus` accepts at most 16 bytes per transfer.
+#[test]
+fn write_pixels_longer_than_bus_limit_splits_into_transfers() {
+    let mut panel = panel();
+    block_on(panel.begin_area(0..4, 0..4)).unwrap();
+    let pixels: Vec<u8> = (0..32).collect();
+
+    block_on(panel.write_pixels(&pixels)).unwrap();
+
+    let transfers = panel.release().transfers;
+    assert_that!(transfers[3..].to_vec()).is_equal_to(vec![
+        Transfer::pixels(&pixels[..16]),
+        Transfer::pixels(&pixels[16..]),
+    ]);
+}
+
+#[test]
+fn write_pixels_non_multiple_of_bus_limit_sends_remainder_last() {
+    let mut panel = panel();
+    block_on(panel.begin_area(0..4, 0..4)).unwrap();
+    let pixels: Vec<u8> = (0..18).collect();
+
+    block_on(panel.write_pixels(&pixels)).unwrap();
+
+    let transfers = panel.release().transfers;
+    assert_that!(transfers[3..].to_vec()).is_equal_to(vec![
+        Transfer::pixels(&pixels[..16]),
+        Transfer::pixels(&pixels[16..]),
+    ]);
+}
+
+#[test]
+fn write_pixels_failure_after_first_chunk_keeps_sent_bytes_counted() {
+    let mut panel = Co5300::new(RecordingBus::failing(4), GEOMETRY).unwrap();
+    block_on(panel.begin_area(0..4, 0..4)).unwrap();
+
+    let failed = block_on(panel.write_pixels(&[0; 32]));
+    let result = block_on(panel.write_pixels(&[0; 18]));
+
+    assert_that!(failed.err()).is_equal_to(Some(Error::Bus(BusFault)));
+    assert_that!(result.err()).is_equal_to(Some(Error::PixelOverflow {
+        remaining: 16,
+        submitted: 18,
+    }));
+}
+
 #[test]
 fn write_pixels_after_area_filled_returns_pixel_overflow() {
     let mut panel = panel();
-    panel.begin_area(0..2, 0..2).unwrap();
-    panel.write_pixels(&[0; 4]).unwrap();
-    panel.write_pixels(&[0; 4]).unwrap();
+    block_on(panel.begin_area(0..2, 0..2)).unwrap();
+    block_on(panel.write_pixels(&[0; 4])).unwrap();
+    block_on(panel.write_pixels(&[0; 4])).unwrap();
 
-    let result = panel.write_pixels(&[0; 2]);
+    let result = block_on(panel.write_pixels(&[0; 2]));
 
     assert_that!(result.err()).is_equal_to(Some(Error::PixelOverflow {
         remaining: 0,
@@ -258,10 +304,10 @@ fn write_pixels_after_area_filled_returns_pixel_overflow() {
 #[test]
 fn write_pixels_bus_failure_keeps_remaining_budget() {
     let mut panel = Co5300::new(RecordingBus::failing(3), GEOMETRY).unwrap();
-    panel.begin_area(0..2, 0..2).unwrap();
+    block_on(panel.begin_area(0..2, 0..2)).unwrap();
 
-    let failed = panel.write_pixels(&[0; 8]);
-    let retried = panel.write_pixels(&[0; 8]);
+    let failed = block_on(panel.write_pixels(&[0; 8]));
+    let retried = block_on(panel.write_pixels(&[0; 8]));
 
     assert_that!(failed.err()).is_equal_to(Some(Error::Bus(BusFault)));
     assert_that!(retried).is_ok();
@@ -270,9 +316,9 @@ fn write_pixels_bus_failure_keeps_remaining_budget() {
 #[test]
 fn write_pixels_past_area_end_returns_pixel_overflow() {
     let mut panel = panel();
-    panel.begin_area(0..2, 0..2).unwrap();
+    block_on(panel.begin_area(0..2, 0..2)).unwrap();
 
-    let result = panel.write_pixels(&[0; 10]);
+    let result = block_on(panel.write_pixels(&[0; 10]));
 
     assert_that!(result.err()).is_equal_to(Some(Error::PixelOverflow {
         remaining: 8,
@@ -284,7 +330,7 @@ fn write_pixels_past_area_end_returns_pixel_overflow() {
 fn write_pixels_without_open_area_returns_pixel_overflow() {
     let mut panel = panel();
 
-    let result = panel.write_pixels(&[0; 2]);
+    let result = block_on(panel.write_pixels(&[0; 2]));
 
     assert_that!(result.err()).is_equal_to(Some(Error::PixelOverflow {
         remaining: 0,
@@ -295,9 +341,9 @@ fn write_pixels_without_open_area_returns_pixel_overflow() {
 #[test]
 fn write_pixels_odd_byte_count_returns_pixel_overflow() {
     let mut panel = panel();
-    panel.begin_area(0..2, 0..2).unwrap();
+    block_on(panel.begin_area(0..2, 0..2)).unwrap();
 
-    let result = panel.write_pixels(&[0; 3]);
+    let result = block_on(panel.write_pixels(&[0; 3]));
 
     assert_that!(result.err()).is_equal_to(Some(Error::PixelOverflow {
         remaining: 8,

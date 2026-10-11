@@ -13,9 +13,10 @@ the ESP toolchain and target are defined in `rust-toolchain.toml`.
   frequency, and the TCA9554 power-up values are defined in
   `src/device/mod.rs`, the single source of truth for board wiring; the
   power-up sequence itself is `PanelPower` in `crates/theo-drivers`. The
-  touch reset (TCA9554 EXIO2) and the shared async I2C bus (`Board::i2c`,
-  ADR-0005) are there too. Do not assume the other touch or audio pin
-  assignments: they are not yet documented or implemented.
+  CST820 touch wiring (I2C 0x15, reset on TCA9554 EXIO2, interrupt on
+  GPIO21) and the shared async I2C bus (ADR-0005) are there too. Do not
+  assume the audio pin assignments: they are not yet documented or
+  implemented.
 - Keep ESP- and board-specific code in `src/device/`. Drivers in
   `crates/theo-drivers` must stay HAL-independent (`embedded-hal` and
   `embedded-hal-async` traits and `QspiBus` only) and keep their host unit tests passing.

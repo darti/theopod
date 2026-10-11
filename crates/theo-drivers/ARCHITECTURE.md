@@ -19,6 +19,10 @@ See `docs/adr/0001` and `0002` for why.
   before direction.
 - `panel_power.rs`: `PanelPower`, the panel rail/reset pulse through the
   expander. Board values live in `src/device/`.
+- `cst820.rs`: `Cst820` touch controller over async I2C; pulses its reset
+  through a `Tca9554` pin, waits for the interrupt edge while idle and
+  polls while touched; rejects reports off the panel, and cancels (rather
+  than releases) a touch whose read fails.
 - `button.rs`: `DebouncedButton`, cancel-safe debounced press/release.
 
 ## Extension points
@@ -35,8 +39,9 @@ See `docs/adr/0001` and `0002` for why.
 
 Side-by-side `*_tests.rs` files use fakes from `test_support.rs`: recording
 `QspiBus` and `Panel`, `AddressBus` (where pixel payloads start, at a real
-transfer size), and `FakeTca9554`, an async I2C bus that models the chip's
+transfer size), `FakeTca9554`, an async I2C bus that models the chip's
 registers, replays which pins are driven low, and can fail or suspend
-transactions. Not covered on the host: the single-line command/address
-phases and DMA behaviour of `src/device/esp_qspi.rs` and
-`src/device/psram_tx_buf.rs`, only verified on hardware.
+transactions, and `FakeCst820`, which replays scripted touch reports. Not
+covered on the host: the single-line command/address phases and DMA
+behaviour of `src/device/esp_qspi.rs` and `src/device/psram_tx_buf.rs`,
+and the CST820 timing, only verified on hardware.

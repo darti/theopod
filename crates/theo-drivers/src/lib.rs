@@ -8,6 +8,9 @@
 //! - [`flush_rows`], [`FlushError`]: sends dirty framebuffer rows to a [`Panel`].
 //! - [`QspiBus`], [`Lanes`]: Quad-SPI transport for display controllers.
 //! - [`Co5300`], [`PanelGeometry`], [`Co5300Error`]: CO5300 AMOLED controller.
+//! - [`Cst820`], [`TouchEvent`], [`TouchPoint`], [`PanelSize`],
+//!   [`Cst820Error`], [`Cst820InitError`]: CST820 capacitive touch
+//!   controller, interrupt-driven.
 //! - [`Tca9554`], [`ExpanderPin`]: TCA9554 async I2C I/O expander with per-pin access.
 //! - [`PanelPower`]: panel rail/reset power-up through the expander.
 
@@ -15,6 +18,7 @@
 
 pub mod button;
 pub mod co5300;
+pub mod cst820;
 pub mod framebuffer;
 pub mod panel;
 pub mod panel_power;
@@ -26,6 +30,8 @@ mod button_tests;
 #[cfg(test)]
 mod co5300_tests;
 #[cfg(test)]
+mod cst820_tests;
+#[cfg(test)]
 mod framebuffer_tests;
 #[cfg(test)]
 mod panel_power_tests;
@@ -36,6 +42,9 @@ mod test_support;
 
 pub use button::{ButtonEvent, DebouncedButton};
 pub use co5300::{Co5300, Error as Co5300Error, PanelGeometry};
+pub use cst820::{
+    Cst820, Error as Cst820Error, InitError as Cst820InitError, PanelSize, TouchEvent, TouchPoint,
+};
 pub use framebuffer::{FlushError, flush_rows};
 pub use panel::Panel;
 pub use panel_power::PanelPower;

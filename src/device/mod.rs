@@ -5,6 +5,7 @@
 //! - [`Display`]: concrete display type of this board; implements
 //!   [`theo_drivers::Panel`].
 //! - [`Button`]: the BOOT push button, debounced.
+//! - [`Touch`]: the CST820 touch controller.
 //! - [`I2cBus`], [`I2cDevice`]: the async I2C bus shared by the TCA9554
 //!   expander and the touch controller, and one device's handle on it.
 //! - [`log_heap_usage`]: logs internal RAM and PSRAM heap usage.
@@ -43,7 +44,9 @@ use esp_hal::{
 
 use self::{esp_qspi::EspQspi, psram_tx_buf::PsramTxBuf};
 use embedded_hal::digital::PinState;
-use theo_drivers::{Co5300, DebouncedButton, ExpanderPin, PanelGeometry, PanelPower, Tca9554};
+use theo_drivers::{
+    Co5300, Cst820, DebouncedButton, ExpanderPin, PanelGeometry, PanelPower, PanelSize, Tca9554,
+};
 
 pub use esp_hal::main as entry;
 
@@ -69,6 +72,8 @@ const PANEL_POWER: PanelPower = PanelPower {
 };
 /// Touch controller reset, active low (Waveshare `TOUCH_RST`).
 const TOUCH_RESET: ExpanderPin = ExpanderPin::P2;
+/// CST820 I2C address (Waveshare `board_variant.c`, probed as CST816).
+const TOUCH_ADDRESS: u8 = 0x15;
 /// 368 x 448 AMOLED panel, first visible column 16 in CO5300 RAM. Keep in
 /// sync with `PANEL` in `crates/theo-drivers/src/framebuffer_tests.rs`.
 const DISPLAY_GEOMETRY: PanelGeometry = PanelGeometry {
@@ -95,6 +100,10 @@ pub type Display = Co5300<EspQspi<'static, Output<'static>>>;
 /// BOOT button on GPIO0 (pulled up, low while pressed).
 pub type Button = DebouncedButton<Input<'static>, Delay>;
 
+/// CST820 touch controller; interrupt on GPIO21 (Waveshare BSP
+/// `BSP_LCD_TOUCH_INT`, active low), points in panel pixels.
+pub type Touch = Cst820<I2cDevice, Input<'static>, Delay>;
+
 /// I2C0 on GPIO15 (SDA) / GPIO14 (SCL), locked per transaction.
 ///
 /// The TCA9554 expander (0x20) and the touch controller share it.
@@ -102,9 +111,9 @@ pub type I2cBus = Mutex<CriticalSectionRawMutex, I2c<'static, Async>>;
 
 /// One device's handle on [`I2cBus`]; implements `embedded-hal-async` I2C.
 ///
-/// Create one per driver with `I2cDevice::new(board.i2c)`. Drive the
-/// expander from a single task: its read-modify-writes are not atomic
-/// across handles.
+/// `Board::init` creates one per driver from the leaked bus. The expander
+/// is only driven there: its read-modify-writes are not atomic across
+/// handles, so a runtime user must become its single owner (ADR-0005).
 pub type I2cDevice = SharedI2cDevice<'static, CriticalSectionRawMutex, I2c<'static, Async>>;
 
 /// Board peripherals initialized and ready to use.
@@ -113,9 +122,9 @@ pub struct Board {
     pub display: Display,
     /// BOOT push button.
     pub button: Button,
-    /// Shared I2C bus, for the touch controller and the expander.
-    #[expect(dead_code, reason = "MVP: t-19 the touch driver reads it")]
-    pub i2c: &'static I2cBus,
+    /// Touch controller; reset and with its interrupts enabled unless its
+    /// init failed (logged).
+    pub touch: Touch,
     /// Zeroed framebuffer in PSRAM: one pixel per display pixel, row-major,
     /// sized from [`Display`]'s geometry. Each `u16` slot holds big-endian
     /// RGB565 bytes (the panel's order), not a native-endian value.
@@ -127,8 +136,9 @@ impl fmt::Debug for Board {
         f.debug_struct("Board")
             .field("display", &self.display)
             .field("button", &self.button)
-            // Not `self.i2c`: the field stays unread until t-19 (see its `expect`).
-            .field("i2c", &format_args!("I2cBus"))
+            // `Cst820`'s derived `Debug` needs `I2cDevice: Debug`, which the
+            // shared-bus handle does not implement.
+            .field("touch", &format_args!("Touch"))
             .field("frame_pixels", &self.frame.len())
             .finish()
     }
@@ -136,13 +146,16 @@ impl fmt::Debug for Board {
 
 impl Board {
     /// Starts the chip, heaps, logger and scheduler, then brings up the
-    /// display and allocates its framebuffer in PSRAM.
+    /// display, its PSRAM framebuffer and the touch controller.
     ///
-    /// The touch controller is left out of reset, for its driver to pulse.
+    /// The expander is only driven here: after boot no task holds it, so
+    /// its read-modify-writes cannot race (ADR-0005).
     ///
     /// # Panics
     ///
     /// Panics if a bring-up step fails: the board cannot run without it.
+    /// A touch controller that fails to start is only logged: the display
+    /// and the BOOT button still work.
     pub async fn init() -> Self {
         esp_alloc::heap_allocator!(size: HEAP_SIZE);
         esp_println::logger::init_logger_from_env();
@@ -170,12 +183,23 @@ impl Board {
             .await
             .unwrap();
         // After the panel rails, as Waveshare's `board_variant.c` does.
-        // `configure_output` latches the level before the direction, so the
-        // touch reset never glitches low; t-19 pulses it.
-        expander
-            .configure_output(TOUCH_RESET, PinState::High)
-            .await
-            .unwrap();
+        let touch_interrupt = Input::new(
+            peripherals.GPIO21,
+            InputConfig::default().with_pull(Pull::Up),
+        );
+        let mut touch = Cst820::new(
+            I2cDevice::new(i2c),
+            TOUCH_ADDRESS,
+            touch_interrupt,
+            Delay,
+            PanelSize {
+                width: DISPLAY_GEOMETRY.width,
+                height: DISPLAY_GEOMETRY.height,
+            },
+        );
+        if let Err(error) = touch.init(&mut expander, TOUCH_RESET).await {
+            log::error!("touch controller init failed: {error}");
+        }
 
         let pixels = usize::from(DISPLAY_GEOMETRY.width) * usize::from(DISPLAY_GEOMETRY.height);
         // Burst-aligned, so the display DMA reads it in whole bursts
@@ -230,7 +254,7 @@ impl Board {
         Self {
             display,
             button,
-            i2c,
+            touch,
             frame,
         }
     }

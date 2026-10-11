@@ -13,15 +13,17 @@ This firmware targets the V2 hardware. The display is implemented: the
 CO5300 is driven over QSPI and its rails are cycled through the TCA9554 I/O
 expander. Slint renders into a framebuffer in PSRAM and only the dirty rows
 are sent to the panel by async DMA. The BOOT button (GPIO0) is forwarded to
-the UI as the Return key. The pin assignments live in `src/device/mod.rs`.
-Touch, audio, and the other peripherals are not implemented yet. Refer to the
+the UI as the Return key, and touches on the CST820 (I²C 0x15, interrupt on
+GPIO21) as pointer events. The pin assignments live in `src/device/mod.rs`.
+Audio and the other peripherals are not implemented yet. Refer to the
 [Waveshare ESP32-S3-Touch-AMOLED-1.8 documentation](https://docs.waveshare.com/ESP32-S3-Touch-AMOLED-1.8)
 for the V2 pinout and hardware resources.
 
 ## Layout
 
-- `src/main.rs`: Slint event loop and the BOOT button task; talks to the
-  board only through the `device` module and `theo-drivers` types.
+- `src/main.rs`: Slint event loop and the BOOT button and touch tasks;
+  talks to the board only through the `device` module and `theo-drivers`
+  types.
 - `src/device/`: everything specific to the ESP32-S3 and this board (chip
   runtime, heaps and PSRAM, logger, pins, panel geometry, esp-hal QSPI DMA
   transport, BOOT button, shared async I2C bus).

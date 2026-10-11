@@ -1,25 +1,27 @@
 # Theo Pod
 
-Squelette Rust `no_std` pour l’ESP32-S3-Touch-ePaper-1.54.
+Rust `no_std` firmware skeleton for the ESP32-S3-Touch-ePaper-1.54.
 
-## Préparation
+## Setup
 
 ```sh
 just install
 ```
 
-La configuration de Cargo dans `.cargo/config.toml` fournit automatiquement
-les chemins nécessaires à la toolchain ESP. Aucun `export-esp.sh` n'est requis.
+The Cargo configuration in `.cargo/config.toml` automatically provides the
+paths required by the ESP toolchain. No `export-esp.sh` is needed.
 
-## Compiler et flasher
+## Build and flash
 
 ```sh
 just check
 just build
-just flash                         # détection automatique du port
-just flash /dev/cu.usbmodemXXXX   # port explicite
+just flash                         # automatically detect the port
+just flash /dev/cu.usbmodemXXXX   # specify the port
 just monitor /dev/cu.usbmodemXXXX
-just run /dev/cu.usbmodemXXXX     # flash puis moniteur série
+just run /dev/cu.usbmodemXXXX     # flash and start the serial monitor
 ```
 
-Le firmware écrit actuellement `Hello world !` sur la sortie série. Le brochage exact de la carte sera ajouté avant les pilotes e-paper, tactile et audio.
+The firmware currently writes `Hello world !` to the serial output. The exact
+board pin assignments will be documented before the e-paper, touch, and audio
+drivers are added.

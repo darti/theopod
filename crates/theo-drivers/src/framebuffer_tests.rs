@@ -3,7 +3,9 @@ use speculoos::prelude::*;
 use crate::{
     co5300::{Co5300, PanelGeometry},
     framebuffer::{FlushError, flush_rows},
-    test_support::{BusFault, PanelCall, RecordingBus, RecordingPanel, Transfer, block_on},
+    test_support::{
+        AddressBus, BusFault, PanelCall, RecordingBus, RecordingPanel, Transfer, block_on,
+    },
 };
 
 const WIDTH: u16 = 2;
@@ -166,4 +168,42 @@ fn flush_error_display_describes_size_mismatch() {
     .to_string();
 
     assert_that!(message.as_str()).is_equal_to("frame holds 8 bytes, panel needs 24");
+}
+
+/// Firmware panel and transfer size: keep in sync with `DISPLAY_GEOMETRY`
+/// in `src/device/mod.rs` and `MAX_TRANSFER_LEN` in `src/device/esp_qspi.rs`.
+/// The firmware DMA reads each pixel transfer from where it starts, so starts
+/// must follow a fixed stride.
+const PANEL: PanelGeometry = PanelGeometry {
+    width: 368,
+    height: 448,
+    column_offset: 16,
+};
+const PANEL_TRANSFER: usize = 32_704;
+
+#[test]
+fn flush_rows_pixel_transfers_start_at_even_row_plus_whole_chunks() {
+    let row_bytes = usize::from(PANEL.width) * 2;
+    let frame = vec![0u8; row_bytes * usize::from(PANEL.height)];
+    for rows in [0..448, 1..2, 43..47, 301..448, 447..448] {
+        let mut panel = Co5300::new(AddressBus::<PANEL_TRANSFER>::default(), PANEL).unwrap();
+
+        block_on(flush_rows(&mut panel, &frame, rows.clone())).unwrap();
+
+        let band_start = usize::from(rows.start & !1) * row_bytes;
+        let band_end = usize::from(rows.end.next_multiple_of(2)) * row_bytes;
+        let transfers: Vec<(usize, usize)> = panel
+            .release()
+            .pixels
+            .iter()
+            .map(|&(address, len)| (address - frame.as_ptr() as usize, len))
+            .collect();
+        let expected: Vec<(usize, usize)> = (band_start..band_end)
+            .step_by(PANEL_TRANSFER)
+            .map(|offset| (offset, (band_end - offset).min(PANEL_TRANSFER)))
+            .collect();
+        assert_that!(transfers)
+            .named(&format!("rows {rows:?}"))
+            .is_equal_to(expected);
+    }
 }

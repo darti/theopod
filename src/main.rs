@@ -77,7 +77,8 @@ async fn main(spawner: Spawner) {
     // Showing the window is what requests the first redraw.
     ui.show().unwrap();
 
-    let mut resend_all = false;
+    // Consecutive failed flushes; while non-zero, every frame is resent.
+    let mut failed_flushes: u32 = 0;
     let mut first_frame_sent = false;
     // Dump the first frame, then the frame after each BOOT press.
     #[cfg(feature = "frame-dump")]
@@ -87,13 +88,16 @@ async fn main(spawner: Spawner) {
         slint::platform::update_timers_and_animations();
         let mut dirty = 0..0;
         window.draw_if_needed(|renderer| dirty = frame.render(renderer));
-        if resend_all {
+        if failed_flushes > 0 {
             dirty = frame.all_rows();
         }
         let sending = !dirty.is_empty();
         match flush_rows(&mut display, frame.as_bytes(), dirty).await {
             Ok(()) => {
-                resend_all = false;
+                if failed_flushes > 0 {
+                    log::info!("frame flush recovered after {failed_flushes} failed attempts");
+                }
+                failed_flushes = 0;
                 if sending && !first_frame_sent {
                     first_frame_sent = true;
                     // Slint's allocations are in place once a frame is out.
@@ -107,12 +111,15 @@ async fn main(spawner: Spawner) {
             }
             Err(error) => {
                 // The framebuffer is still right; only the panel is stale.
-                log::error!("frame flush failed, resending the full frame: {error}");
-                resend_all = true;
+                // Retry every frame period, logging once per failure streak.
+                if failed_flushes == 0 {
+                    log::error!("frame flush failed, resending the full frame: {error}");
+                }
+                failed_flushes = failed_flushes.saturating_add(1);
             }
         }
 
-        let wake_up = Timer::at(next_wake_up(&window, frame_start, resend_all));
+        let wake_up = Timer::at(next_wake_up(&window, frame_start, failed_flushes > 0));
         match select(wake_up, BUTTON_EVENTS.receive()).await {
             Either::First(()) => {}
             Either::Second(event) => {

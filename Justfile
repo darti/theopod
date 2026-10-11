@@ -47,12 +47,6 @@ flash-monitor port="":
 flash-dump log="target/frame.log" port="":
     LIBCLANG_PATH="{{libclang_path}}" PATH="{{gcc_path}}:${PATH}" RUSTUP_TOOLCHAIN=esp cargo espflash flash --release --features frame-dump --monitor --non-interactive --chip {{chip}} {{ if port != "" { "--port " + port } else { "" } }} | tee {{log}}
 
-# Like `flash-dump`, with the t-4 PSRAM DMA experiment: the DMA reads the
-# framebuffer in place, and the dump shows PSRAM itself. `variant` is
-# `psram-direct` or `psram-writeback-locked`.
-flash-dump-psram variant="psram-direct" log="target/frame.log" port="":
-    LIBCLANG_PATH="{{libclang_path}}" PATH="{{gcc_path}}:${PATH}" RUSTUP_TOOLCHAIN=esp cargo espflash flash --release --features frame-dump,{{variant}} --monitor --non-interactive --chip {{chip}} {{ if port != "" { "--port " + port } else { "" } }} | tee {{log}}
-
 # Record the serial log to a file, e.g. for dumps triggered by BOOT presses.
 monitor-log log="target/frame.log" port="":
     LIBCLANG_PATH="{{libclang_path}}" PATH="{{gcc_path}}:${PATH}" RUSTUP_TOOLCHAIN=esp cargo espflash monitor --non-interactive --chip {{chip}} {{ if port != "" { "--port " + port } else { "" } }} | tee {{log}}

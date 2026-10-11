@@ -41,7 +41,7 @@ rust-version.workspace = true
 [dependencies]
 allocator-api2.workspace = true
 bytemuck.workspace = true
-critical-section = { workspace = true, optional = true }
+critical-section.workspace = true
 embassy-embedded-hal.workspace = true
 embassy-executor.workspace = true
 embassy-futures.workspace = true
@@ -64,13 +64,6 @@ theo-frame-dump = { workspace = true, optional = true }
 # Prints the framebuffer to the serial log after the first frame and after
 # each BOOT press; `just frame-png` turns the log into a PNG.
 frame-dump = ["dep:theo-frame-dump"]
-# Investigation of t-4 (ADR-0004): the display DMA reads the PSRAM
-# framebuffer in place instead of the internal-RAM bounce buffer. With
-# `frame-dump`, the dump shows PSRAM itself (cache invalidated first).
-psram-direct = []
-# With `psram-direct`: write the frame back with interrupts disabled, as
-# ESP-IDF does for the S3 cache write-back errata, before each transfer.
-psram-writeback-locked = ["psram-direct", "dep:critical-section"]
 
 [build-dependencies]
 slint-build.workspace = true

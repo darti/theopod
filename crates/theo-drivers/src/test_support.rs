@@ -1,6 +1,7 @@
 //! Host-side fakes for driver tests.
 //!
 //! - [`RecordingBus`]: [`QspiBus`] that records every transfer.
+//! - [`AddressBus`]: [`QspiBus`] that records where pixel payloads start.
 //! - [`RecordingPanel`]: [`Panel`] that records every call.
 //! - [`FakeTca9554`]: async I2C bus modelling a TCA9554's registers; can
 //!   fail reads or writes and suspend once per transaction.
@@ -22,6 +23,7 @@ use embedded_hal_async::{
 };
 
 use crate::{
+    co5300::OPCODE_WRITE_PIXELS,
     panel::Panel,
     qspi::{Lanes, QspiBus},
 };
@@ -109,6 +111,40 @@ impl QspiBus for RecordingBus {
             lanes,
             data: data.to_vec(),
         });
+        Ok(())
+    }
+}
+
+/// QSPI bus that records the address of every pixel payload.
+///
+/// `MAX` sets `MAX_TRANSFER_LEN`, so tests can use a real transfer size
+/// without copying the payloads.
+#[derive(Debug, Default)]
+pub struct AddressBus<const MAX: usize> {
+    /// Start address and length of each pixel payload, in order.
+    pub pixels: Vec<(usize, usize)>,
+}
+
+impl<const MAX: usize> QspiBus for AddressBus<MAX> {
+    type Error = BusFault;
+
+    const MAX_TRANSFER_LEN: usize = MAX;
+
+    async fn write(
+        &mut self,
+        opcode: u8,
+        _address: u32,
+        _lanes: Lanes,
+        data: &[u8],
+    ) -> Result<(), Self::Error> {
+        assert!(
+            data.len() <= MAX,
+            "{} bytes exceed MAX_TRANSFER_LEN",
+            data.len()
+        );
+        if opcode == OPCODE_WRITE_PIXELS {
+            self.pixels.push((data.as_ptr() as usize, data.len()));
+        }
         Ok(())
     }
 }

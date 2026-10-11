@@ -17,8 +17,7 @@
 //! implements [`theo_drivers::Panel`].
 
 mod esp_qspi;
-#[cfg(feature = "psram-direct")]
-mod psram_cache;
+mod psram_tx_buf;
 
 use core::fmt;
 
@@ -33,7 +32,7 @@ use esp_hal::{
     Async,
     gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull},
     i2c::master::{Config as I2cConfig, I2c},
-    psram::{PsramConfig, PsramMode},
+    psram::{PsramConfig, PsramMode, SpiRamFreq},
     spi::{
         Mode,
         master::{Config as SpiConfig, Spi},
@@ -42,7 +41,7 @@ use esp_hal::{
     timer::timg::TimerGroup,
 };
 
-use self::esp_qspi::EspQspi;
+use self::{esp_qspi::EspQspi, psram_tx_buf::PsramTxBuf};
 use embedded_hal::digital::PinState;
 use theo_drivers::{Co5300, DebouncedButton, ExpanderPin, PanelGeometry, PanelPower, Tca9554};
 
@@ -55,6 +54,9 @@ const HEAP_SIZE: usize = 64 * 1024;
 /// The ESP32-S3R8 module carries 8 MB of octal PSRAM; auto-detection is
 /// less reliable than naming the mode.
 const PSRAM_MODE: PsramMode = PsramMode::OctalSpi;
+/// Twice esp-hal's 40 MHz default: at 40 MHz the display DMA, sharing PSRAM
+/// with the CPU caches, fell behind the SPI (ADR-0004).
+const PSRAM_FREQUENCY: SpiRamFreq = SpiRamFreq::Freq80m;
 
 const TCA9554_ADDRESS: u8 = 0x20;
 /// EXIO0 is the panel reset, EXIO1 its power enable (Waveshare
@@ -67,12 +69,19 @@ const PANEL_POWER: PanelPower = PanelPower {
 };
 /// Touch controller reset, active low (Waveshare `TOUCH_RST`).
 const TOUCH_RESET: ExpanderPin = ExpanderPin::P2;
-/// 368 x 448 AMOLED panel, first visible column 16 in CO5300 RAM.
+/// 368 x 448 AMOLED panel, first visible column 16 in CO5300 RAM. Keep in
+/// sync with `PANEL` in `crates/theo-drivers/src/framebuffer_tests.rs`.
 const DISPLAY_GEOMETRY: PanelGeometry = PanelGeometry {
     width: 368,
     height: 448,
     column_offset: 16,
 };
+// `flush_rows` starts transfers on even rows: two rows must be whole PSRAM
+// bursts, or `EspQspi` refuses framebuffer transfers as misaligned.
+const _: () = assert!(
+    (2 * DISPLAY_GEOMETRY.width as usize * size_of::<u16>()).is_multiple_of(psram_tx_buf::BURST),
+    "two panel rows must be a multiple of the PSRAM burst"
+);
 const DISPLAY_SPI_FREQUENCY_MHZ: u32 = 40;
 /// Shorter transfers (register writes) go through the 64-byte SPI FIFO,
 /// skipping the DMA setup cost.
@@ -142,6 +151,7 @@ impl Board {
         // spill into PSRAM once internal RAM is full.
         let psram_config = PsramConfig {
             mode: PSRAM_MODE,
+            ram_frequency: PSRAM_FREQUENCY,
             ..PsramConfig::default()
         };
         esp_alloc::psram_allocator!(peripherals.PSRAM, esp_hal::psram, psram_config);
@@ -168,12 +178,24 @@ impl Board {
             .unwrap();
 
         let pixels = usize::from(DISPLAY_GEOMETRY.width) * usize::from(DISPLAY_GEOMETRY.height);
-        let frame = Box::leak(vec![in ExternalMemory; 0u16; pixels].into_boxed_slice());
+        // Burst-aligned, so the display DMA reads it in whole bursts
+        // (`PsramTxBuf`); the padding leaves room to align the start.
+        let frame = {
+            const PAD: usize = psram_tx_buf::BURST / size_of::<u16>();
+            let raw = Box::leak(vec![in ExternalMemory; 0u16; pixels + PAD].into_boxed_slice());
+            let skip = raw.as_ptr().align_offset(psram_tx_buf::BURST);
+            assert!(skip < PAD, "framebuffer cannot be burst-aligned");
+            &mut raw[skip..skip + pixels]
+        };
 
-        // DMA source for the display (see `EspQspi`): a static buffer in
-        // internal RAM, outside the heap. No receive buffer is needed.
-        let (_, _, bounce, _) = esp_hal::dma_buffers!(0, esp_qspi::MAX_TRANSFER_LEN);
+        // Descriptors for framebuffer transfers: static, in internal RAM.
+        let (_, descriptors) = esp_hal::dma_descriptors_chunk_size!(
+            0,
+            esp_qspi::MAX_TRANSFER_LEN,
+            psram_tx_buf::CHUNK
+        );
         let cs = Output::new(peripherals.GPIO12, Level::High, OutputConfig::default());
+        // SPI2: `EspQspi`'s underrun check reads SPI2's registers.
         let spi = Spi::new(
             peripherals.SPI2,
             SpiConfig::default()
@@ -189,9 +211,12 @@ impl Board {
         .with_sio3(peripherals.GPIO7)
         .with_dma(peripherals.DMA_CH0)
         .into_async();
-        let bus = EspQspi::new(spi, cs, bounce);
-        #[cfg(feature = "psram-direct")]
-        let bus = bus.with_in_place(bytemuck::cast_slice(frame));
+        let bus = EspQspi::new(
+            spi,
+            cs,
+            PsramTxBuf::new(descriptors),
+            bytemuck::cast_slice(frame),
+        );
         let mut display = Co5300::new(bus, DISPLAY_GEOMETRY).unwrap();
         display.init(&mut Delay).await.unwrap();
 
@@ -219,10 +244,6 @@ pub fn log_heap_usage() {
 /// Prints `frame` (big-endian RGB565, `width` x `height`) to the serial log.
 #[cfg(feature = "frame-dump")]
 pub fn dump_frame((width, height): (u16, u16), frame: &[u8]) {
-    // The DMA view (t-4): drop cached lines so the dump reads PSRAM itself.
-    // Lines the write-back lost stay lost, on screen and in the framebuffer.
-    #[cfg(feature = "psram-direct")]
-    psram_cache::invalidate_lines(frame);
     log::info!("dumping {width} x {height} frame");
     if let Err(error) =
         theo_frame_dump::write_frame(&mut esp_println::Printer, width, height, frame)

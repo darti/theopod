@@ -34,8 +34,9 @@ See `docs/adr/0001` and `0002` for why.
 ## Tests
 
 Side-by-side `*_tests.rs` files use fakes from `test_support.rs`: recording
-`QspiBus` and `Panel`, and `FakeTca9554`, an async I2C bus that models the
-chip's registers, replays which pins are driven low, and can fail or
-suspend transactions. Not covered on the host: the
-single-line command/address phases and DMA behaviour of
-`src/device/esp_qspi.rs`, only verified on hardware.
+`QspiBus` and `Panel`, `AddressBus` (where pixel payloads start, at a real
+transfer size), and `FakeTca9554`, an async I2C bus that models the chip's
+registers, replays which pins are driven low, and can fail or suspend
+transactions. Not covered on the host: the single-line command/address
+phases and DMA behaviour of `src/device/esp_qspi.rs` and
+`src/device/psram_tx_buf.rs`, only verified on hardware.

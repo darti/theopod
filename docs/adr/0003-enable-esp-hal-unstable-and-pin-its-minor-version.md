@@ -27,9 +27,10 @@ minor release.
   change.
 - Negative: moving to esp-hal 1.3+ is a deliberate upgrade that may require
   code changes in `src/device/`.
-- Negative: `esp_qspi::MAX_TRANSFER_LEN` mirrors esp-hal's private SPI
-  `MAX_DMA_SIZE` (32 736 in 1.2.2); re-check it on every esp-hal upgrade,
-  patch releases included.
+- Negative: `esp_qspi::MAX_TRANSFER_LEN` is derived from esp-hal's private
+  SPI `MAX_DMA_SIZE` (32 736 in 1.2.2, rounded down to 64-byte bursts);
+  re-check it on every esp-hal upgrade, patch releases included, with its
+  copy `PANEL_TRANSFER` in `crates/theo-drivers/src/framebuffer_tests.rs`.
 - Neutral: the companion ESP crates (`esp-alloc`, `esp-rtos`, ...) must be
   upgraded together with esp-hal.
 

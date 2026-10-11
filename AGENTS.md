@@ -9,13 +9,13 @@ the ESP toolchain and target are defined in `rust-toolchain.toml`.
 ## Conventions
 
 - Preserve the existing `no_std`/`no_main` model and ESP-HAL startup conventions.
-- Display pin assignments, panel geometry, the BOOT button, PSRAM mode, and
-  the TCA9554 power-up values are defined in `src/device/mod.rs`, the single
-  source of truth for board wiring; the power-up sequence itself is
-  `PanelPower` in `crates/theo-drivers`. The touch reset (TCA9554 EXIO2) and
-  the shared async I2C bus (`Board::i2c`, ADR-0005) are there too. Do not
-  assume the other touch or audio pin assignments: they are not yet
-  documented or implemented.
+- Display pin assignments, panel geometry, the BOOT button, PSRAM mode and
+  frequency, and the TCA9554 power-up values are defined in
+  `src/device/mod.rs`, the single source of truth for board wiring; the
+  power-up sequence itself is `PanelPower` in `crates/theo-drivers`. The
+  touch reset (TCA9554 EXIO2) and the shared async I2C bus (`Board::i2c`,
+  ADR-0005) are there too. Do not assume the other touch or audio pin
+  assignments: they are not yet documented or implemented.
 - Keep ESP- and board-specific code in `src/device/`. Drivers in
   `crates/theo-drivers` must stay HAL-independent (`embedded-hal` and
   `embedded-hal-async` traits and `QspiBus` only) and keep their host unit tests passing.
@@ -30,9 +30,10 @@ the ESP toolchain and target are defined in `rust-toolchain.toml`.
 
 ## Gotchas
 
-- The display DMA must never read PSRAM: it sends stale data (a band on the
-  panel) despite esp-hal's cache writeback. `EspQspi` copies through an
-  internal-RAM bounce buffer; keep it (ADR-0004).
+- The display DMA reads the PSRAM framebuffer in place only through
+  `PsramTxBuf` (64-byte bursts, aligned descriptors) with PSRAM at 80 MHz
+  and transfers starting 64-byte aligned; dropping any of these brings back
+  SPI underruns, i.e. bands on the panel (ADR-0004).
 - `.cargo/config.toml` forces the xtensa target: host builds need
   `RUSTUP_TOOLCHAIN=stable cargo <cmd> --target $(rustc +stable -vV | sed -n 's/^host: //p')`.
 - Firmware `log` output is silent unless `ESP_LOG` (e.g. `info`) is set at

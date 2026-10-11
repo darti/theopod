@@ -22,7 +22,7 @@ use crate::{
 };
 
 const OPCODE_WRITE_REGISTER: u8 = 0x02;
-const OPCODE_WRITE_PIXELS: u8 = 0x32;
+pub(crate) const OPCODE_WRITE_PIXELS: u8 = 0x32;
 
 const CMD_SOFTWARE_RESET: u8 = 0x01;
 const CMD_SLEEP_OUT: u8 = 0x11;
@@ -251,6 +251,10 @@ impl<B: QspiBus> Panel for Co5300<B> {
 
     /// Sends `pixels` in transfers of at most [`QspiBus::MAX_TRANSFER_LEN`]
     /// bytes; bytes sent before a failed transfer stay counted.
+    ///
+    /// Transfers are taken in order from the start of `pixels`, and all but
+    /// the last are exactly `MAX_TRANSFER_LEN` rounded down to whole pixels:
+    /// buses may rely on that fixed stride.
     async fn write_pixels(&mut self, pixels: &[u8]) -> Result<(), Self::Error> {
         // Whole pixels per transfer.
         let chunk_len = const {

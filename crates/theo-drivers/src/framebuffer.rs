@@ -49,7 +49,8 @@ impl<E: fmt::Debug> core::error::Error for FlushError<E> {}
 /// Sends `rows` of `frame`, a full panel of big-endian RGB565 pixels.
 ///
 /// Empty `rows` send nothing. Otherwise the rows are widened to even
-/// boundaries (clamped to the panel) and sent full width as one area.
+/// boundaries (clamped to the panel) and sent full width as one area, with a
+/// single `write_pixels` call starting at an even row.
 ///
 /// # Errors
 ///

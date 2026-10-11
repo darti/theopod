@@ -2,7 +2,7 @@
 
 ## Project
 
-Theo Pod is a Rust `no_std` firmware for the ESP32-S3-Touch-ePaper-1.54 board.
+Theo Pod is a Rust `no_std` firmware for the ESP32-S3-Touch-AMOLED-1.8 V2 board.
 The target, linker, and `core` compilation are configured in `.cargo/config.toml`;
 the ESP toolchain and target are defined in `rust-toolchain.toml`.
 

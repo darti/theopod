@@ -4,6 +4,7 @@ chip := "esp32s3"
 
 esp_toolchain := `dirname "$(rustup which rustc --toolchain esp)"`
 libclang_path := `find "$(dirname "$(rustup which rustc --toolchain esp)")/../xtensa-esp32-elf-clang" -type d -path '*/esp-clang/lib' -print -quit`
+host_target := `rustc +stable -vV | sed -n 's/^host: //p'`
 gcc_path := `find "$(dirname "$(rustup which rustc --toolchain esp)")/../xtensa-esp-elf" -type d -path '*/xtensa-esp-elf/bin' -print -quit`
 
 default:
@@ -28,6 +29,16 @@ monitor port="":
 
 run port="":
     LIBCLANG_PATH="{{libclang_path}}" PATH="{{gcc_path}}:${PATH}" RUSTUP_TOOLCHAIN=esp cargo espflash flash --release --monitor --chip {{chip}} {{ if port != "" { "--port " + port } else { "" } }}
+
+# Like `run`, but flash, hard-reset, then monitor as separate espflash calls.
+flash-monitor port="":
+    LIBCLANG_PATH="{{libclang_path}}" PATH="{{gcc_path}}:${PATH}" RUSTUP_TOOLCHAIN=esp cargo espflash flash --release --chip {{chip}} {{ if port != "" { "--port " + port } else { "" } }}
+    LIBCLANG_PATH="{{libclang_path}}" PATH="{{gcc_path}}:${PATH}" RUSTUP_TOOLCHAIN=esp cargo espflash reset --chip {{chip}} {{ if port != "" { "--port " + port } else { "" } }}
+    LIBCLANG_PATH="{{libclang_path}}" PATH="{{gcc_path}}:${PATH}" RUSTUP_TOOLCHAIN=esp cargo espflash monitor --chip {{chip}} {{ if port != "" { "--port " + port } else { "" } }}
+
+# Run the HAL-independent driver tests on the host.
+test:
+    RUSTUP_TOOLCHAIN=stable cargo test -p theo-drivers --target {{host_target}}
 
 fmt:
     cargo fmt --all

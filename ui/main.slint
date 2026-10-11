@@ -3,13 +3,22 @@ export component MainWindow inherits Window {
     height: 448px;
     background: #f5f5f5;
 
-    Text {
-        text: "Hello world!";
-        color: #202020;
-        font-size: 24px;
-        horizontal-alignment: center;
-        vertical-alignment: center;
-        width: parent.width;
-        height: parent.height;
+    Rectangle {
+        width: 240px;
+        height: 72px;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        background: #2563eb;
+        border-radius: 16px;
+
+        Text {
+            text: "Hello world!";
+            color: white;
+            font-size: 24px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            width: parent.width;
+            height: parent.height;
+        }
     }
 }

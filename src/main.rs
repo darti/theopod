@@ -1,62 +1,88 @@
+//! Theo Pod firmware entry point.
+//!
+//! - [`device`]: board bring-up (chip runtime, pins, concrete drivers).
+//! - [`slint_backend`]: Slint platform and frame streaming to any panel.
+//!
+//! `main` only talks to the board through `device::{entry, Board}` and the
+//! [`theo_drivers::Panel`] trait, then runs the Slint event loop.
+
 #![no_std]
 #![no_main]
 
 extern crate alloc;
 
-use alloc::{boxed::Box, rc::Rc};
-use core::time::Duration;
+mod device;
+mod slint_backend;
 
-use esp_alloc::EspHeap;
-use esp_backtrace as _;
-use esp_hal::{delay::Delay, main};
+use alloc::boxed::Box;
+
+use embassy_executor::Spawner;
+use embassy_time::{Duration, Instant, Timer};
 use slint::{
-    PhysicalSize,
-    platform::{Platform, WindowAdapter, software_renderer::MinimalSoftwareWindow},
+    ComponentHandle, PhysicalSize,
+    platform::{
+        WindowAdapter,
+        software_renderer::{MinimalSoftwareWindow, RepaintBufferType},
+    },
 };
+use theo_drivers::Panel;
 
-esp_bootloader_esp_idf::esp_app_desc!();
+use crate::{
+    device::Board,
+    slint_backend::{LineBuffer, TheoPlatform, render_frame},
+};
 
 slint::include_modules!();
 
-const HEAP_SIZE: usize = 64 * 1024;
-static mut HEAP_MEMORY: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
-#[global_allocator]
-static HEAP: EspHeap = EspHeap::empty();
+/// Target interval between frame starts while animating.
+///
+/// Rendering and the blocking panel transfer count against it, so a full
+/// redraw slower than this simply runs back to back.
+const FRAME_PERIOD: Duration = Duration::from_millis(16);
+/// Longest sleep when nothing is scheduled.
+const MAX_IDLE: Duration = Duration::from_millis(1000);
 
-struct TheoPlatform {
-    window: Rc<MinimalSoftwareWindow>,
-}
+#[device::entry]
+async fn main(_spawner: Spawner) {
+    let Board { mut display } = Board::init().await;
+    let (width, height) = display.size();
 
-impl Platform for TheoPlatform {
-    fn create_window_adapter(&self) -> Result<Rc<dyn WindowAdapter>, slint::PlatformError> {
-        Ok(self.window.clone())
-    }
+    // Full repaints deliver whole rows in order, as `render_frame` requires.
+    let window = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
+    window.set_size(PhysicalSize::new(u32::from(width), u32::from(height)));
+    // Slint is built with `unsafe-single-threaded`: only this task may use it.
+    slint::platform::set_platform(Box::new(TheoPlatform::new(window.clone()))).unwrap();
+    let ui = MainWindow::new().unwrap();
+    // Showing the window is what requests the first redraw.
+    ui.show().unwrap();
 
-    fn duration_since_start(&self) -> Duration {
-        Duration::ZERO
-    }
-}
-
-#[main]
-fn main() -> ! {
-    unsafe {
-        HEAP.init(HEAP_MEMORY.as_mut_ptr(), HEAP_SIZE);
-    }
-
-    esp_println::logger::init_logger_from_env();
-    let _peripherals = esp_hal::init(esp_hal::Config::default());
-    let delay = Delay::new();
-
-    let window = MinimalSoftwareWindow::new(Default::default());
-    window.set_size(PhysicalSize::new(368, 448));
-    slint::platform::set_platform(Box::new(TheoPlatform { window })).unwrap();
-
-    let _ui = MainWindow::new().unwrap();
-    esp_println::println!("Slint: Hello world !");
-    esp_println::println!("AMOLED rendering is waiting for pin mapping.");
-
+    let mut buffer = LineBuffer::default();
     loop {
+        let frame_start = Instant::now();
         slint::platform::update_timers_and_animations();
-        delay.delay_millis(1_000);
+        window.draw_if_needed(|renderer| {
+            if let Err(error) = render_frame(renderer, &mut display, &mut buffer) {
+                log::error!("frame dropped, retrying: {error}");
+                // Slint already considers this frame drawn; ask for it again
+                // so a partial frame does not stay on screen. The retry waits
+                // for the next wake-up, which paces repeated failures.
+                window.window().request_redraw();
+            }
+        });
+        Timer::at(next_wake_up(&window, frame_start)).await;
     }
+}
+
+/// Wakes one frame period after `frame_start` while animating, otherwise at
+/// the next Slint timer (at most [`MAX_IDLE`] from now).
+fn next_wake_up(window: &MinimalSoftwareWindow, frame_start: Instant) -> Instant {
+    if window.has_active_animations() {
+        return frame_start + FRAME_PERIOD;
+    }
+    let idle = slint::platform::duration_until_next_timer_update()
+        .and_then(|delay| u64::try_from(delay.as_micros()).ok())
+        .map_or(MAX_IDLE, |micros| {
+            Duration::from_micros(micros).min(MAX_IDLE)
+        });
+    Instant::now() + idle
 }

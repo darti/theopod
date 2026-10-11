@@ -1,19 +1,54 @@
-[package]
-name = "theo-pod"
-version = "0.1.0"
+[workspace]
+members = ["crates/theo-drivers"]
+
+[workspace.package]
 edition = "2024"
 rust-version = "1.95"
 
-[dependencies]
+[workspace.dependencies]
+bytemuck = "1"
+embassy-executor = "0.10"
+embassy-time = "0.5"
+embedded-hal = "1.0"
+embedded-hal-async = "1.0"
+esp-alloc = { version = "0.11", features = ["esp32s3"] }
 esp-backtrace = { version = "0.20", features = ["esp32s3", "panic-handler", "println"] }
 esp-bootloader-esp-idf = { version = "0.6", features = ["esp32s3"] }
-esp-hal = { version = "~1.2", features = ["esp32s3"] }
+# `unstable` exposes the half-duplex QSPI API; keep the `~1.2` pin because
+# unstable APIs are outside esp-hal's semver guarantees.
+esp-hal = { version = "~1.2", features = ["esp32s3", "unstable"] }
 esp-println = { version = "0.18", features = ["esp32s3", "log-04"] }
-esp-alloc = "0.8"
+esp-rtos = { version = "0.4", features = ["embassy", "esp32s3"] }
+log = "0.4"
 slint = { version = "1.16", default-features = false, features = ["compat-1-2", "unsafe-single-threaded", "libm", "renderer-software"] }
+slint-build = "1.16"
+speculoos = "0.13"
+theo-drivers = { path = "crates/theo-drivers" }
+
+[package]
+name = "theo-pod"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+bytemuck.workspace = true
+embassy-executor.workspace = true
+embassy-time.workspace = true
+embedded-hal.workspace = true
+embedded-hal-async.workspace = true
+esp-alloc.workspace = true
+esp-backtrace.workspace = true
+esp-bootloader-esp-idf.workspace = true
+esp-hal.workspace = true
+esp-println.workspace = true
+esp-rtos.workspace = true
+log.workspace = true
+slint.workspace = true
+theo-drivers.workspace = true
 
 [build-dependencies]
-slint-build = "1.16"
+slint-build.workspace = true
 
 [profile.release]
 opt-level = "s"

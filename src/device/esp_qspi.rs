@@ -9,9 +9,12 @@
 //! showed stale data on the panel (a band at the top of the first frame)
 //! even though esp-hal writes the cache back before each transfer; the copy
 //! sidesteps that, and also covers payloads that live in flash. See
-//! `docs/adr/0004`.
+//! `docs/adr/0004`. With feature `psram-direct` (t-4), payloads inside the
+//! region set by [`EspQspi::with_in_place`] skip the copy.
 
 use core::fmt;
+#[cfg(feature = "psram-direct")]
+use core::ops::Range;
 
 use embedded_hal::digital::OutputPin;
 use esp_hal::{
@@ -70,6 +73,9 @@ pub struct EspQspi<'d, CS> {
     cs: CS,
     /// Internal-RAM copy of the payload being sent.
     bounce: &'static mut [u8],
+    /// Addresses whose payloads the DMA reads in place.
+    #[cfg(feature = "psram-direct")]
+    in_place: Range<usize>,
 }
 
 impl<'d, CS: OutputPin> EspQspi<'d, CS> {
@@ -87,7 +93,46 @@ impl<'d, CS: OutputPin> EspQspi<'d, CS> {
             bounce.len() >= MAX_TRANSFER_LEN,
             "bounce buffer smaller than MAX_TRANSFER_LEN"
         );
-        Self { spi, cs, bounce }
+        Self {
+            spi,
+            cs,
+            bounce,
+            #[cfg(feature = "psram-direct")]
+            in_place: 0..0,
+        }
+    }
+
+    /// Sends payloads lying inside `region` straight from it, without the copy.
+    #[cfg(feature = "psram-direct")]
+    #[must_use]
+    pub fn with_in_place(mut self, region: &[u8]) -> Self {
+        let span = region.as_ptr_range();
+        self.in_place = span.start as usize..span.end as usize;
+        self
+    }
+
+    /// Returns `data` itself if the DMA may read it in place, else its bounce copy.
+    fn dma_source<'a>(
+        bounce: &'a mut [u8],
+        #[cfg(feature = "psram-direct")] in_place: &Range<usize>,
+        data: &'a [u8],
+    ) -> Result<&'a [u8], EspQspiError<CS::Error>> {
+        #[cfg(feature = "psram-direct")]
+        {
+            let span = data.as_ptr_range();
+            if in_place.start <= span.start as usize && span.end as usize <= in_place.end {
+                #[cfg(feature = "psram-writeback-locked")]
+                super::psram_cache::writeback_locked(data);
+                return Ok(data);
+            }
+        }
+        let capacity = bounce.len();
+        let bounce = bounce.get_mut(..data.len()).ok_or(EspQspiError::TooLong {
+            len: data.len(),
+            capacity,
+        })?;
+        bounce.copy_from_slice(data);
+        Ok(bounce)
     }
 }
 
@@ -109,15 +154,12 @@ impl<CS: OutputPin> QspiBus for EspQspi<'_, CS> {
             Lanes::Single => DataMode::Single,
             Lanes::Quad => DataMode::Quad,
         };
-        let capacity = self.bounce.len();
-        let bounce = self
-            .bounce
-            .get_mut(..data.len())
-            .ok_or(EspQspiError::TooLong {
-                len: data.len(),
-                capacity,
-            })?;
-        bounce.copy_from_slice(data);
+        let source = Self::dma_source(
+            self.bounce,
+            #[cfg(feature = "psram-direct")]
+            &self.in_place,
+            data,
+        )?;
         self.cs.set_low().map_err(EspQspiError::ChipSelect)?;
         let transferred = self
             .spi
@@ -126,7 +168,7 @@ impl<CS: OutputPin> QspiBus for EspQspi<'_, CS> {
                 Command::_8Bit(u16::from(opcode), DataMode::Single),
                 Address::_24Bit(address, DataMode::Single),
                 0,
-                bounce,
+                source,
             )
             .await;
         // Always release chip select, but report the SPI failure first.

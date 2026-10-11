@@ -2,7 +2,8 @@
 //!
 //! - [`RecordingBus`]: [`QspiBus`] that records every transfer.
 //! - [`RecordingPanel`]: [`Panel`] that records every call.
-//! - [`FakeTca9554`]: I2C bus modelling a TCA9554's registers.
+//! - [`FakeTca9554`]: async I2C bus modelling a TCA9554's registers; can
+//!   fail reads or writes and suspend once per transaction.
 //! - [`NoDelay`]: [`DelayNs`] that returns immediately.
 //! - [`RecordingDelay`]: [`DelayNs`] that records millisecond delays and can
 //!   stay pending once, to cancel a future mid-delay.
@@ -15,8 +16,10 @@ use core::{
     task::{Context, Poll, Waker},
 };
 
-use embedded_hal::i2c::{ErrorKind, ErrorType, I2c, Operation};
-use embedded_hal_async::delay::DelayNs;
+use embedded_hal_async::{
+    delay::DelayNs,
+    i2c::{ErrorKind, ErrorType, I2c, NoAcknowledgeSource, Operation},
+};
 
 use crate::{
     panel::Panel,
@@ -238,7 +241,7 @@ pub const TCA_INPUT: u8 = 0x00;
 pub const TCA_OUTPUT: u8 = 0x01;
 pub const TCA_CONFIG: u8 = 0x03;
 
-/// I2C bus emulating one TCA9554: register pointer, reads and writes.
+/// Async I2C bus emulating one TCA9554: register pointer, reads and writes.
 ///
 /// `writes` records every register write as `(register, value)`; `inputs`
 /// is what the input port reads back. A bus at another address NACKs.
@@ -250,6 +253,8 @@ pub struct FakeTca9554 {
     pub writes: Vec<(u8, u8)>,
     pointer: u8,
     fail_at: Option<usize>,
+    fail_writes_only: bool,
+    yielding: bool,
 }
 
 impl FakeTca9554 {
@@ -263,12 +268,26 @@ impl FakeTca9554 {
             writes: Vec::new(),
             pointer: 0,
             fail_at: None,
+            fail_writes_only: false,
+            yielding: false,
         }
     }
 
     /// Makes every transaction fail once `fail_at` writes are recorded.
     pub fn failing(mut self, fail_at: usize) -> Self {
         self.fail_at = Some(fail_at);
+        self
+    }
+
+    /// Like [`Self::failing`], but register reads keep succeeding.
+    pub fn failing_writes(mut self, fail_at: usize) -> Self {
+        self.fail_writes_only = true;
+        self.failing(fail_at)
+    }
+
+    /// Makes every transaction return `Pending` once before running.
+    pub fn yielding(mut self) -> Self {
+        self.yielding = true;
         self
     }
 
@@ -293,18 +312,23 @@ impl ErrorType for FakeTca9554 {
 }
 
 impl I2c for FakeTca9554 {
-    fn transaction(
+    async fn transaction(
         &mut self,
         address: u8,
         operations: &mut [Operation<'_>],
     ) -> Result<(), Self::Error> {
-        if self.fail_at == Some(self.writes.len()) {
+        if self.yielding {
+            YieldOnce(false).await;
+        }
+        // A write carries data after the register pointer.
+        let writes_data = operations
+            .iter()
+            .any(|operation| matches!(operation, Operation::Write(bytes) if bytes.len() > 1));
+        if self.fail_at == Some(self.writes.len()) && (writes_data || !self.fail_writes_only) {
             return Err(ErrorKind::Bus);
         }
         if address != self.address {
-            return Err(ErrorKind::NoAcknowledge(
-                embedded_hal::i2c::NoAcknowledgeSource::Address,
-            ));
+            return Err(ErrorKind::NoAcknowledge(NoAcknowledgeSource::Address));
         }
         for operation in operations {
             match operation {

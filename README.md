@@ -24,7 +24,7 @@ for the V2 pinout and hardware resources.
   board only through the `device` module and `theo-drivers` types.
 - `src/device/`: everything specific to the ESP32-S3 and this board (chip
   runtime, heaps and PSRAM, logger, pins, panel geometry, esp-hal QSPI DMA
-  transport, BOOT button).
+  transport, BOOT button, shared async I2C bus).
 - `src/slint_backend.rs`: Slint platform and framebuffer rendering.
 - `crates/theo-drivers/`: HAL-independent drivers (CO5300, TCA9554, panel
   power-up, button, `Panel`, `QspiBus`, framebuffer flushing), unit-tested on

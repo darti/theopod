@@ -12,11 +12,13 @@ the ESP toolchain and target are defined in `rust-toolchain.toml`.
 - Display pin assignments, panel geometry, the BOOT button, PSRAM mode, and
   the TCA9554 power-up values are defined in `src/device/mod.rs`, the single
   source of truth for board wiring; the power-up sequence itself is
-  `PanelPower` in `crates/theo-drivers`. Do not assume touch or audio pin
-  assignments: they are not yet documented or implemented.
+  `PanelPower` in `crates/theo-drivers`. The touch reset (TCA9554 EXIO2) and
+  the shared async I2C bus (`Board::i2c`, ADR-0005) are there too. Do not
+  assume the other touch or audio pin assignments: they are not yet
+  documented or implemented.
 - Keep ESP- and board-specific code in `src/device/`. Drivers in
-  `crates/theo-drivers` must stay HAL-independent (`embedded-hal` traits and
-  `QspiBus` only) and keep their host unit tests passing.
+  `crates/theo-drivers` must stay HAL-independent (`embedded-hal` and
+  `embedded-hal-async` traits and `QspiBus` only) and keep their host unit tests passing.
 - Keep changes compatible with the `xtensa-esp32s3-none-elf` target and the
   dependency versions declared in `Cargo.toml`.
 - Record significant technical decisions in `docs/adr/`.

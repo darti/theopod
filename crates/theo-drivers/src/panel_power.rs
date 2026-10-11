@@ -1,10 +1,10 @@
 //! Panel power-up through a TCA9554 I/O expander.
 //!
 //! - [`PanelPower`]: which expander pins feed the panel rails/reset, and the
-//!   timing of the power-up pulse.
+//!   timing of the power-up pulse. Other pins on the expander, such as a
+//!   touch reset, are left untouched.
 
-use embedded_hal::i2c::I2c;
-use embedded_hal_async::delay::DelayNs;
+use embedded_hal_async::{delay::DelayNs, i2c::I2c};
 
 use crate::tca9554::Tca9554;
 
@@ -37,11 +37,11 @@ impl PanelPower {
         expander: &mut Tca9554<I>,
         delay: &mut impl DelayNs,
     ) -> Result<(), I::Error> {
-        expander.configure_outputs(self.pins, self.pins)?;
+        expander.configure_outputs(self.pins, self.pins).await?;
         delay.delay_ms(self.settle_ms).await;
-        expander.write_levels(self.pins, 0x00)?;
+        expander.write_levels(self.pins, 0x00).await?;
         delay.delay_ms(self.reset_ms).await;
-        expander.write_levels(self.pins, self.pins)?;
+        expander.write_levels(self.pins, self.pins).await?;
         delay.delay_ms(self.power_up_ms).await;
         Ok(())
     }

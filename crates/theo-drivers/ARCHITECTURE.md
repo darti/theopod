@@ -14,8 +14,9 @@ See `docs/adr/0001` and `0002` for why.
 - `co5300.rs`: CO5300 AMOLED controller. Implements `Panel` over any
   `QspiBus`; validates geometry, 2x2 alignment and pixel counts, and splits
   pixel payloads into bus-sized transfers.
-- `tca9554.rs`: TCA9554 I/O expander, per pin (`Pin`) or by mask; every
-  change is a read-modify-write, outputs latch levels before direction.
+- `tca9554.rs`: TCA9554 I/O expander over async I2C, per pin (`Pin`) or
+  by mask; every change is a read-modify-write, outputs latch levels
+  before direction.
 - `panel_power.rs`: `PanelPower`, the panel rail/reset pulse through the
   expander. Board values live in `src/device/`.
 - `button.rs`: `DebouncedButton`, cancel-safe debounced press/release.
@@ -33,7 +34,8 @@ See `docs/adr/0001` and `0002` for why.
 ## Tests
 
 Side-by-side `*_tests.rs` files use fakes from `test_support.rs`: recording
-`QspiBus` and `Panel`, and `FakeTca9554`, which models the chip's registers
-and replays which pins are driven low. Not covered on the host: the
+`QspiBus` and `Panel`, and `FakeTca9554`, an async I2C bus that models the
+chip's registers, replays which pins are driven low, and can fail or
+suspend transactions. Not covered on the host: the
 single-line command/address phases and DMA behaviour of
 `src/device/esp_qspi.rs`, only verified on hardware.

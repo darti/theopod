@@ -5194,6 +5194,8 @@ version = "0.1.0"
 dependencies = [
  "allocator-api2 0.3.1",
  "bytemuck",
+ "critical-section",
+ "embassy-embedded-hal",
  "embassy-executor",
  "embassy-futures",
  "embassy-sync 0.8.0",

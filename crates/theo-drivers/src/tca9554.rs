@@ -1,14 +1,18 @@
 //! HAL-independent TCA9554 8-bit I2C I/O expander driver.
 //!
 //! - [`Tca9554`]: configures pin directions, drives output levels and reads
-//!   inputs over any `embedded-hal` [`I2c`] bus, per pin or by mask.
+//!   inputs over any `embedded-hal-async` [`I2c`] bus, per pin or by mask.
 //! - [`Pin`]: one of the eight expander pins (P0..P7, EXIO0..7 on Waveshare
 //!   schematics).
 //!
 //! Every change is a read-modify-write of the chip's registers, so pins
 //! outside the mask keep their direction and level whoever set them.
+//! The read and the write are separate bus transactions: on a shared bus,
+//! drive the expander through a single `Tca9554` (one task), or concurrent
+//! changes can be lost.
 
-use embedded_hal::{digital::PinState, i2c::I2c};
+use embedded_hal::digital::PinState;
+use embedded_hal_async::i2c::I2c;
 
 const REGISTER_INPUT: u8 = 0x00;
 const REGISTER_OUTPUT: u8 = 0x01;
@@ -80,10 +84,10 @@ impl<I: I2c> Tca9554<I> {
     /// # Errors
     ///
     /// Returns the I2C error of the first failed access.
-    pub fn configure_outputs(&mut self, mask: u8, levels: u8) -> Result<(), I::Error> {
-        self.write_levels(mask, levels)?;
+    pub async fn configure_outputs(&mut self, mask: u8, levels: u8) -> Result<(), I::Error> {
+        self.write_levels(mask, levels).await?;
         // A cleared config bit selects output mode.
-        self.update(REGISTER_CONFIG, mask, 0)
+        self.update(REGISTER_CONFIG, mask, 0).await
     }
 
     /// Makes the pins in `mask` inputs; other pins are kept.
@@ -91,8 +95,8 @@ impl<I: I2c> Tca9554<I> {
     /// # Errors
     ///
     /// Returns the I2C error of the first failed access.
-    pub fn configure_inputs(&mut self, mask: u8) -> Result<(), I::Error> {
-        self.update(REGISTER_CONFIG, mask, mask)
+    pub async fn configure_inputs(&mut self, mask: u8) -> Result<(), I::Error> {
+        self.update(REGISTER_CONFIG, mask, mask).await
     }
 
     /// Sets the output levels of the pins in `mask` to the bits of `levels`.
@@ -100,8 +104,8 @@ impl<I: I2c> Tca9554<I> {
     /// # Errors
     ///
     /// Returns the I2C error of the first failed access.
-    pub fn write_levels(&mut self, mask: u8, levels: u8) -> Result<(), I::Error> {
-        self.update(REGISTER_OUTPUT, mask, levels)
+    pub async fn write_levels(&mut self, mask: u8, levels: u8) -> Result<(), I::Error> {
+        self.update(REGISTER_OUTPUT, mask, levels).await
     }
 
     /// Reads the level of every pin, input or output.
@@ -109,8 +113,8 @@ impl<I: I2c> Tca9554<I> {
     /// # Errors
     ///
     /// Returns the I2C error if the read fails.
-    pub fn read_inputs(&mut self) -> Result<u8, I::Error> {
-        self.read(REGISTER_INPUT)
+    pub async fn read_inputs(&mut self) -> Result<u8, I::Error> {
+        self.read(REGISTER_INPUT).await
     }
 
     /// Makes `pin` an output driving `level`.
@@ -118,8 +122,9 @@ impl<I: I2c> Tca9554<I> {
     /// # Errors
     ///
     /// Returns the I2C error of the first failed access.
-    pub fn configure_output(&mut self, pin: Pin, level: PinState) -> Result<(), I::Error> {
+    pub async fn configure_output(&mut self, pin: Pin, level: PinState) -> Result<(), I::Error> {
         self.configure_outputs(pin.mask(), level_bits(pin.mask(), level))
+            .await
     }
 
     /// Makes `pin` an input.
@@ -127,8 +132,8 @@ impl<I: I2c> Tca9554<I> {
     /// # Errors
     ///
     /// Returns the I2C error of the first failed access.
-    pub fn configure_input(&mut self, pin: Pin) -> Result<(), I::Error> {
-        self.configure_inputs(pin.mask())
+    pub async fn configure_input(&mut self, pin: Pin) -> Result<(), I::Error> {
+        self.configure_inputs(pin.mask()).await
     }
 
     /// Drives output `pin` to `level`.
@@ -136,8 +141,9 @@ impl<I: I2c> Tca9554<I> {
     /// # Errors
     ///
     /// Returns the I2C error of the first failed access.
-    pub fn set_level(&mut self, pin: Pin, level: PinState) -> Result<(), I::Error> {
+    pub async fn set_level(&mut self, pin: Pin, level: PinState) -> Result<(), I::Error> {
         self.write_levels(pin.mask(), level_bits(pin.mask(), level))
+            .await
     }
 
     /// Reads the level of `pin`.
@@ -145,21 +151,23 @@ impl<I: I2c> Tca9554<I> {
     /// # Errors
     ///
     /// Returns the I2C error if the read fails.
-    pub fn level(&mut self, pin: Pin) -> Result<PinState, I::Error> {
-        let inputs = self.read_inputs()?;
+    pub async fn level(&mut self, pin: Pin) -> Result<PinState, I::Error> {
+        let inputs = self.read_inputs().await?;
         Ok(PinState::from(inputs & pin.mask() != 0))
     }
 
-    fn read(&mut self, register: u8) -> Result<u8, I::Error> {
+    async fn read(&mut self, register: u8) -> Result<u8, I::Error> {
         let mut value = [0];
-        self.i2c.write_read(self.address, &[register], &mut value)?;
+        self.i2c
+            .write_read(self.address, &[register], &mut value)
+            .await?;
         Ok(value[0])
     }
 
     /// Replaces the `mask` bits of `register` with those of `bits`.
-    fn update(&mut self, register: u8, mask: u8, bits: u8) -> Result<(), I::Error> {
-        let current = self.read(register)?;
+    async fn update(&mut self, register: u8, mask: u8, bits: u8) -> Result<(), I::Error> {
+        let current = self.read(register).await?;
         let value = (current & !mask) | (bits & mask);
-        self.i2c.write(self.address, &[register, value])
+        self.i2c.write(self.address, &[register, value]).await
     }
 }

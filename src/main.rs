@@ -61,6 +61,7 @@ async fn main(spawner: Spawner) {
     let Board {
         mut display,
         button,
+        i2c: _,
         frame,
     } = Board::init().await;
     spawner.spawn(watch_button(button).unwrap());

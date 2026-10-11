@@ -1,14 +1,15 @@
-use embedded_hal::i2c::ErrorKind;
+use embedded_hal_async::i2c::ErrorKind;
 use speculoos::prelude::*;
 
 use crate::{
     panel_power::PanelPower,
-    tca9554::Tca9554,
+    tca9554::{Pin, Tca9554},
     test_support::{FakeTca9554, NoDelay, RecordingDelay, TCA_CONFIG, TCA_OUTPUT, block_on},
 };
 
+// The board's panel pins (EXIO0/1); EXIO2 is the touch reset.
 const POWER: PanelPower = PanelPower {
-    pins: 0x07,
+    pins: Pin::P0.mask() | Pin::P1.mask(),
     settle_ms: 100,
     reset_ms: 300,
     power_up_ms: 300,
@@ -27,8 +28,8 @@ fn power_up_pulses_panel_pins_low_once() {
     assert_that!(result).is_ok();
     assert_that!(fake.writes).is_equal_to(vec![
         (TCA_OUTPUT, 0xFF),
-        (TCA_CONFIG, 0xF8),
-        (TCA_OUTPUT, 0xF8),
+        (TCA_CONFIG, 0xFC),
+        (TCA_OUTPUT, 0xFC),
         (TCA_OUTPUT, 0xFF),
     ]);
 }
@@ -60,10 +61,29 @@ fn power_up_leaves_other_expander_pins_untouched() {
     fake.registers[usize::from(TCA_OUTPUT)] = 0x50;
     fake.registers[usize::from(TCA_CONFIG)] = 0x7F;
 
+    let (result, fake) = power_up(fake);
+
+    assert_that!(result).is_ok();
+    assert_that!(fake.registers[usize::from(TCA_OUTPUT)]).is_equal_to(0x53);
+    assert_that!(fake.registers[usize::from(TCA_CONFIG)]).is_equal_to(0x7C);
+}
+
+// The touch controller's reset (EXIO2) shares the expander: the panel pulse
+// must never drive it low, even when it is already an output.
+#[test]
+fn power_up_never_drives_touch_reset_low() {
+    let mut fake = FakeTca9554::new(0x20);
+    fake.registers[usize::from(TCA_CONFIG)] = !Pin::P2.mask();
+    let initial = fake.registers;
+
     let (_, fake) = power_up(fake);
 
-    assert_that!(fake.registers[usize::from(TCA_OUTPUT)]).is_equal_to(0x57);
-    assert_that!(fake.registers[usize::from(TCA_CONFIG)]).is_equal_to(0x78);
+    let touch_low: Vec<bool> = fake
+        .driven_low_history(initial)
+        .iter()
+        .map(|low| low & Pin::P2.mask() != 0)
+        .collect();
+    assert_that!(touch_low).is_equal_to(vec![false; 4]);
 }
 
 #[test]

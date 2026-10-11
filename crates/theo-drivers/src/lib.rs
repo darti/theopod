@@ -8,7 +8,7 @@
 //! - [`flush_rows`], [`FlushError`]: sends dirty framebuffer rows to a [`Panel`].
 //! - [`QspiBus`], [`Lanes`]: Quad-SPI transport for display controllers.
 //! - [`Co5300`], [`PanelGeometry`], [`Co5300Error`]: CO5300 AMOLED controller.
-//! - [`Tca9554`], [`ExpanderPin`]: TCA9554 I2C I/O expander with per-pin access.
+//! - [`Tca9554`], [`ExpanderPin`]: TCA9554 async I2C I/O expander with per-pin access.
 //! - [`PanelPower`]: panel rail/reset power-up through the expander.
 
 #![cfg_attr(not(test), no_std)]

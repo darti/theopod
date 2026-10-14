@@ -19,12 +19,12 @@ fn init_resets_then_enables_accelerometer_only() {
     let result = block_on(imu.init(&mut RecordingDelay::default()));
 
     assert_that!(result).is_ok();
-    // Reset; address auto-increment, little-endian; ±2 g at 62.5 Hz;
-    // accelerometer on, gyroscope off.
+    // Reset; address auto-increment, little-endian; ±2 g in low-power mode
+    // at 21 Hz (t-41); accelerometer on, gyroscope off.
     assert_that!(imu.release().writes).is_equal_to(vec![
         (0x60, 0xB0),
         (0x02, 0x40),
-        (0x03, 0x07),
+        (0x03, 0x0D),
         (0x08, 0x01),
     ]);
 }

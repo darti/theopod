@@ -58,9 +58,13 @@ row/column exchange and mirroring) or Slint's software renderer
   updates cost more than in portrait. Column windows in `flush_rows`, or
   the CO5300 alternative below, would fix it if animations stutter.
 - Negative: the UI must lay out at both 368 x 448 and 448 x 368.
-- Negative: the accelerometer runs at 62.5 Hz and is polled at 10 Hz for
-  as long as the firmware runs; power management will want its low-power
-  mode or its motion interrupt.
+- Negative: the accelerometer is polled at 10 Hz for as long as the
+  firmware runs. It runs in its low-power mode at 21 Hz (t-41; first
+  62.5 Hz in normal mode), which still gives each poll a fresh sample;
+  readings on the board kept their scale, with about ±50 LSB of noise
+  (0.003 g). Waking on the QMI8658's motion interrupt instead would need
+  its INT pins, which Waveshare neither documents nor uses (only
+  `TP_INT` 21 in `pin_config.h`).
 - Neutral: the view only turns once a finger lifts.
 - Neutral: booting flat or in landscape shows portrait first, then turns
   about 300 ms later.

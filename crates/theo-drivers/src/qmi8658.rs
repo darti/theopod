@@ -6,8 +6,9 @@
 //! - [`Acceleration`]: one raw sample on the sensor's own axes.
 //! - [`Error`]: bus failures, an unexpected chip, or a stuck reset.
 //!
-//! The gyroscope stays off: orientation only needs gravity. The range is
-//! ±2 g, so 1 g reads as [`Acceleration::ONE_G`].
+//! The gyroscope stays off: orientation only needs gravity. The
+//! accelerometer runs in its low-power mode at 21 Hz; the range is ±2 g,
+//! so 1 g reads as [`Acceleration::ONE_G`].
 
 use core::fmt;
 
@@ -27,10 +28,11 @@ const RESET_COMMAND: u8 = 0xB0;
 const RESET_DONE: u8 = 0x80;
 /// Address auto-increment, little-endian data.
 const CTRL1_AUTO_INCREMENT: u8 = 0x40;
-/// ±2 g full scale (bits 6:4 = 0), 62.5 Hz output rate (bits 3:0 = 7);
-/// the rate is nominal with the gyroscope off (in 6-axis mode it would
-/// derive from the gyroscope clock instead).
-const CTRL2_ACCEL_2G_62HZ: u8 = 0x07;
+/// ±2 g full scale (bits 6:4 = 0), low-power mode at 21 Hz (bits 3:0 =
+/// 0xD, SensorLib's `ACC_ODR_LOWPOWER_21Hz`). Low-power rates need the
+/// gyroscope off; 21 Hz still gives each 10 Hz orientation poll a fresh
+/// sample, and gravity needs no more precision (t-41).
+const CTRL2_ACCEL_2G_LOW_POWER_21HZ: u8 = 0x0D;
 /// Accelerometer enabled, gyroscope disabled.
 const CTRL7_ACCEL_ONLY: u8 = 0x01;
 
@@ -116,7 +118,7 @@ impl<I: I2c> Qmi8658<I> {
         self.write(REGISTER_RESET, RESET_COMMAND).await?;
         self.wait_for_reset(delay).await?;
         self.write(REGISTER_CTRL1, CTRL1_AUTO_INCREMENT).await?;
-        self.write(REGISTER_CTRL2, CTRL2_ACCEL_2G_62HZ).await?;
+        self.write(REGISTER_CTRL2, CTRL2_ACCEL_2G_LOW_POWER_21HZ).await?;
         self.write(REGISTER_CTRL7, CTRL7_ACCEL_ONLY).await
     }
 

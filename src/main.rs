@@ -68,6 +68,10 @@ const TOUCH_QUEUE: usize = 8;
 /// Pause after a failed touch read, so a faulty controller toggling its
 /// interrupt cannot keep the touch task busy.
 const TOUCH_RETRY: Duration = Duration::from_millis(10);
+/// Consecutive failed touch reads before the controller is reset; each
+/// further reset waits for twice as many failures. A power of two.
+const TOUCH_RESET_AFTER: u32 = 8;
+const _: () = assert!(TOUCH_RESET_AFTER.is_power_of_two());
 /// Accelerometer sample period; a rotation needs
 /// [`OrientationDetector::STABLE_SAMPLES`] samples in a row.
 const ORIENTATION_PERIOD: Duration = Duration::from_millis(100);
@@ -240,7 +244,8 @@ async fn watch_button(mut button: device::Button) {
 ///
 /// A failed read mid-touch reaches the loop as [`TouchEvent::Cancelled`]
 /// (from the driver). Failures are logged once per streak, and each one
-/// pauses the task for [`TOUCH_RETRY`].
+/// pauses the task for [`TOUCH_RETRY`]. After [`TOUCH_RESET_AFTER`]
+/// failures in a row the controller is reset, then again after 16, 32...
 #[embassy_executor::task]
 async fn watch_touch(mut touch: device::Touch) {
     // Consecutive failed reads.
@@ -260,6 +265,12 @@ async fn watch_touch(mut touch: device::Touch) {
                     log::error!("touch read failed: {error}");
                 }
                 failures = failures.saturating_add(1);
+                if failures >= TOUCH_RESET_AFTER && failures.is_power_of_two() {
+                    log::warn!("resetting the touch controller after {failures} failed reads");
+                    if let Err(error) = touch.reset().await {
+                        log::error!("touch controller reset failed: {error}");
+                    }
+                }
                 Timer::after(TOUCH_RETRY).await;
             }
         }

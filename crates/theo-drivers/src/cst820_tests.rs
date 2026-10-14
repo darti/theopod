@@ -226,16 +226,32 @@ fn init_controller_failure_returns_bus_error() {
     ))));
 }
 
+// Regression (t-34): a runtime reset used to forget a touch in progress, so
+// the UI never saw it end and kept the pointer pressed.
 #[test]
-fn init_after_press_forgets_touch() {
+fn init_after_press_reports_cancelled_then_waits_for_new_press() {
     let mut touch = touch([FakeCst820::touch(1, 2, 0), FakeCst820::touch(3, 4, 0)]);
     block_on(touch.changed()).unwrap();
 
     block_on(touch.init(&mut expander(), Pin::P2)).unwrap();
-    let event = block_on(touch.changed());
+    let cancelled = block_on(touch.changed());
+    let next = block_on(touch.changed());
 
-    assert_that!(event).is_equal_to(Ok(TouchEvent::Pressed(point(3, 4))));
+    assert_that!(cancelled).is_equal_to(Ok(TouchEvent::Cancelled(point(1, 2))));
+    assert_that!(next).is_equal_to(Ok(TouchEvent::Pressed(point(3, 4))));
     assert_that!(touch.release().1.falling_edges).is_equal_to(2);
+}
+
+#[test]
+fn init_keeps_cancellation_of_failed_touch() {
+    let mut touch = touch([FakeCst820::touch(1, 2, 0), Err(ErrorKind::Bus)]);
+    block_on(touch.changed()).unwrap();
+    block_on(touch.changed()).unwrap_err();
+
+    block_on(touch.init(&mut expander(), Pin::P2)).unwrap();
+    let cancelled = block_on(touch.changed());
+
+    assert_that!(cancelled).is_equal_to(Ok(TouchEvent::Cancelled(point(1, 2))));
 }
 
 #[test]

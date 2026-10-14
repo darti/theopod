@@ -1,6 +1,6 @@
 # ADR-0005: Share an async I2C bus owned by Board
 
-- Status: Accepted, amended by the t-19 update below
+- Status: Accepted, amended by the t-19 and t-20/t-34 updates below
 - Date: 2026-10-11
 
 ## Context
@@ -91,3 +91,25 @@ Out of scope: the touch driver itself (t-19).
   polls the registers every 10 ms while a finger is down, sharing the bus
   with nothing else at runtime today. A stuck bus would block every device
   on it, so keep esp-hal's I2C timeout enabled.
+
+## Update (t-20, t-34): bus timeout and runtime touch reset
+
+- esp-hal disables the I2C SCL timeout by default on the ESP32-S3, so the
+  advice above was not followed: a device holding SCL low would hang every
+  transfer on the bus. `Board::init` now sets `I2C_BUS_TIMEOUT` (1000 bus
+  cycles, 10 ms at 100 kHz). A timed-out transfer fails with
+  `Error::Timeout`, and esp-hal 1.2 then resets its state machine and
+  clocks the bus free (nine SCL pulses, ESP-IDF's `clear_bus`); it also
+  clears a bus left busy before each transfer. Recreating the driver is
+  therefore not needed.
+- The expander gets a single runtime owner: `device::Touch` holds the
+  CST820 and the one `Tca9554` handle, handed over at the end of
+  `Board::init`. Another runtime user of the expander must go through it.
+- `watch_touch` resets the controller (`Touch::reset`, i.e.
+  `Cst820::init`) after 8 failed reads in a row, then after 16, 32...,
+  so a wedged controller recovers without a reboot and a dead one does not
+  flood the log. `Cst820::init` reports a touch in progress as cancelled,
+  so the UI never keeps a pointer pressed across a reset.
+- Not covered: a controller whose interrupt line stays idle produces no
+  failed read, so it is never reset; nor is a device holding SDA low that
+  the nine pulses do not release.

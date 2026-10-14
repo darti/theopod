@@ -5,7 +5,8 @@
 //! - [`Display`]: concrete display type of this board; implements
 //!   [`theo_drivers::Panel`].
 //! - [`Button`]: the BOOT push button, debounced.
-//! - [`Touch`]: the CST820 touch controller.
+//! - [`Touch`]: the CST820 touch controller, with the expander that resets
+//!   it.
 //! - [`Imu`], [`IMU_AXES`]: the QMI8658 accelerometer, and how its axes lie
 //!   on the panel.
 //! - [`I2cBus`], [`I2cDevice`]: the async I2C bus shared by the TCA9554
@@ -22,19 +23,19 @@
 mod esp_qspi;
 mod psram_tx_buf;
 
-use core::fmt;
+use core::{convert::Infallible, fmt};
 
 use esp_backtrace as _;
 
 use allocator_api2::{boxed::Box, vec};
-use embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice as SharedI2cDevice;
+use embassy_embedded_hal::shared_bus::{I2cDeviceError, asynch::i2c::I2cDevice as SharedI2cDevice};
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, mutex::Mutex};
 use embassy_time::Delay;
 use esp_alloc::ExternalMemory;
 use esp_hal::{
     Async,
     gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull},
-    i2c::master::{Config as I2cConfig, I2c},
+    i2c::master::{BusTimeout, Config as I2cConfig, Error as I2cError, I2c},
     psram::{PsramConfig, PsramMode, SpiRamFreq},
     spi::{
         Mode,
@@ -48,8 +49,8 @@ use static_cell::StaticCell;
 use self::{esp_qspi::EspQspi, psram_tx_buf::PsramTxBuf};
 use embedded_hal::digital::PinState;
 use theo_drivers::{
-    Axis, AxisMap, Co5300, Cst820, DebouncedButton, ExpanderPin, PanelGeometry, PanelPower,
-    PanelSize, Qmi8658, Tca9554,
+    Axis, AxisMap, Co5300, Cst820, Cst820Error, Cst820InitError, DebouncedButton, ExpanderPin,
+    PanelGeometry, PanelPower, PanelSize, Qmi8658, Tca9554, TouchEvent,
 };
 
 pub use esp_hal::main as entry;
@@ -64,6 +65,12 @@ const PSRAM_MODE: PsramMode = PsramMode::OctalSpi;
 /// Twice esp-hal's 40 MHz default: at 40 MHz the display DMA, sharing PSRAM
 /// with the CPU caches, fell behind the SPI (ADR-0004).
 const PSRAM_FREQUENCY: SpiRamFreq = SpiRamFreq::Freq80m;
+
+/// SCL may stay unchanged for this many bus cycles (10 ms at 100 kHz)
+/// before a transfer fails with a timeout, and esp-hal clocks the bus free.
+/// The ESP32-S3 default disables this timeout: a device holding SCL low
+/// would hang every transfer on the bus (t-20).
+const I2C_BUS_TIMEOUT: BusTimeout = BusTimeout::BusCycles(1000);
 
 const TCA9554_ADDRESS: u8 = 0x20;
 /// EXIO0 is the panel reset, EXIO1 its power enable (Waveshare
@@ -124,7 +131,50 @@ pub type Button = DebouncedButton<Input<'static>, Delay>;
 
 /// CST820 touch controller; interrupt on GPIO21 (Waveshare BSP
 /// `BSP_LCD_TOUCH_INT`, active low), points in panel pixels.
-pub type Touch = Cst820<I2cDevice, Input<'static>, Delay>;
+///
+/// It owns the TCA9554 expander after boot, to reset the controller at
+/// run time: the touch task is the expander's only runtime user, so its
+/// read-modify-writes cannot race (ADR-0005).
+pub struct Touch {
+    controller: Cst820<I2cDevice, Input<'static>, Delay>,
+    expander: Tca9554<I2cDevice>,
+}
+
+/// Failure of [`Touch::changed`].
+pub type TouchError = Cst820Error<I2cDeviceError<I2cError>, Infallible>;
+
+/// Failure of [`Touch::reset`].
+pub type TouchResetError = Cst820InitError<I2cDeviceError<I2cError>, I2cDeviceError<I2cError>>;
+
+impl Touch {
+    /// Waits for the next press, move, release or cancellation.
+    ///
+    /// # Errors
+    ///
+    /// Returns the controller's error; see [`Cst820::changed`].
+    pub async fn changed(&mut self) -> Result<TouchEvent, TouchError> {
+        self.controller.changed().await
+    }
+
+    /// Pulses the controller's reset and enables its interrupts again.
+    ///
+    /// A touch in progress is then reported as cancelled.
+    ///
+    /// # Errors
+    ///
+    /// Returns the expander or controller error; see [`Cst820::init`].
+    pub async fn reset(&mut self) -> Result<(), TouchResetError> {
+        self.controller.init(&mut self.expander, TOUCH_RESET).await
+    }
+}
+
+impl fmt::Debug for Touch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // `Cst820`'s and `Tca9554`'s derived `Debug` need `I2cDevice:
+        // Debug`, which the shared-bus handle does not implement.
+        f.debug_struct("Touch").finish_non_exhaustive()
+    }
+}
 
 /// QMI8658 accelerometer, used for the screen orientation.
 pub type Imu = Qmi8658<I2cDevice>;
@@ -137,8 +187,8 @@ pub type I2cBus = Mutex<CriticalSectionRawMutex, I2c<'static, Async>>;
 /// One device's handle on [`I2cBus`]; implements `embedded-hal-async` I2C.
 ///
 /// `Board::init` creates one per driver from the static bus. The expander
-/// is only driven there: its read-modify-writes are not atomic across
-/// handles, so a runtime user must become its single owner (ADR-0005).
+/// has a single handle, owned by [`Touch`] after boot: its
+/// read-modify-writes are not atomic across handles (ADR-0005).
 pub type I2cDevice = SharedI2cDevice<'static, CriticalSectionRawMutex, I2c<'static, Async>>;
 
 /// Board peripherals initialized and ready to use.
@@ -163,9 +213,7 @@ impl fmt::Debug for Board {
         f.debug_struct("Board")
             .field("display", &self.display)
             .field("button", &self.button)
-            // `Cst820`'s derived `Debug` needs `I2cDevice: Debug`, which the
-            // shared-bus handle does not implement.
-            .field("touch", &format_args!("Touch"))
+            .field("touch", &self.touch)
             .field("imu", &self.imu.is_some())
             .field("frame_pixels", &self.frame.len())
             .finish()
@@ -176,8 +224,8 @@ impl Board {
     /// Starts the chip, heaps, logger and scheduler, then brings up the
     /// display, its PSRAM framebuffer, the touch controller and the IMU.
     ///
-    /// The expander is only driven here: after boot no task holds it, so
-    /// its read-modify-writes cannot race (ADR-0005).
+    /// The expander then goes to [`Touch`], its only runtime user, so its
+    /// read-modify-writes cannot race (ADR-0005).
     ///
     /// # Panics
     ///
@@ -199,11 +247,14 @@ impl Board {
         let timg0 = TimerGroup::new(peripherals.TIMG0);
         esp_rtos::start(timg0.timer0, peripherals.FROM_CPU_INTR0);
 
-        let i2c = I2c::new(peripherals.I2C0, I2cConfig::default())
-            .unwrap()
-            .with_sda(peripherals.GPIO15)
-            .with_scl(peripherals.GPIO14)
-            .into_async();
+        let i2c = I2c::new(
+            peripherals.I2C0,
+            I2cConfig::default().with_timeout(I2C_BUS_TIMEOUT),
+        )
+        .unwrap()
+        .with_sda(peripherals.GPIO15)
+        .with_scl(peripherals.GPIO14)
+        .into_async();
         // In `.bss`: internal RAM, never PSRAM, and initialized only once.
         static I2C_BUS: StaticCell<I2cBus> = StaticCell::new();
         let i2c: &'static I2cBus = I2C_BUS.init(Mutex::new(i2c));
@@ -217,7 +268,7 @@ impl Board {
             peripherals.GPIO21,
             InputConfig::default().with_pull(Pull::Up),
         );
-        let mut touch = Cst820::new(
+        let mut controller = Cst820::new(
             I2cDevice::new(i2c),
             TOUCH_ADDRESS,
             touch_interrupt,
@@ -227,9 +278,13 @@ impl Board {
                 height: DISPLAY_GEOMETRY.height,
             },
         );
-        if let Err(error) = touch.init(&mut expander, TOUCH_RESET).await {
+        if let Err(error) = controller.init(&mut expander, TOUCH_RESET).await {
             log::error!("touch controller init failed: {error}");
         }
+        let touch = Touch {
+            controller,
+            expander,
+        };
         let imu = start_imu(i2c).await;
 
         let pixels = usize::from(DISPLAY_GEOMETRY.width) * usize::from(DISPLAY_GEOMETRY.height);

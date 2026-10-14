@@ -148,9 +148,11 @@ impl<I: I2c, P: Wait, D: DelayNs> Cst820<I, P, D> {
     ///
     /// Call it before [`Self::changed`]: after an MCU-only reset the
     /// expander keeps the reset pin high, so the controller is otherwise in
-    /// whatever state the previous firmware left it. `reset` ends as an
-    /// output driven high; other expander pins are kept. Any touch in
-    /// progress is forgotten.
+    /// whatever state the previous firmware left it. Call it again to
+    /// recover a controller that keeps failing. `reset` ends as an output
+    /// driven high; other expander pins are kept. A touch in progress, or
+    /// one abandoned by a failed read and not yet reported, is reported by
+    /// the next [`Self::changed`] as [`TouchEvent::Cancelled`].
     ///
     /// # Errors
     ///
@@ -172,8 +174,11 @@ impl<I: I2c, P: Wait, D: DelayNs> Cst820<I, P, D> {
             .await
             .map_err(InitError::Reset)?;
         self.delay.delay_ms(BOOT_MS).await;
-        self.touched = None;
-        self.cancelled = None;
+        // The controller restarts without a finger: end the touch the
+        // caller has seen, so it does not stay pressed.
+        if let Some(point) = self.touched.take() {
+            self.cancelled = Some(point);
+        }
         self.i2c
             .write(
                 self.address,

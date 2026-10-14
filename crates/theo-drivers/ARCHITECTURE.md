@@ -23,7 +23,7 @@ See `docs/adr/0001` and `0002` for why.
 - `cst820.rs`: `Cst820` touch controller over async I2C; pulses its reset
   through a `Tca9554` pin, waits for the interrupt edge while idle and
   polls while touched; rejects reports off the panel, and cancels (rather
-  than releases) a touch whose read fails.
+  than releases) a touch whose read fails or that a reset interrupts.
 - `qmi8658.rs`: `Qmi8658` IMU over async I2C, accelerometer only.
 - `geometry.rs`, `orientation.rs`: `PanelSize`/`TouchPoint`;
   `OrientationDetector` (gravity to view `Rotation`, dead band), `AxisMap`

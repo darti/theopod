@@ -4,6 +4,7 @@ members = ["crates/theo-drivers", "crates/theo-frame-dump", "tools/frame-png"]
 [workspace.package]
 edition = "2024"
 rust-version = "1.95"
+license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
 allocator-api2 = { version = "0.3", default-features = false, features = ["alloc"] }
@@ -37,6 +38,7 @@ name = "theo-pod"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
 
 [dependencies]
 allocator-api2.workspace = true

@@ -75,3 +75,15 @@ just flash-dump      # flash with the `frame-dump` feature, record the log from 
 just frame-png       # target/frame.log -> target/frame.png
 just monitor-log     # record later dumps (one after each BOOT press)
 ```
+
+## License
+
+The source code is licensed under either of
+[Apache License, Version 2.0](LICENSE-APACHE) or [MIT license](LICENSE-MIT),
+at your option.
+
+The firmware image also links [Slint](https://slint.dev), which is licensed
+under GPL-3.0-only, its royalty-free license, or a commercial license. The
+royalty-free license does not cover embedded systems, so a distributed
+firmware image must comply with the GPL-3.0 (this source is compatible with
+it) unless a Slint commercial license applies.

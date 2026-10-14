@@ -7,6 +7,9 @@
 //! - [`Panel`]: pixel-stream abstraction consumed by renderers.
 //! - [`flush_rows`], [`FlushError`]: sends dirty framebuffer rows to a [`Panel`].
 //! - [`QspiBus`], [`Lanes`]: Quad-SPI transport for display controllers.
+//! - [`ChipSelect`]: chip select released even when a transfer is cancelled.
+//! - [`dma_layout`]: descriptor and payload arithmetic of in-place DMA
+//!   transfers ([`descriptor_chunks`], [`frame_payload`]).
 //! - [`Co5300`], [`PanelGeometry`], [`Co5300Error`]: CO5300 AMOLED controller.
 //! - [`Cst820`], [`TouchEvent`], [`Cst820Error`], [`Cst820InitError`]:
 //!   CST820 capacitive touch controller, interrupt-driven.
@@ -23,8 +26,10 @@
 #![cfg_attr(not(test), no_std)]
 
 pub mod button;
+pub mod chip_select;
 pub mod co5300;
 pub mod cst820;
+pub mod dma_layout;
 pub mod framebuffer;
 pub mod geometry;
 pub mod orientation;
@@ -37,9 +42,13 @@ pub mod tca9554;
 #[cfg(test)]
 mod button_tests;
 #[cfg(test)]
+mod chip_select_tests;
+#[cfg(test)]
 mod co5300_tests;
 #[cfg(test)]
 mod cst820_tests;
+#[cfg(test)]
+mod dma_layout_tests;
 #[cfg(test)]
 mod framebuffer_tests;
 #[cfg(test)]
@@ -54,8 +63,10 @@ mod tca9554_tests;
 mod test_support;
 
 pub use button::{ButtonEvent, DebouncedButton};
+pub use chip_select::ChipSelect;
 pub use co5300::{Co5300, Error as Co5300Error, PanelGeometry};
 pub use cst820::{Cst820, Error as Cst820Error, InitError as Cst820InitError, TouchEvent};
+pub use dma_layout::{Chunk, PayloadError, descriptor_chunks, frame_payload};
 pub use framebuffer::{FlushError, flush_rows};
 pub use geometry::{PanelSize, TouchPoint};
 pub use orientation::{Axis, AxisMap, OrientationDetector, PanelAcceleration, Rotation};

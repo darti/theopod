@@ -4,7 +4,7 @@ use crate::{
     co5300::{Co5300, Error, PanelGeometry},
     panel::Panel,
     qspi::Lanes,
-    test_support::{BusFault, NoDelay, RecordingBus, Transfer, block_on},
+    test_support::{BusFault, NoDelay, RecordingBus, Transfer, block_on, poll_once},
 };
 
 const GEOMETRY: PanelGeometry = PanelGeometry {
@@ -311,6 +311,26 @@ fn write_pixels_bus_failure_keeps_remaining_budget() {
 
     assert_that!(failed.err()).is_equal_to(Some(Error::Bus(BusFault)));
     assert_that!(retried).is_ok();
+}
+
+// Regression (t-3): a cancelled pixel write may have sent part of its
+// transfer, so the area's remaining budget is unknown.
+#[test]
+fn write_pixels_cancelled_mid_transfer_requires_new_area() {
+    let mut panel = Co5300::new(RecordingBus::pending(3), GEOMETRY).unwrap();
+    block_on(panel.begin_area(0..2, 0..2)).unwrap();
+
+    let completed = poll_once(panel.write_pixels(&[0; 8]));
+    let continued = block_on(panel.write_pixels(&[0; 8]));
+    block_on(panel.begin_area(0..2, 0..2)).unwrap();
+    let reopened = block_on(panel.write_pixels(&[0; 8]));
+
+    assert_that!(completed).is_false();
+    assert_that!(continued.err()).is_equal_to(Some(Error::PixelOverflow {
+        remaining: 0,
+        submitted: 8,
+    }));
+    assert_that!(reopened).is_ok();
 }
 
 #[test]

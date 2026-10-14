@@ -71,7 +71,8 @@ impl Transfer {
 #[derive(Debug, PartialEq, Eq)]
 pub struct BusFault;
 
-/// QSPI bus that records successful transfers and can fail exactly once.
+/// QSPI bus that records successful transfers and can fail exactly once,
+/// or stay pending once, to cancel a transfer mid-way.
 ///
 /// It accepts at most 16 bytes per transfer and panics on longer payloads,
 /// so every test checks that drivers respect `MAX_TRANSFER_LEN`.
@@ -79,6 +80,7 @@ pub struct BusFault;
 pub struct RecordingBus {
     pub transfers: Vec<Transfer>,
     fail_at: Option<usize>,
+    pend_at: Option<usize>,
 }
 
 impl RecordingBus {
@@ -86,8 +88,17 @@ impl RecordingBus {
     /// recorded fails once; later attempts succeed.
     pub fn failing(fail_at: usize) -> Self {
         Self {
-            transfers: Vec::new(),
             fail_at: Some(fail_at),
+            ..Self::default()
+        }
+    }
+
+    /// Creates a bus whose transfer attempt when `pend_at` transfers are
+    /// recorded returns `Pending` once before completing.
+    pub fn pending(pend_at: usize) -> Self {
+        Self {
+            pend_at: Some(pend_at),
+            ..Self::default()
         }
     }
 }
@@ -112,6 +123,10 @@ impl QspiBus for RecordingBus {
         if self.fail_at == Some(self.transfers.len()) {
             self.fail_at = None;
             return Err(BusFault);
+        }
+        if self.pend_at == Some(self.transfers.len()) {
+            self.pend_at = None;
+            YieldOnce(false).await;
         }
         self.transfers.push(Transfer {
             opcode,

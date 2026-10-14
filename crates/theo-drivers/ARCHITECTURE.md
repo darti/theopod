@@ -12,6 +12,10 @@ See `docs/adr/0001` and `0002` for why.
   framebuffer as one full-width, even-row-aligned area.
 - `qspi.rs`: async `QspiBus` trait (8-bit opcode, 24-bit address, single or
   quad data, `MAX_TRANSFER_LEN`). `embedded-hal` has no Quad-SPI trait.
+- `chip_select.rs`: `ChipSelect`, an active-low chip select released on
+  drop, so `QspiBus` implementations stay usable when a write is cancelled.
+- `dma_layout.rs`: descriptor chunking and framebuffer-payload checks of
+  in-place DMA transfers, used by the firmware's PSRAM DMA path.
 - `co5300.rs`: CO5300 AMOLED controller. Implements `Panel` over any
   `QspiBus`; validates geometry, 2x2 alignment and pixel counts, and splits
   pixel payloads into bus-sized transfers.
@@ -46,5 +50,6 @@ See `docs/adr/0001` and `0002` for why.
 Side-by-side `*_tests.rs` files use the fakes in `test_support/`: recording
 `QspiBus` and `Panel`, `AddressBus`, `RecordingDelay`, and one async I2C
 fake per chip (`FakeTca9554`, `FakeCst820`, `FakeQmi8658`). Hardware-only:
-the QSPI phases and DMA of `src/device/esp_qspi.rs` / `psram_tx_buf.rs`,
-CST820 timing, and the IMU axis map (`src/device/mod.rs`).
+the QSPI phases and DMA of `src/device/esp_qspi.rs` / `psram_tx_buf.rs`
+(their arithmetic is `dma_layout.rs`), CST820 timing, and the IMU axis
+map (`src/device/mod.rs`).

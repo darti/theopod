@@ -16,6 +16,10 @@ use core::{fmt::Debug, ops::Range};
 /// [`crate::flush_rows`] only opens full-width areas starting on an even
 /// row with an even number of rows (except a last odd row on an odd-height
 /// panel): implementations must accept those to be usable with it.
+///
+/// Cancel safety: dropping either future mid-way must leave the panel
+/// usable once [`Panel::begin_area`] opens a new area; the interrupted
+/// area then holds unknown pixels.
 #[expect(
     async_fn_in_trait,
     reason = "single-threaded executor; implementations need no `Send` bound"

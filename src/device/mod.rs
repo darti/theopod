@@ -321,12 +321,16 @@ impl Board {
         .with_sio3(peripherals.GPIO7)
         .with_dma(peripherals.DMA_CH0)
         .into_async();
-        let bus = EspQspi::new(
-            spi,
-            cs,
-            PsramTxBuf::new(descriptors),
-            bytemuck::cast_slice(frame),
-        );
+        let frame_bytes: &[u8] = bytemuck::cast_slice(frame);
+        // SAFETY: `frame` is leaked above, so it stays allocated for good.
+        let bus = unsafe {
+            EspQspi::new(
+                spi,
+                cs,
+                PsramTxBuf::new(descriptors),
+                core::ptr::from_ref(frame_bytes),
+            )
+        };
         let mut display = Co5300::new(bus, DISPLAY_GEOMETRY).unwrap();
         display.init(&mut Delay).await.unwrap();
 

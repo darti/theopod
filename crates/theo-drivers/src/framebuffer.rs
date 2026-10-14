@@ -57,6 +57,12 @@ impl<E: fmt::Debug> core::error::Error for FlushError<E> {}
 /// Returns [`FlushError::FrameSizeMismatch`] or
 /// [`FlushError::RowsOutOfRange`] before any I/O, or [`FlushError::Panel`]
 /// if the panel fails mid-way; the panel then shows a partial update.
+///
+/// # Cancel safety
+///
+/// Cancel-safe if `panel` is (see [`Panel`]): dropping the future leaves
+/// the rows partially updated, and a later flush works. Send the rows
+/// again.
 pub async fn flush_rows<P: Panel>(
     panel: &mut P,
     frame: &[u8],

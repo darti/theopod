@@ -24,7 +24,10 @@ pub enum Lanes {
 /// phase uses `lanes`. Chip select must stay asserted for the whole transfer.
 ///
 /// The trait is async so DMA implementations can yield while a framebuffer
-/// is streamed out.
+/// is streamed out. Implementations should be cancel-safe: dropping a
+/// [`QspiBus::write`] future mid-transfer must release chip select (see
+/// [`crate::ChipSelect`]) and leave the bus usable, the device then holding
+/// a partial transfer.
 #[expect(
     async_fn_in_trait,
     reason = "single-threaded executor; implementations need no `Send` bound"

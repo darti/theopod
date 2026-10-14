@@ -3,6 +3,8 @@
 - Status: Accepted
 - Date: 2026-10-11
 - Amended: 2026-10-11, DMA reads the framebuffer in place (t-4)
+- Amended: 2026-10-14, cancel-safe flushes (t-3, t-29, t-31), host-tested
+  DMA arithmetic (t-30)
 
 ## Context
 
@@ -42,7 +44,9 @@ of PSRAM that the GDMA can read.
   guard assumes only core 0 runs: starting the app core needs ESP-IDF's
   cache freeze instead. esp-hal's `half_duplex_write_async(&[u8])` cannot
   do this: it reads PSRAM in 16-byte bursts through 4,095-byte
-  descriptors, unaligned after the first.
+  descriptors, unaligned after the first. The descriptor chunking and the
+  framebuffer-payload check (bounds, length, alignment) are pure functions
+  in `theo_drivers::dma_layout`, host-tested (t-30).
 - After each framebuffer transfer, `EspQspi` reads the SPI's "DMA TX slower
   than SPI" flag (`DMA_OUTFIFO_EMPTY_ERR`) and fails with
   `EspQspiError::Underrun` if it is set, so the frame is resent. The flag
@@ -68,8 +72,17 @@ the previous one).
   both on every esp-hal upgrade (ADR-0003).
 - Negative: other PSRAM payloads of 64 bytes or more (heap spill) still go
   through esp-hal's 16-byte bursts, too slow for long transfers.
-- Negative: cancelling a framebuffer transfer loses the SPI master, and
-  the display stops (`EspQspiError::Unavailable`); nothing cancels a flush.
+- Neutral: flushes are cancel-safe (t-3, t-29). Dropping `EspQspi::write`
+  releases chip select (`theo_drivers::ChipSelect`) and, mid-framebuffer
+  transfer, stops the DMA and puts the SPI master back (`InFlight`);
+  `Co5300` refuses further pixels until a new area is opened. The rows of
+  a cancelled flush are stale and must be sent again.
+- Negative: leaking a write future (`mem::forget`) skips those guards: the
+  SPI master is lost (`EspQspiError::Unavailable`) and the DMA keeps
+  reading the framebuffer after the write's borrow ended. `EspQspi::new` is
+  `unsafe` and requires a framebuffer that is never freed, so that read
+  stays in live memory and can only show wrong pixels, as with esp-hal's
+  own in-place DMA (t-31).
 - Negative: PSRAM runs at 80 MHz without the MSPI timing tuning ESP-IDF
   performs (esp-hal 1.2.2 has none); 40 MHz with the bursts and alignment
   was not tried.

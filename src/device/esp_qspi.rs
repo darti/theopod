@@ -10,6 +10,10 @@
 //! Other payloads go through esp-hal's slice API: the SPI FIFO below 64
 //! bytes, else DMA in place from internal RAM or PSRAM (16-byte bursts, too
 //! slow for long PSRAM payloads), or a copy for flash. See `docs/adr/0004`.
+//!
+//! Writes are cancel-safe: dropping one mid-transfer releases chip select
+//! and, for a framebuffer payload, stops the DMA and keeps the SPI master.
+//! Leaking one (`mem::forget`) is not: see [`EspQspi::new`].
 
 use core::{fmt, ops::Range};
 
@@ -18,10 +22,10 @@ use esp_hal::{
     Async,
     spi::{
         Error as SpiError,
-        master::{Address, Command, DataMode, SpiDma},
+        master::{Address, Command, DataMode, SpiDma, SpiDmaTransfer},
     },
 };
-use theo_drivers::{Lanes, QspiBus};
+use theo_drivers::{ChipSelect, Lanes, PayloadError, QspiBus, frame_payload};
 
 use super::psram_tx_buf::{self, PsramTxBuf};
 
@@ -42,7 +46,8 @@ pub enum EspQspiError<P> {
         /// Payload offset in the framebuffer, in bytes.
         offset: usize,
     },
-    /// An earlier transfer was cancelled mid-flight and took the SPI master.
+    /// An earlier framebuffer transfer was leaked mid-flight with the SPI
+    /// master; only a reboot recovers.
     Unavailable,
     /// The DMA fell behind the SPI during a framebuffer transfer.
     Underrun,
@@ -62,13 +67,25 @@ impl<P: fmt::Debug> fmt::Display for EspQspiError<P> {
                 "framebuffer payload at offset {offset} is not {}-byte aligned",
                 psram_tx_buf::BURST
             ),
-            Self::Unavailable => write!(f, "spi master lost to a cancelled transfer"),
+            Self::Unavailable => write!(f, "spi master lost to a leaked transfer"),
             Self::Underrun => write!(f, "dma fell behind the spi"),
         }
     }
 }
 
 impl<P: fmt::Debug> core::error::Error for EspQspiError<P> {}
+
+impl<P> From<PayloadError> for EspQspiError<P> {
+    fn from(error: PayloadError) -> Self {
+        match error {
+            PayloadError::TooLong { len } => Self::TooLong { len },
+            PayloadError::Misaligned { offset } => Self::Misaligned { offset },
+        }
+    }
+}
+
+/// SPI master and framebuffer descriptor chain, while no transfer runs.
+type Idle<'d> = (SpiDma<'d, Async>, PsramTxBuf);
 
 /// esp-hal 1.2.2's private SPI `MAX_DMA_SIZE` (`src/spi/master/dma.rs`):
 /// re-check it on every esp-hal upgrade (ADR-0003).
@@ -87,9 +104,9 @@ pub const MAX_TRANSFER_LEN: usize =
 /// select.
 #[derive(Debug)]
 pub struct EspQspi<'d, CS> {
-    /// SPI master and framebuffer descriptor chain; `None` only after a
-    /// cancelled framebuffer transfer, which consumes both.
-    bus: Option<(SpiDma<'d, Async>, PsramTxBuf)>,
+    /// SPI master and framebuffer descriptor chain; `None` while a
+    /// framebuffer transfer runs, and forever after one is leaked.
+    bus: Option<Idle<'d>>,
     cs: CS,
     /// Addresses of the framebuffer, sent through the [`PsramTxBuf`].
     frame: Range<usize>,
@@ -106,49 +123,43 @@ impl<'d, CS: OutputPin> EspQspi<'d, CS> {
     ///
     /// Panics if `psram_tx` cannot chain [`MAX_TRANSFER_LEN`] bytes or if
     /// `frame` is not burst-aligned.
-    pub fn new(spi: SpiDma<'d, Async>, cs: CS, psram_tx: PsramTxBuf, frame: &[u8]) -> Self {
+    ///
+    /// # Safety
+    ///
+    /// `frame` must stay allocated for the rest of the program (leaked).
+    /// Leaking a write future (`mem::forget`) skips the guard that stops the
+    /// DMA, which then keeps reading the framebuffer after the write's
+    /// borrow ended; this keeps that read inside live memory. The CPU may
+    /// still change the pixels meanwhile: the panel then shows wrong pixels,
+    /// as with esp-hal's own in-place DMA, and the bus is lost
+    /// ([`EspQspiError::Unavailable`]).
+    pub unsafe fn new(
+        spi: SpiDma<'d, Async>,
+        cs: CS,
+        psram_tx: PsramTxBuf,
+        frame: *const [u8],
+    ) -> Self {
         assert!(
             psram_tx.capacity() >= MAX_TRANSFER_LEN,
             "PsramTxBuf shorter than MAX_TRANSFER_LEN"
         );
-        let frame = frame.as_ptr_range();
+        let start = frame.cast::<u8>() as usize;
         assert!(
-            (frame.start as usize).is_multiple_of(psram_tx_buf::BURST),
+            start.is_multiple_of(psram_tx_buf::BURST),
             "framebuffer not burst-aligned"
         );
         Self {
             bus: Some((spi, psram_tx)),
             cs,
-            frame: frame.start as usize..frame.end as usize,
+            frame: start..start + frame.len(),
         }
-    }
-
-    /// Tells whether `data` lies in the framebuffer, checking it can be sent.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`EspQspiError::TooLong`] or [`EspQspiError::Misaligned`] for
-    /// a framebuffer payload the [`PsramTxBuf`] cannot send.
-    fn is_frame_payload(&self, data: &[u8]) -> Result<bool, EspQspiError<CS::Error>> {
-        let span = data.as_ptr_range();
-        let (start, end) = (span.start as usize, span.end as usize);
-        if data.is_empty() || start < self.frame.start || end > self.frame.end {
-            return Ok(false);
-        }
-        if data.len() > MAX_TRANSFER_LEN {
-            return Err(EspQspiError::TooLong { len: data.len() });
-        }
-        if !start.is_multiple_of(psram_tx_buf::BURST) {
-            return Err(EspQspiError::Misaligned {
-                offset: start - self.frame.start,
-            });
-        }
-        Ok(true)
     }
 
     /// Sends `source` with esp-hal's slice API (FIFO, DMA in place, or copy).
+    ///
+    /// Cancel-safe: esp-hal stops the DMA when the future is dropped.
     async fn send(
-        bus: &mut Option<(SpiDma<'d, Async>, PsramTxBuf)>,
+        bus: &mut Option<Idle<'d>>,
         mode: DataMode,
         command: Command,
         address: Address,
@@ -162,10 +173,10 @@ impl<'d, CS: OutputPin> EspQspi<'d, CS> {
 
     /// Sends a framebuffer `source` through the [`PsramTxBuf`].
     ///
-    /// Cancelling the future stops the DMA but loses the SPI master: later
-    /// transfers fail with [`EspQspiError::Unavailable`].
+    /// Cancel-safe: dropping the future stops the DMA and puts the SPI
+    /// master back ([`InFlight`]).
     async fn send_frame(
-        bus: &mut Option<(SpiDma<'d, Async>, PsramTxBuf)>,
+        bus: &mut Option<Idle<'d>>,
         mode: DataMode,
         command: Command,
         address: Address,
@@ -173,33 +184,62 @@ impl<'d, CS: OutputPin> EspQspi<'d, CS> {
     ) -> Result<(), EspQspiError<CS::Error>> {
         let (master, mut buffer) = bus.take().ok_or(EspQspiError::Unavailable)?;
         // SAFETY: `source` is borrowed for this whole call, and the transfer
-        // below is either waited on or dropped here; dropping it cancels the
-        // DMA and waits for it to stop (`SpiDmaTransfer::drop`). Leaking the
-        // `write` future (`mem::forget`) is the accepted gap: the DMA only
-        // reads, so the worst case is wrong pixels on the panel.
+        // below is owned by `InFlight`, which stops the DMA before this call
+        // returns or its future is dropped. Leaking the future skips that:
+        // `EspQspi::new`'s contract keeps the frame, which holds `source`,
+        // allocated, so the DMA then only reads stale pixels.
         unsafe { buffer.set_source(source) };
-        let (result, master, mut buffer) = match master.half_duplex_write_buffer(
-            mode,
-            command,
-            address,
-            0,
-            source.len(),
-            buffer,
-        ) {
-            Ok(mut transfer) => {
-                transfer.wait_for_done().await;
-                let (master, buffer) = transfer.wait();
-                (Ok(()), master, buffer)
+        match master.half_duplex_write_buffer(mode, command, address, 0, source.len(), buffer) {
+            Ok(transfer) => {
+                let mut in_flight = InFlight {
+                    transfer: Some(transfer),
+                    slot: bus,
+                };
+                in_flight.wait_for_done().await;
+                Ok(())
             }
             // A failed start leaves no transfer running: the next one
             // resets the channel.
-            Err((error, master, buffer)) => (Err(EspQspiError::Spi(error)), master, buffer),
-        };
-        // esp-hal returns the buffer without `from_view`: forget the source
-        // here, so the borrow of `source` cannot outlive this call.
-        buffer.clear_source();
-        *bus = Some((master, buffer));
-        result
+            Err((error, master, mut buffer)) => {
+                buffer.clear_source();
+                *bus = Some((master, buffer));
+                Err(EspQspiError::Spi(error))
+            }
+        }
+    }
+}
+
+/// Framebuffer transfer in flight, with the slot its SPI master returns to.
+///
+/// Dropping it, after completion or mid-transfer, stops the DMA and puts
+/// the master and the cleared buffer back in the slot: a cancelled write
+/// leaves the bus usable instead of losing the master.
+struct InFlight<'a, 'd> {
+    transfer: Option<SpiDmaTransfer<'d, Async, PsramTxBuf>>,
+    slot: &'a mut Option<Idle<'d>>,
+}
+
+impl InFlight<'_, '_> {
+    /// Waits for the transfer to complete.
+    async fn wait_for_done(&mut self) {
+        if let Some(transfer) = &mut self.transfer {
+            transfer.wait_for_done().await;
+        }
+    }
+}
+
+impl Drop for InFlight<'_, '_> {
+    fn drop(&mut self) {
+        if let Some(mut transfer) = self.transfer.take() {
+            // No-op once done; otherwise stops the DMA, which `wait` then
+            // waits for (as `SpiDmaTransfer::drop` does).
+            transfer.cancel();
+            let (master, mut buffer) = transfer.wait();
+            // esp-hal returns the buffer without `from_view`: forget the
+            // source here, so the borrow of it cannot outlive the transfer.
+            buffer.clear_source();
+            *self.slot = Some((master, buffer));
+        }
     }
 }
 
@@ -208,8 +248,8 @@ impl<CS: OutputPin> QspiBus for EspQspi<'_, CS> {
 
     const MAX_TRANSFER_LEN: usize = MAX_TRANSFER_LEN;
 
-    /// Not cancel-safe: dropping the future mid-transfer leaves chip
-    /// select asserted, and mid-framebuffer-transfer loses the SPI master.
+    /// Cancel-safe: dropping the future mid-transfer releases chip select
+    /// and keeps the SPI master; the panel then holds a partial transfer.
     async fn write(
         &mut self,
         opcode: u8,
@@ -223,13 +263,19 @@ impl<CS: OutputPin> QspiBus for EspQspi<'_, CS> {
         };
         let command = Command::_8Bit(u16::from(opcode), DataMode::Single);
         let address = Address::_24Bit(address, DataMode::Single);
-        let frame_payload = self.is_frame_payload(data)?;
+        let span = data.as_ptr_range();
+        let frame_payload = frame_payload(
+            self.frame.clone(),
+            span.start as usize..span.end as usize,
+            MAX_TRANSFER_LEN,
+            psram_tx_buf::BURST,
+        )?;
         if frame_payload {
             // esp-hal also clears it when the transfer starts; this keeps the
             // check correct without relying on that.
             underrun::clear();
         }
-        self.cs.set_low().map_err(EspQspiError::ChipSelect)?;
+        let selected = ChipSelect::select(&mut self.cs).map_err(EspQspiError::ChipSelect)?;
         let transferred = if frame_payload {
             Self::send_frame(&mut self.bus, mode, command, address, data).await
         } else {
@@ -237,7 +283,7 @@ impl<CS: OutputPin> QspiBus for EspQspi<'_, CS> {
         };
         // Always release chip select. Errors are reported in this order:
         // SPI, then underrun, then chip select.
-        let released = self.cs.set_high();
+        let released = selected.release();
         transferred?;
         if frame_payload && underrun::happened() {
             return Err(EspQspiError::Underrun);

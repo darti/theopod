@@ -255,6 +255,10 @@ impl<B: QspiBus> Panel for Co5300<B> {
     /// Transfers are taken in order from the start of `pixels`, and all but
     /// the last are exactly `MAX_TRANSFER_LEN` rounded down to whole pixels:
     /// buses may rely on that fixed stride.
+    ///
+    /// Cancel-safe if the bus is: once cancelled mid-transfer, the panel
+    /// holds an unknown part of the area, so later writes fail with
+    /// [`Error::PixelOverflow`] until [`Panel::begin_area`] opens a new one.
     async fn write_pixels(&mut self, pixels: &[u8]) -> Result<(), Self::Error> {
         // Whole pixels per transfer.
         let chunk_len = const {
@@ -271,14 +275,19 @@ impl<B: QspiBus> Panel for Co5300<B> {
             });
         }
         for chunk in pixels.chunks(chunk_len) {
-            self.transfer(
-                OPCODE_WRITE_PIXELS,
-                CMD_MEMORY_WRITE_CONTINUE,
-                Lanes::Quad,
-                chunk,
-            )
-            .await?;
-            self.remaining -= chunk.len();
+            // Closed while the transfer runs: a cancelled one leaves it so.
+            let remaining = core::mem::take(&mut self.remaining);
+            let sent = self
+                .transfer(
+                    OPCODE_WRITE_PIXELS,
+                    CMD_MEMORY_WRITE_CONTINUE,
+                    Lanes::Quad,
+                    chunk,
+                )
+                .await;
+            // A failed transfer sent nothing the panel kept.
+            self.remaining = remaining - if sent.is_ok() { chunk.len() } else { 0 };
+            sent?;
         }
         Ok(())
     }

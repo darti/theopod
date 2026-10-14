@@ -15,6 +15,7 @@ use core::ptr;
 use esp_hal::dma::{
     BurstConfig, DmaDescriptor, DmaTxBuffer, ExternalBurstConfig, InternalBurstConfig, Preparation,
 };
+use theo_drivers::descriptor_chunks;
 
 /// PSRAM burst length; regions sent must start on a multiple of it.
 pub const BURST: usize = ExternalBurstConfig::Size64 as usize;
@@ -73,7 +74,8 @@ impl PsramTxBuf {
     ///
     /// `source` must stay valid and unmodified until the transfer using this
     /// buffer has completed, or has been dropped (which waits for the DMA to
-    /// stop); the transfer must not be leaked.
+    /// stop). If the transfer can be leaked, `source` must stay allocated
+    /// for the rest of the program: the DMA keeps reading it.
     pub unsafe fn set_source(&mut self, source: &[u8]) {
         assert!(
             !source.is_empty()
@@ -102,21 +104,19 @@ unsafe impl DmaTxBuffer for PsramTxBuf {
 
     fn prepare(&mut self) -> Preparation {
         assert!(self.len != 0, "PsramTxBuf prepared without a source");
-        let count = self.len.div_ceil(CHUNK);
         assert!(
-            count <= self.descriptors.len(),
+            self.len <= self.capacity(),
             "source exceeds the descriptors"
         );
         // All descriptor accesses go through `head`, which also links them.
         let head = self.descriptors.as_mut_ptr();
-        for index in 0..count {
-            // SAFETY: `index < count <= descriptors.len()`, and `head` is the
-            // only pointer used to reach the descriptors in this loop.
+        // Host-tested: chunks tile the source, each starting a whole burst.
+        for (index, chunk) in descriptor_chunks(self.len, CHUNK).enumerate() {
+            let (len, last) = (chunk.len, chunk.last);
+            // SAFETY: `len <= capacity` makes `index < descriptors.len()`, and
+            // `head` is the only pointer used to reach the descriptors here.
             let descriptor = unsafe { &mut *head.add(index) };
-            let offset = index * CHUNK;
-            let len = (self.len - offset).min(CHUNK);
-            let last = index + 1 == count;
-            let buffer = self.source.wrapping_add(offset);
+            let buffer = self.source.wrapping_add(chunk.offset);
             // The DMA reads PSRAM itself: flush what the CPU left in the cache,
             // one descriptor at a time to bound the time with interrupts off.
             writeback(buffer as usize, len);

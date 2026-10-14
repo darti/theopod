@@ -89,6 +89,11 @@ pub const IMU_AXES: AxisMap = AxisMap {
     down: Axis::NegX,
     out: Axis::NegZ,
 };
+// A typo here would compile and turn the view the wrong way.
+const _: () = assert!(
+    IMU_AXES.is_rotation(),
+    "IMU_AXES must use each sensor axis once and not mirror"
+);
 
 /// 368 x 448 AMOLED panel, first visible column 16 in CO5300 RAM. Keep in
 /// sync with `PANEL` in `crates/theo-drivers/src/framebuffer_tests.rs`.

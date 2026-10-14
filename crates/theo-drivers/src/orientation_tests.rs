@@ -354,3 +354,67 @@ fn panel_to_view_inverts_slint_transform_for_every_pixel() {
         }
     }
 }
+
+/// Every signed axis.
+const AXES: [Axis; 6] = [
+    Axis::X,
+    Axis::Y,
+    Axis::Z,
+    Axis::NegX,
+    Axis::NegY,
+    Axis::NegZ,
+];
+
+#[test]
+fn axis_map_is_rotation_accepts_board_map() {
+    // `IMU_AXES` measured on the board (`src/device/mod.rs`).
+    let map = AxisMap {
+        right: Axis::Y,
+        down: Axis::NegX,
+        out: Axis::NegZ,
+    };
+
+    assert_that!(map.is_rotation()).is_true();
+}
+
+#[test]
+fn axis_map_is_rotation_rejects_mirror() {
+    // Right, down and out form a left-handed frame: mapping them onto the
+    // sensor's right-handed X, Y, Z mirrors the space.
+    let map = AxisMap {
+        right: Axis::X,
+        down: Axis::Y,
+        out: Axis::Z,
+    };
+
+    assert_that!(map.is_rotation()).is_false();
+}
+
+#[test]
+fn axis_map_is_rotation_rejects_repeated_axis() {
+    let map = AxisMap {
+        right: Axis::Y,
+        down: Axis::NegY,
+        out: Axis::Z,
+    };
+
+    assert_that!(map.is_rotation()).is_false();
+}
+
+#[test]
+fn axis_map_is_rotation_accepts_exactly_the_24_mountings() {
+    let mut rotations = 0;
+    for right in AXES {
+        for down in AXES {
+            for out in AXES {
+                let map = AxisMap { right, down, out };
+                if map.is_rotation() {
+                    rotations += 1;
+                }
+            }
+        }
+    }
+
+    // A cube has 24 orientations; mirrors and repeated axes are rejected.
+    assert_that!(rotations).is_equal_to(24);
+}

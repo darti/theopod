@@ -26,8 +26,9 @@ See `docs/adr/0001` and `0002` for why.
   than releases) a touch whose read fails.
 - `qmi8658.rs`: `Qmi8658` IMU over async I2C, accelerometer only.
 - `geometry.rs`, `orientation.rs`: `PanelSize`/`TouchPoint`;
-  `OrientationDetector` (gravity to view `Rotation`, dead band), `AxisMap`,
-  and the rotated view size and touch mapping.
+  `OrientationDetector` (gravity to view `Rotation`, dead band), `AxisMap`
+  (with the `is_rotation` const check), and the rotated view size and
+  touch mapping.
 - `button.rs`: `DebouncedButton`, cancel-safe debounced press/release.
 
 ## Extension points

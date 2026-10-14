@@ -41,7 +41,8 @@ row/column exchange and mirroring) or Slint's software renderer
   `src/device/mod.rs`. Waveshare does not document it: it is measured on
   the board with the `imu-calibration` feature (`just imu-calibrate`: view
   kept upright, raw axes logged once a second), from positions defined
-  against gravity.
+  against gravity. A compile-time assert (`AxisMap::is_rotation`, t-42)
+  rejects a map that repeats an axis or mirrors space.
 - The IMU is optional: if no QMI8658 answers at 0x6B or 0x6A, the view
   stays upright. Its identity is checked before any write, so probing an
   address held by another chip leaves it untouched.

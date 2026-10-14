@@ -1,7 +1,7 @@
 //! Screen orientation from gravity, and the matching view transform.
 //!
 //! - [`AxisMap`], [`Axis`]: how the accelerometer axes lie on the panel;
-//!   a board constant.
+//!   a board constant, checked by [`AxisMap::is_rotation`].
 //! - [`PanelAcceleration`]: an acceleration on the panel's axes.
 //! - [`OrientationDetector`]: picks the [`Rotation`] that keeps the view
 //!   upright, with a dead band and a stability count against flicker.
@@ -35,6 +35,18 @@ pub enum Axis {
 }
 
 impl Axis {
+    /// Unit vector of this axis in sensor coordinates.
+    const fn vector(self) -> [i32; 3] {
+        match self {
+            Self::X => [1, 0, 0],
+            Self::Y => [0, 1, 0],
+            Self::Z => [0, 0, 1],
+            Self::NegX => [-1, 0, 0],
+            Self::NegY => [0, -1, 0],
+            Self::NegZ => [0, 0, -1],
+        }
+    }
+
     fn read(self, acceleration: Acceleration) -> i16 {
         match self {
             Self::X => acceleration.x,
@@ -59,6 +71,21 @@ pub struct AxisMap {
 }
 
 impl AxisMap {
+    /// Tells whether a sensor can be mounted this way: a proper rotation.
+    ///
+    /// Each sensor axis must be used once, without mirroring space. Right,
+    /// down and out form a left-handed frame while the sensor's X, Y, Z are
+    /// right-handed, so the matrix of the map has determinant -1. A typo in
+    /// a measured map (a repeated axis, one sign flipped) fails this check;
+    /// a wrong but physical map does not.
+    #[must_use]
+    pub const fn is_rotation(&self) -> bool {
+        let [a, b, c] = self.right.vector();
+        let [d, e, f] = self.down.vector();
+        let [g, h, i] = self.out.vector();
+        a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g) == -1
+    }
+
     /// Expresses a sensor sample on the panel's axes.
     #[must_use]
     pub fn apply(&self, acceleration: Acceleration) -> PanelAcceleration {

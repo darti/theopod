@@ -30,7 +30,7 @@ use esp_backtrace as _;
 use allocator_api2::{boxed::Box, vec};
 use embassy_embedded_hal::shared_bus::{I2cDeviceError, asynch::i2c::I2cDevice as SharedI2cDevice};
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, mutex::Mutex};
-use embassy_time::Delay;
+use embassy_time::{Delay, Instant};
 use esp_alloc::ExternalMemory;
 use esp_hal::{
     Async,
@@ -50,7 +50,8 @@ use self::{esp_qspi::EspQspi, psram_tx_buf::PsramTxBuf};
 use embedded_hal::digital::PinState;
 use theo_drivers::{
     Axis, AxisMap, Co5300, Cst820, Cst820Error, Cst820InitError, DebouncedButton, ExpanderPin,
-    PanelGeometry, PanelPower, PanelSize, Qmi8658, Tca9554, TouchEvent, Transient, flush_rows,
+    PanelGeometry, PanelPower, PanelSize, Qmi8658, Tca9554, TouchEvent, Transient, check_pattern,
+    flush_rows,
 };
 
 pub use esp_hal::main as entry;
@@ -63,7 +64,9 @@ const HEAP_SIZE: usize = 64 * 1024;
 /// less reliable than naming the mode.
 const PSRAM_MODE: PsramMode = PsramMode::OctalSpi;
 /// Twice esp-hal's 40 MHz default: at 40 MHz the display DMA, sharing PSRAM
-/// with the CPU caches, fell behind the SPI (ADR-0004).
+/// with the CPU caches, falls behind the SPI, even with 64-byte bursts and
+/// aligned transfers (ADR-0004, t-27). `Board::init` pattern-tests the
+/// framebuffer region, as esp-hal does no timing tuning at 80 MHz.
 const PSRAM_FREQUENCY: SpiRamFreq = SpiRamFreq::Freq80m;
 
 /// SCL may stay unchanged for this many bus cycles (10 ms at 100 kHz)
@@ -297,6 +300,17 @@ impl Board {
             assert!(skip < PAD, "framebuffer cannot be burst-aligned");
             &mut raw[skip..skip + pixels]
         };
+        // PSRAM runs at 80 MHz without timing tuning (ADR-0004): fail here
+        // rather than corrupt pixels and heap data silently (t-27).
+        let started = Instant::now();
+        // Whole 32-bit words: two pixels per access, the frame is 64-byte aligned.
+        if let Err(mismatch) = check_pattern(bytemuck::cast_slice_mut(frame)) {
+            panic!("PSRAM self-test failed: {mismatch:?}");
+        }
+        log::info!(
+            "PSRAM self-test passed in {} ms",
+            started.elapsed().as_millis()
+        );
 
         // Descriptors for framebuffer transfers: static, in internal RAM.
         let (_, descriptors) = esp_hal::dma_descriptors_chunk_size!(

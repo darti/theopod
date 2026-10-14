@@ -5,7 +5,7 @@
 - Amended: 2026-10-11, DMA reads the framebuffer in place (t-4)
 - Amended: 2026-10-14, cancel-safe flushes (t-3, t-29, t-31), host-tested
   DMA arithmetic (t-30), flush retry policy (t-1, t-28), several row bands
-  per frame (t-5)
+  per frame (t-5), PSRAM clock measured and self-tested (t-27)
 
 ## Context
 
@@ -99,8 +99,14 @@ the previous one).
   stays in live memory and can only show wrong pixels, as with esp-hal's
   own in-place DMA (t-31).
 - Negative: PSRAM runs at 80 MHz without the MSPI timing tuning ESP-IDF
-  performs (esp-hal 1.2.2 has none); 40 MHz with the bursts and alignment
-  was not tried.
+  performs (esp-hal 1.2.2 has none). 40 MHz is not an option even with
+  the bursts and alignment (t-27): resending the full frame every 16 ms,
+  81% of 1,000 flushes underran with an idle CPU, and every one with a
+  task copying PSRAM meanwhile; 80 MHz underran none of 2,000 in the same
+  test. To catch a marginal clock, `Board::init` pattern-tests the
+  framebuffer region (`theo_drivers::check_pattern`, an address hash and
+  its complement in 32-bit words, 81 ms) and panics on a mismatch; the
+  last data-cache-sized part may be read back from the cache.
 - Negative: PSRAM is part of the global heap, so general allocations spill
   there once internal RAM is full; atomics must not live in PSRAM on the
   ESP32-S3.

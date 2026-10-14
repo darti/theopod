@@ -16,6 +16,7 @@
 //! - [`Co5300`], [`PanelGeometry`], [`Co5300Error`]: CO5300 AMOLED controller.
 //! - [`Cst820`], [`TouchEvent`], [`Cst820Error`], [`Cst820InitError`]:
 //!   CST820 capacitive touch controller, interrupt-driven.
+//! - [`check_pattern`], [`Mismatch`]: pattern test of a RAM region.
 //! - [`PanelSize`], [`TouchPoint`]: pixel sizes and positions of the panel
 //!   or of a view drawn on it.
 //! - [`Qmi8658`], [`Acceleration`], [`Qmi8658Error`]: QMI8658 inertial
@@ -36,6 +37,7 @@ pub mod dirty_rows;
 pub mod dma_layout;
 pub mod framebuffer;
 pub mod geometry;
+pub mod memory_check;
 pub mod orientation;
 pub mod panel;
 pub mod panel_power;
@@ -59,6 +61,8 @@ mod dma_layout_tests;
 #[cfg(test)]
 mod framebuffer_tests;
 #[cfg(test)]
+mod memory_check_tests;
+#[cfg(test)]
 mod orientation_tests;
 #[cfg(test)]
 mod panel_power_tests;
@@ -79,6 +83,7 @@ pub use dirty_rows::DirtyRows;
 pub use dma_layout::{Chunk, PayloadError, descriptor_chunks, frame_payload};
 pub use framebuffer::{FlushError, flush_bands, flush_rows};
 pub use geometry::{PanelSize, TouchPoint};
+pub use memory_check::{Mismatch, check_pattern};
 pub use orientation::{Axis, AxisMap, OrientationDetector, PanelAcceleration, Rotation};
 pub use panel::Panel;
 pub use panel_power::PanelPower;

@@ -15,8 +15,8 @@ only on `embedded-hal` / `embedded-hal-async`, unit-tested on the host
 - `qspi.rs`: async `QspiBus` trait (8-bit opcode, 24-bit address, single or
   quad data, `MAX_TRANSFER_LEN`). `embedded-hal` has no Quad-SPI trait.
 - `chip_select.rs`: `ChipSelect`, released on drop (cancel-safe buses).
-- `dma_layout.rs`: descriptor chunking and payload checks of the
-  firmware's in-place PSRAM DMA.
+- `dma_layout.rs`, `memory_check.rs`: descriptor chunking and payload
+  checks of the in-place PSRAM DMA; `check_pattern`, a RAM self-test.
 - `co5300.rs`: CO5300 AMOLED controller. Implements `Panel` over any
   `QspiBus`; validates geometry, 2x2 alignment and pixel counts, and splits
   pixel payloads into bus-sized transfers.

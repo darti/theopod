@@ -8,10 +8,12 @@
 //! dirty part of the framebuffer, send its rows to the panel by DMA, then
 //! sleep until the next frame or Slint timer, or until an input changes:
 //! the BOOT button is forwarded to Slint as the Return key, touches as
-//! pointer events.
+//! pointer events, and orientation changes rotate the rendering, the window
+//! size and the touch coordinates together.
 //!
-//! Each input runs in its own task ([`watch_button`], [`watch_touch`]) and
-//! reaches the loop through a channel ([`BUTTON_EVENTS`], [`TOUCH_EVENTS`]):
+//! Each input runs in its own task ([`watch_button`], [`watch_touch`],
+//! [`watch_orientation`]) and reaches the loop through a channel
+//! ([`BUTTON_EVENTS`], [`TOUCH_EVENTS`]) or a signal ([`ROTATION`]):
 //! the loop cancels its wait every frame, which would otherwise restart the
 //! button debounce, or a touch poll, forever. Each wake-up dispatches every
 //! queued event before the next frame, so a drag never trails the finger.
@@ -27,17 +29,22 @@ mod slint_backend;
 use alloc::boxed::Box;
 
 use embassy_executor::Spawner;
-use embassy_futures::select::{Either3, select3};
-use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel};
-use embassy_time::{Duration, Instant, Timer};
+use embassy_futures::select::{Either4, select4};
+use embassy_sync::{
+    blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel, signal::Signal,
+};
+use embassy_time::{Duration, Instant, Ticker, Timer};
 use slint::{
     ComponentHandle, LogicalPosition, PhysicalSize,
     platform::{
         Key, PointerEventButton, WindowAdapter, WindowEvent,
-        software_renderer::{MinimalSoftwareWindow, RepaintBufferType},
+        software_renderer::{MinimalSoftwareWindow, RenderingRotation, RepaintBufferType},
     },
 };
-use theo_drivers::{ButtonEvent, Panel, TouchEvent, TouchPoint, flush_rows};
+use theo_drivers::{
+    ButtonEvent, OrientationDetector, Panel, PanelSize, Rotation, TouchEvent, TouchPoint,
+    flush_rows,
+};
 
 use crate::{
     device::Board,
@@ -61,12 +68,19 @@ const TOUCH_QUEUE: usize = 8;
 /// Pause after a failed touch read, so a faulty controller toggling its
 /// interrupt cannot keep the touch task busy.
 const TOUCH_RETRY: Duration = Duration::from_millis(10);
+/// Accelerometer sample period; a rotation needs
+/// [`OrientationDetector::STABLE_SAMPLES`] samples in a row.
+const ORIENTATION_PERIOD: Duration = Duration::from_millis(100);
+/// View rotation at boot, until the accelerometer says otherwise.
+const INITIAL_ROTATION: Rotation = Rotation::Deg0;
 
 /// Debounced BOOT button changes, from [`watch_button`] to the UI loop.
 static BUTTON_EVENTS: Channel<CriticalSectionRawMutex, ButtonEvent, BUTTON_QUEUE> = Channel::new();
 /// Touch presses, moves, releases and cancellations, from [`watch_touch`]
 /// to the UI loop.
 static TOUCH_EVENTS: Channel<CriticalSectionRawMutex, TouchEvent, TOUCH_QUEUE> = Channel::new();
+/// Latest view rotation, from [`watch_orientation`] to the UI loop.
+static ROTATION: Signal<CriticalSectionRawMutex, Rotation> = Signal::new();
 
 #[device::entry]
 async fn main(spawner: Spawner) {
@@ -74,11 +88,19 @@ async fn main(spawner: Spawner) {
         mut display,
         button,
         touch,
+        imu,
         frame,
     } = Board::init().await;
     spawner.spawn(watch_button(button).unwrap());
     spawner.spawn(watch_touch(touch).unwrap());
+    if let Some(imu) = imu {
+        spawner.spawn(watch_orientation(imu).unwrap());
+    }
     let size = display.size();
+    let panel = PanelSize {
+        width: size.0,
+        height: size.1,
+    };
     let mut frame = FrameBuffer::new(frame, size);
 
     // The framebuffer persists, so Slint only redraws what changed.
@@ -93,6 +115,13 @@ async fn main(spawner: Spawner) {
     // Consecutive failed flushes; while non-zero, every frame is resent.
     let mut failed_flushes: u32 = 0;
     let mut first_frame_sent = false;
+    let mut rotation = INITIAL_ROTATION;
+    // Set when `rotation` changed and the next frame must redraw everything.
+    let mut rotate_pending = false;
+    // Rotation signalled while a finger was down: applied once it lifts, so
+    // a press and its release are mapped the same way.
+    let mut deferred_rotation: Option<Rotation> = None;
+    let mut finger_down = false;
     // Dump the first frame, then the frame after each BOOT press.
     #[cfg(feature = "frame-dump")]
     let mut dump_pending = true;
@@ -100,7 +129,20 @@ async fn main(spawner: Spawner) {
         let frame_start = Instant::now();
         slint::platform::update_timers_and_animations();
         let mut dirty = 0..0;
-        window.draw_if_needed(|renderer| dirty = frame.render(renderer));
+        let drawn = window.draw_if_needed(|renderer| {
+            if rotate_pending {
+                renderer.set_rendering_rotation(rendering_rotation(rotation));
+                // Every pixel moves. Changing the buffer type empties Slint's
+                // partial-rendering cache, so the render below redraws the
+                // whole frame, once.
+                renderer.set_repaint_buffer_type(RepaintBufferType::NewBuffer);
+                renderer.set_repaint_buffer_type(RepaintBufferType::ReusedBuffer);
+            }
+            dirty = frame.render(renderer);
+        });
+        if drawn {
+            rotate_pending = false;
+        }
         if failed_flushes > 0 {
             dirty = frame.all_rows();
         }
@@ -144,18 +186,41 @@ async fn main(spawner: Spawner) {
             }
             dispatch_button(&window, event);
         };
-        match select3(wake_up, BUTTON_EVENTS.receive(), TOUCH_EVENTS.receive()).await {
-            Either3::First(()) => {}
-            Either3::Second(event) => on_button(event),
-            Either3::Third(event) => dispatch_touch(&window, event),
+        let mut on_touch = |event| {
+            finger_down = matches!(event, TouchEvent::Pressed(_) | TouchEvent::Moved(_));
+            dispatch_touch(&window, event, rotation, panel);
+        };
+        match select4(
+            wake_up,
+            BUTTON_EVENTS.receive(),
+            TOUCH_EVENTS.receive(),
+            ROTATION.wait(),
+        )
+        .await
+        {
+            Either4::First(()) => {}
+            Either4::Second(event) => on_button(event),
+            Either4::Third(event) => on_touch(event),
+            Either4::Fourth(new_rotation) => deferred_rotation = Some(new_rotation),
         }
         // Catch up with everything queued during the frame before drawing
-        // the next one.
+        // the next one, in the rotation those touches were made in.
         while let Ok(event) = BUTTON_EVENTS.try_receive() {
             on_button(event);
         }
         while let Ok(event) = TOUCH_EVENTS.try_receive() {
-            dispatch_touch(&window, event);
+            on_touch(event);
+        }
+        if let Some(new_rotation) = deferred_rotation.filter(|_| !finger_down) {
+            deferred_rotation = None;
+            rotation = new_rotation;
+            rotate_pending = true;
+            let view = rotation.view_size(panel);
+            window.set_size(PhysicalSize::new(
+                u32::from(view.width),
+                u32::from(view.height),
+            ));
+            window.request_redraw();
         }
     }
 }
@@ -201,6 +266,67 @@ async fn watch_touch(mut touch: device::Touch) {
     }
 }
 
+/// Samples the accelerometer and signals view rotation changes.
+///
+/// Logs each change with the sample on the panel's axes. With the
+/// `imu-calibration` feature, keeps the view upright and logs the raw
+/// sensor axes once a second instead, to measure [`device::IMU_AXES`].
+/// Read failures are logged once per streak.
+#[embassy_executor::task]
+async fn watch_orientation(mut imu: device::Imu) {
+    /// Samples between two calibration logs: one second.
+    const CALIBRATION_LOG_EVERY: u64 = 1000 / ORIENTATION_PERIOD.as_millis();
+    let mut detector = OrientationDetector::new(INITIAL_ROTATION);
+    let mut first_sample = true;
+    let mut samples: u64 = 0;
+    // A ticker keeps the period exact whatever each read costs.
+    let mut ticker = Ticker::every(ORIENTATION_PERIOD);
+    // Consecutive failed reads.
+    let mut failures: u32 = 0;
+    loop {
+        ticker.next().await;
+        match imu.acceleration().await {
+            Ok(sample) => {
+                if failures > 0 {
+                    log::info!("IMU reads recovered after {failures} failures");
+                    failures = 0;
+                }
+                if cfg!(feature = "imu-calibration") {
+                    if samples.is_multiple_of(CALIBRATION_LOG_EVERY) {
+                        log::info!("raw IMU sample: {sample:?}");
+                    }
+                    samples = samples.wrapping_add(1);
+                    continue;
+                }
+                let up = device::IMU_AXES.apply(sample);
+                if core::mem::take(&mut first_sample) {
+                    log::info!("first IMU sample on panel axes: {up:?}");
+                }
+                if let Some(rotation) = detector.update(up) {
+                    log::info!("view rotation {rotation:?} for {up:?}");
+                    ROTATION.signal(rotation);
+                }
+            }
+            Err(error) => {
+                if failures == 0 {
+                    log::error!("IMU read failed: {error}");
+                }
+                failures = failures.saturating_add(1);
+            }
+        }
+    }
+}
+
+/// Slint's name for `rotation`: both turn the view clockwise.
+fn rendering_rotation(rotation: Rotation) -> RenderingRotation {
+    match rotation {
+        Rotation::Deg0 => RenderingRotation::NoRotation,
+        Rotation::Deg90 => RenderingRotation::Rotate90,
+        Rotation::Deg180 => RenderingRotation::Rotate180,
+        Rotation::Deg270 => RenderingRotation::Rotate270,
+    }
+}
+
 /// Wakes one frame period after `frame_start` while animating or retrying,
 /// otherwise at the next Slint timer (at most [`MAX_IDLE`] from now).
 fn next_wake_up(window: &MinimalSoftwareWindow, frame_start: Instant, retry: bool) -> Instant {
@@ -231,10 +357,21 @@ fn dispatch_button(window: &MinimalSoftwareWindow, event: ButtonEvent) {
 ///
 /// A release is followed by an exit: a lifted finger hovers nowhere. A
 /// cancellation is an exit alone, which Slint never takes for a click.
-fn dispatch_touch(window: &MinimalSoftwareWindow, event: TouchEvent) {
-    // Panel pixels are logical pixels: the window keeps Slint's default
+///
+/// Points arrive in panel pixels and are mapped into the view drawn with
+/// `rotation` on `panel`: Slint takes input in un-rotated view coordinates.
+fn dispatch_touch(
+    window: &MinimalSoftwareWindow,
+    event: TouchEvent,
+    rotation: Rotation,
+    panel: PanelSize,
+) {
+    // View pixels are logical pixels: the window keeps Slint's default
     // scale factor of 1.
-    let position = |point: TouchPoint| LogicalPosition::new(f32::from(point.x), f32::from(point.y));
+    let position = |point: TouchPoint| {
+        let view = rotation.panel_to_view(point, panel);
+        LogicalPosition::new(f32::from(view.x), f32::from(view.y))
+    };
     let button = PointerEventButton::Left;
     let (event, exit) = match event {
         TouchEvent::Pressed(point) => (

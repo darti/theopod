@@ -36,7 +36,7 @@ Out of scope: a board-support abstraction for several boards at once.
   outputs" for the panel rails) that run in milliseconds on the host.
 - Positive: porting to another board means writing another `device`
   module; drivers and UI code are reused unchanged.
-- Negative: each driver needs a fake (`test_support.rs`) and a thin esp-hal
+- Negative: each driver needs a fake (`test_support/`) and a thin esp-hal
   adapter (`src/device/esp_qspi.rs`) that is only verified on hardware.
 - Neutral: a second crate in the workspace, built for two targets.
 

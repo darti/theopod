@@ -6,6 +6,8 @@
 //!   [`theo_drivers::Panel`].
 //! - [`Button`]: the BOOT push button, debounced.
 //! - [`Touch`]: the CST820 touch controller.
+//! - [`Imu`], [`IMU_AXES`]: the QMI8658 accelerometer, and how its axes lie
+//!   on the panel.
 //! - [`I2cBus`], [`I2cDevice`]: the async I2C bus shared by the TCA9554
 //!   expander and the touch controller, and one device's handle on it.
 //! - [`log_heap_usage`]: logs internal RAM and PSRAM heap usage.
@@ -45,7 +47,8 @@ use esp_hal::{
 use self::{esp_qspi::EspQspi, psram_tx_buf::PsramTxBuf};
 use embedded_hal::digital::PinState;
 use theo_drivers::{
-    Co5300, Cst820, DebouncedButton, ExpanderPin, PanelGeometry, PanelPower, PanelSize, Tca9554,
+    Axis, AxisMap, Co5300, Cst820, DebouncedButton, ExpanderPin, PanelGeometry, PanelPower,
+    PanelSize, Qmi8658, Tca9554,
 };
 
 pub use esp_hal::main as entry;
@@ -74,6 +77,19 @@ const PANEL_POWER: PanelPower = PanelPower {
 const TOUCH_RESET: ExpanderPin = ExpanderPin::P2;
 /// CST820 I2C address (Waveshare `board_variant.c`, probed as CST816).
 const TOUCH_ADDRESS: u8 = 0x15;
+/// QMI8658 I2C addresses, in probe order: Waveshare's Arduino examples use
+/// 0x6B, its ESP-IDF example probes both.
+const IMU_ADDRESSES: [u8; 2] = [0x6B, 0x6A];
+/// Accelerometer axes on the panel. Not documented by Waveshare: measured
+/// on the board (`just imu-calibrate`, and rotation logs checked against
+/// what the screen showed). Sensor +X points to the panel's top edge, +Y to
+/// its right edge and +Z into the screen.
+pub const IMU_AXES: AxisMap = AxisMap {
+    right: Axis::Y,
+    down: Axis::NegX,
+    out: Axis::NegZ,
+};
+
 /// 368 x 448 AMOLED panel, first visible column 16 in CO5300 RAM. Keep in
 /// sync with `PANEL` in `crates/theo-drivers/src/framebuffer_tests.rs`.
 const DISPLAY_GEOMETRY: PanelGeometry = PanelGeometry {
@@ -104,9 +120,12 @@ pub type Button = DebouncedButton<Input<'static>, Delay>;
 /// `BSP_LCD_TOUCH_INT`, active low), points in panel pixels.
 pub type Touch = Cst820<I2cDevice, Input<'static>, Delay>;
 
+/// QMI8658 accelerometer, used for the screen orientation.
+pub type Imu = Qmi8658<I2cDevice>;
+
 /// I2C0 on GPIO15 (SDA) / GPIO14 (SCL), locked per transaction.
 ///
-/// The TCA9554 expander (0x20) and the touch controller share it.
+/// The TCA9554 expander (0x20), the touch controller and the IMU share it.
 pub type I2cBus = Mutex<CriticalSectionRawMutex, I2c<'static, Async>>;
 
 /// One device's handle on [`I2cBus`]; implements `embedded-hal-async` I2C.
@@ -125,6 +144,8 @@ pub struct Board {
     /// Touch controller; reset and with its interrupts enabled unless its
     /// init failed (logged).
     pub touch: Touch,
+    /// Accelerometer, started; `None` if no QMI8658 answered (logged).
+    pub imu: Option<Imu>,
     /// Zeroed framebuffer in PSRAM: one pixel per display pixel, row-major,
     /// sized from [`Display`]'s geometry. Each `u16` slot holds big-endian
     /// RGB565 bytes (the panel's order), not a native-endian value.
@@ -139,6 +160,7 @@ impl fmt::Debug for Board {
             // `Cst820`'s derived `Debug` needs `I2cDevice: Debug`, which the
             // shared-bus handle does not implement.
             .field("touch", &format_args!("Touch"))
+            .field("imu", &self.imu.is_some())
             .field("frame_pixels", &self.frame.len())
             .finish()
     }
@@ -146,7 +168,7 @@ impl fmt::Debug for Board {
 
 impl Board {
     /// Starts the chip, heaps, logger and scheduler, then brings up the
-    /// display, its PSRAM framebuffer and the touch controller.
+    /// display, its PSRAM framebuffer, the touch controller and the IMU.
     ///
     /// The expander is only driven here: after boot no task holds it, so
     /// its read-modify-writes cannot race (ADR-0005).
@@ -154,8 +176,8 @@ impl Board {
     /// # Panics
     ///
     /// Panics if a bring-up step fails: the board cannot run without it.
-    /// A touch controller that fails to start is only logged: the display
-    /// and the BOOT button still work.
+    /// A touch controller or IMU that fails to start is only logged: the
+    /// display and the BOOT button still work.
     pub async fn init() -> Self {
         esp_alloc::heap_allocator!(size: HEAP_SIZE);
         esp_println::logger::init_logger_from_env();
@@ -200,6 +222,7 @@ impl Board {
         if let Err(error) = touch.init(&mut expander, TOUCH_RESET).await {
             log::error!("touch controller init failed: {error}");
         }
+        let imu = start_imu(i2c).await;
 
         let pixels = usize::from(DISPLAY_GEOMETRY.width) * usize::from(DISPLAY_GEOMETRY.height);
         // Burst-aligned, so the display DMA reads it in whole bursts
@@ -255,9 +278,26 @@ impl Board {
             display,
             button,
             touch,
+            imu,
             frame,
         }
     }
+}
+
+/// Starts the QMI8658 at the first of [`IMU_ADDRESSES`] that answers.
+async fn start_imu(i2c: &'static I2cBus) -> Option<Imu> {
+    for address in IMU_ADDRESSES {
+        let mut imu = Qmi8658::new(I2cDevice::new(i2c), address);
+        match imu.init(&mut Delay).await {
+            Ok(()) => {
+                log::info!("IMU found at {address:#04x}");
+                return Some(imu);
+            }
+            Err(error) => log::info!("no IMU at {address:#04x}: {error}"),
+        }
+    }
+    log::error!("IMU not found: the screen will not rotate");
+    None
 }
 
 /// Logs used and free bytes of every heap region (internal RAM and PSRAM).

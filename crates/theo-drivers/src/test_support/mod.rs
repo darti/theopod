@@ -7,6 +7,7 @@
 //!   fail reads or writes and suspend once per transaction.
 //! - [`FakeCst820`]: async I2C bus replaying scripted CST820 touch reports
 //!   and recording register writes.
+//! - [`FakeQmi8658`]: async I2C bus modelling a QMI8658's registers.
 //! - [`NoDelay`]: [`DelayNs`] that returns immediately.
 //! - [`RecordingDelay`]: [`DelayNs`] that records millisecond delays and can
 //!   stay pending once, to cancel a future mid-delay.
@@ -19,19 +20,21 @@ use core::{
     task::{Context, Poll, Waker},
 };
 
-use std::collections::VecDeque;
-
-use embedded_hal_async::{
-    delay::DelayNs,
-    i2c::{ErrorKind, ErrorType, I2c, NoAcknowledgeSource, Operation},
-};
+use embedded_hal_async::delay::DelayNs;
 
 use crate::{
     co5300::OPCODE_WRITE_PIXELS,
-    cst820::REGISTER_FINGERS,
     panel::Panel,
     qspi::{Lanes, QspiBus},
 };
+
+mod cst820;
+mod qmi8658;
+mod tca9554;
+
+pub use cst820::FakeCst820;
+pub use qmi8658::FakeQmi8658;
+pub use tca9554::{FakeTca9554, TCA_CONFIG, TCA_OUTPUT};
 
 /// One recorded QSPI transfer.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -244,7 +247,7 @@ impl DelayNs for RecordingDelay {
 }
 
 /// Future that returns `Pending` on its first poll only.
-struct YieldOnce(bool);
+pub(crate) struct YieldOnce(pub(crate) bool);
 
 impl Future for YieldOnce {
     type Output = ();
@@ -274,212 +277,5 @@ pub fn block_on<F: Future>(future: F) -> F::Output {
         if let Poll::Ready(output) = future.as_mut().poll(&mut context) {
             return output;
         }
-    }
-}
-
-/// TCA9554 register indices, as seen by [`FakeTca9554`].
-pub const TCA_INPUT: u8 = 0x00;
-pub const TCA_OUTPUT: u8 = 0x01;
-pub const TCA_CONFIG: u8 = 0x03;
-
-/// Async I2C bus emulating one TCA9554: register pointer, reads and writes.
-///
-/// `writes` records every register write as `(register, value)`; `inputs`
-/// is what the input port reads back. A bus at another address NACKs.
-#[derive(Debug)]
-pub struct FakeTca9554 {
-    pub address: u8,
-    pub registers: [u8; 4],
-    pub inputs: u8,
-    pub writes: Vec<(u8, u8)>,
-    pointer: u8,
-    fail_at: Option<usize>,
-    fail_writes_only: bool,
-    yielding: bool,
-}
-
-impl FakeTca9554 {
-    /// Creates an expander at `address` with power-on register values.
-    pub fn new(address: u8) -> Self {
-        Self {
-            address,
-            // Input, output (all high), polarity (none), config (all inputs).
-            registers: [0x00, 0xFF, 0x00, 0xFF],
-            inputs: 0x00,
-            writes: Vec::new(),
-            pointer: 0,
-            fail_at: None,
-            fail_writes_only: false,
-            yielding: false,
-        }
-    }
-
-    /// Makes every transaction fail once `fail_at` writes are recorded.
-    pub fn failing(mut self, fail_at: usize) -> Self {
-        self.fail_at = Some(fail_at);
-        self
-    }
-
-    /// Like [`Self::failing`], but register reads keep succeeding.
-    pub fn failing_writes(mut self, fail_at: usize) -> Self {
-        self.fail_writes_only = true;
-        self.failing(fail_at)
-    }
-
-    /// Makes every transaction return `Pending` once before running.
-    pub fn yielding(mut self) -> Self {
-        self.yielding = true;
-        self
-    }
-
-    /// Pins driven low after each recorded write, replayed from `initial`.
-    ///
-    /// A pin is driven low when it is an output (config bit clear) whose
-    /// output bit is clear.
-    pub fn driven_low_history(&self, initial: [u8; 4]) -> Vec<u8> {
-        let mut registers = initial;
-        self.writes
-            .iter()
-            .map(|&(register, value)| {
-                registers[usize::from(register)] = value;
-                !registers[usize::from(TCA_CONFIG)] & !registers[usize::from(TCA_OUTPUT)]
-            })
-            .collect()
-    }
-}
-
-impl ErrorType for FakeTca9554 {
-    type Error = ErrorKind;
-}
-
-impl I2c for FakeTca9554 {
-    async fn transaction(
-        &mut self,
-        address: u8,
-        operations: &mut [Operation<'_>],
-    ) -> Result<(), Self::Error> {
-        if self.yielding {
-            YieldOnce(false).await;
-        }
-        // A write carries data after the register pointer.
-        let writes_data = operations
-            .iter()
-            .any(|operation| matches!(operation, Operation::Write(bytes) if bytes.len() > 1));
-        if self.fail_at == Some(self.writes.len()) && (writes_data || !self.fail_writes_only) {
-            return Err(ErrorKind::Bus);
-        }
-        if address != self.address {
-            return Err(ErrorKind::NoAcknowledge(NoAcknowledgeSource::Address));
-        }
-        for operation in operations {
-            match operation {
-                Operation::Write(bytes) => {
-                    let Some((&pointer, data)) = bytes.split_first() else {
-                        continue;
-                    };
-                    if pointer > TCA_CONFIG {
-                        return Err(ErrorKind::Other);
-                    }
-                    self.pointer = pointer;
-                    // The TCA9554 does not auto-increment: extra bytes rewrite it.
-                    for &value in data {
-                        self.registers[usize::from(pointer)] = value;
-                        self.writes.push((pointer, value));
-                    }
-                }
-                Operation::Read(buffer) => {
-                    let value = if self.pointer == TCA_INPUT {
-                        self.inputs
-                    } else {
-                        self.registers[usize::from(self.pointer)]
-                    };
-                    buffer.fill(value);
-                }
-            }
-        }
-        Ok(())
-    }
-}
-
-/// Async I2C bus emulating a CST820's report registers.
-///
-/// Each read of the finger-count register pops one scripted report (finger count,
-/// then X and Y as high/low byte pairs) or error; with no report left it
-/// panics. `writes` records every register write as `(register, value)`,
-/// `transactions` counts every transaction, failed or not.
-#[derive(Debug)]
-pub struct FakeCst820 {
-    pub address: u8,
-    pub reports: VecDeque<Result<[u8; 5], ErrorKind>>,
-    pub writes: Vec<(u8, u8)>,
-    pub transactions: usize,
-}
-
-impl FakeCst820 {
-    /// Creates a controller at `address` replaying `reports` in order.
-    pub fn new(address: u8, reports: impl IntoIterator<Item = Result<[u8; 5], ErrorKind>>) -> Self {
-        Self {
-            address,
-            reports: reports.into_iter().collect(),
-            writes: Vec::new(),
-            transactions: 0,
-        }
-    }
-
-    /// Report of one finger at (`x`, `y`); `event` fills the X high nibble.
-    pub fn touch(x: u16, y: u16, event: u8) -> Result<[u8; 5], ErrorKind> {
-        assert!(
-            event < 4 && x <= 0xFFF,
-            "event or X does not fit the report"
-        );
-        let [x_high, x_low] = x.to_be_bytes();
-        let [y_high, y_low] = y.to_be_bytes();
-        Ok([1, (event << 6) | x_high, x_low, y_high, y_low])
-    }
-
-    /// Report of no finger on the panel.
-    pub fn no_touch() -> Result<[u8; 5], ErrorKind> {
-        Ok([0; 5])
-    }
-}
-
-impl ErrorType for FakeCst820 {
-    type Error = ErrorKind;
-}
-
-impl I2c for FakeCst820 {
-    async fn transaction(
-        &mut self,
-        address: u8,
-        operations: &mut [Operation<'_>],
-    ) -> Result<(), Self::Error> {
-        self.transactions += 1;
-        if address != self.address {
-            return Err(ErrorKind::NoAcknowledge(NoAcknowledgeSource::Address));
-        }
-        let mut pointer = None;
-        for operation in operations {
-            match operation {
-                Operation::Write(bytes) => {
-                    let Some((&register, data)) = bytes.split_first() else {
-                        continue;
-                    };
-                    pointer = Some(register);
-                    if let Some(&value) = data.first() {
-                        self.writes.push((register, value));
-                    }
-                }
-                Operation::Read(buffer) => {
-                    assert_eq!(pointer, Some(REGISTER_FINGERS), "unexpected CST820 read");
-                    let report = self
-                        .reports
-                        .pop_front()
-                        .expect("no scripted CST820 report left")?;
-                    let len = buffer.len().min(report.len());
-                    buffer[..len].copy_from_slice(&report[..len]);
-                }
-            }
-        }
-        Ok(())
     }
 }

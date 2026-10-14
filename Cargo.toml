@@ -64,6 +64,9 @@ theo-frame-dump = { workspace = true, optional = true }
 # Prints the framebuffer to the serial log after the first frame and after
 # each BOOT press; `just frame-png` turns the log into a PNG.
 frame-dump = ["dep:theo-frame-dump"]
+# Keeps the view upright and logs the raw accelerometer axes once a
+# second, to measure `IMU_AXES` (`just imu-calibrate`).
+imu-calibration = []
 
 [build-dependencies]
 slint-build.workspace = true

@@ -9,7 +9,8 @@ use embedded_hal_async::{
 use speculoos::prelude::*;
 
 use crate::{
-    cst820::{Cst820, Error, InitError, POLL_MS, PanelSize, TouchEvent, TouchPoint},
+    cst820::{Cst820, Error, InitError, POLL_MS, TouchEvent},
+    geometry::{PanelSize, TouchPoint},
     tca9554::{Pin, Tca9554},
     test_support::{FakeCst820, FakeTca9554, RecordingDelay, block_on},
 };

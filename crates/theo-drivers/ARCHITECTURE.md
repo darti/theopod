@@ -1,6 +1,7 @@
 # theo-drivers
 
-HAL-independent drivers for the Theo Pod hardware. The crate is `no_std`,
+HAL-independent drivers for the Theo Pod hardware, plus HAL-free input
+logic (orientation) and shared geometry. The crate is `no_std`,
 depends only on `embedded-hal` / `embedded-hal-async`, and is unit-tested on the host (`just test`).
 See `docs/adr/0001` and `0002` for why.
 
@@ -23,6 +24,10 @@ See `docs/adr/0001` and `0002` for why.
   through a `Tca9554` pin, waits for the interrupt edge while idle and
   polls while touched; rejects reports off the panel, and cancels (rather
   than releases) a touch whose read fails.
+- `qmi8658.rs`: `Qmi8658` IMU over async I2C, accelerometer only.
+- `geometry.rs`, `orientation.rs`: `PanelSize`/`TouchPoint`;
+  `OrientationDetector` (gravity to view `Rotation`, dead band), `AxisMap`,
+  and the rotated view size and touch mapping.
 - `button.rs`: `DebouncedButton`, cancel-safe debounced press/release.
 
 ## Extension points
@@ -37,11 +42,8 @@ See `docs/adr/0001` and `0002` for why.
 
 ## Tests
 
-Side-by-side `*_tests.rs` files use fakes from `test_support.rs`: recording
-`QspiBus` and `Panel`, `AddressBus` (where pixel payloads start, at a real
-transfer size), `FakeTca9554`, an async I2C bus that models the chip's
-registers, replays which pins are driven low, and can fail or suspend
-transactions, and `FakeCst820`, which replays scripted touch reports. Not
-covered on the host: the single-line command/address phases and DMA
-behaviour of `src/device/esp_qspi.rs` and `src/device/psram_tx_buf.rs`,
-and the CST820 timing, only verified on hardware.
+Side-by-side `*_tests.rs` files use the fakes in `test_support/`: recording
+`QspiBus` and `Panel`, `AddressBus`, `RecordingDelay`, and one async I2C
+fake per chip (`FakeTca9554`, `FakeCst820`, `FakeQmi8658`). Hardware-only:
+the QSPI phases and DMA of `src/device/esp_qspi.rs` / `psram_tx_buf.rs`,
+CST820 timing, and the IMU axis map (`src/device/mod.rs`).

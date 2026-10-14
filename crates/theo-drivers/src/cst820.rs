@@ -2,8 +2,7 @@
 //!
 //! - [`Cst820`]: resets the controller through a TCA9554 pin, then reports
 //!   touches from its interrupt pin and I2C registers.
-//! - [`TouchEvent`], [`TouchPoint`]: what changed, in panel pixels.
-//! - [`PanelSize`]: the panel reported points must lie on.
+//! - [`TouchEvent`]: what changed, as [`TouchPoint`]s in panel pixels.
 //! - [`Error`], [`InitError`]: bus or pin failures, rejected touch reports,
 //!   and reset failures.
 //!
@@ -20,7 +19,10 @@ use core::fmt;
 use embedded_hal::digital::PinState;
 use embedded_hal_async::{delay::DelayNs, digital::Wait, i2c::I2c};
 
-use crate::tca9554::{Pin, Tca9554};
+use crate::{
+    geometry::{PanelSize, TouchPoint},
+    tca9554::{Pin, Tca9554},
+};
 
 /// Finger count, then X and Y high/low bytes (5 registers).
 pub(crate) const REGISTER_FINGERS: u8 = 0x02;
@@ -41,24 +43,6 @@ const RESET_PULSE_MS: u32 = 10;
 const BOOT_MS: u32 = 200;
 /// Register poll period while a finger is down.
 pub(crate) const POLL_MS: u32 = 10;
-
-/// Size of the panel under the touch sensor, in pixels.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct PanelSize {
-    /// Columns; reported X must be below it.
-    pub width: u16,
-    /// Rows; reported Y must be below it.
-    pub height: u16,
-}
-
-/// One touch position, in panel pixels from the top-left corner.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct TouchPoint {
-    /// Column, below the panel width.
-    pub x: u16,
-    /// Row, below the panel height.
-    pub y: u16,
-}
 
 /// Change of the touch state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

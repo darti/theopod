@@ -5,7 +5,8 @@
 //!
 //! `main` only talks to the board through the `device` module and the
 //! [`theo_drivers::Panel`] trait, then runs the Slint event loop: render the
-//! dirty part of the framebuffer, send its rows to the panel by DMA, then
+//! dirty part of the framebuffer, send its row bands to the panel by DMA,
+//! resending the whole frame after a failed flush ([`FlushRetry`]), then
 //! sleep until the next frame or Slint timer, or until an input changes:
 //! the BOOT button is forwarded to Slint as the Return key, touches as
 //! pointer events, and orientation changes rotate the rendering, the window
@@ -42,13 +43,13 @@ use slint::{
     },
 };
 use theo_drivers::{
-    ButtonEvent, OrientationDetector, Panel, PanelSize, Rotation, TouchEvent, TouchPoint,
-    flush_rows,
+    ButtonEvent, FlushRetry, OrientationDetector, Panel, PanelSize, Rotation, TouchEvent,
+    TouchPoint, Transient, flush_bands,
 };
 
 use crate::{
     device::Board,
-    slint_backend::{FrameBuffer, TheoPlatform},
+    slint_backend::{FrameBuffer, FrameRows, TheoPlatform},
 };
 
 slint::include_modules!();
@@ -60,6 +61,10 @@ slint::include_modules!();
 const FRAME_PERIOD: Duration = Duration::from_millis(16);
 /// Longest sleep when nothing is scheduled.
 const MAX_IDLE: Duration = Duration::from_millis(1000);
+/// Resend delay after a transient flush failure, doubled per failure up to
+/// [`FLUSH_RETRY_MAX_MS`]: one frame period, then backing off to one second.
+const FLUSH_RETRY_FIRST_MS: u32 = 16;
+const FLUSH_RETRY_MAX_MS: u32 = 1000;
 /// Button changes queued while the loop renders or flushes.
 const BUTTON_QUEUE: usize = 4;
 /// Touch changes queued while the loop renders or flushes; a full queue
@@ -116,8 +121,10 @@ async fn main(spawner: Spawner) {
     // Showing the window is what requests the first redraw.
     ui.show().unwrap();
 
-    // Consecutive failed flushes; while non-zero, every frame is resent.
-    let mut failed_flushes: u32 = 0;
+    // After a failed flush the panel is stale: the next flush sends every
+    // row, at the latest at `resend_at` for a transient failure (ADR-0004).
+    let mut flush_retry = FlushRetry::new(FLUSH_RETRY_FIRST_MS, FLUSH_RETRY_MAX_MS);
+    let mut resend_at: Option<Instant> = None;
     let mut first_frame_sent = false;
     let mut rotation = INITIAL_ROTATION;
     // Set when `rotation` changed and the next frame must redraw everything.
@@ -132,7 +139,7 @@ async fn main(spawner: Spawner) {
     loop {
         let frame_start = Instant::now();
         slint::platform::update_timers_and_animations();
-        let mut dirty = 0..0;
+        let mut dirty = FrameRows::new(size.1);
         let drawn = window.draw_if_needed(|renderer| {
             if rotate_pending {
                 renderer.set_rendering_rotation(rendering_rotation(rotation));
@@ -147,38 +154,49 @@ async fn main(spawner: Spawner) {
         if drawn {
             rotate_pending = false;
         }
-        if failed_flushes > 0 {
+        let resend_due = resend_at.is_some_and(|at| Instant::now() >= at);
+        if flush_retry.is_stale() && (resend_due || !dirty.is_empty()) {
             dirty = frame.all_rows();
         }
-        let sending = !dirty.is_empty();
-        match flush_rows(&mut display, frame.as_bytes(), dirty).await {
-            Ok(()) => {
-                if failed_flushes > 0 {
-                    log::info!("frame flush recovered after {failed_flushes} failed attempts");
+        if !dirty.is_empty() {
+            // Cancel-safe, but awaited outside `select`: a cancelled flush
+            // would leave its rows stale on the panel (t-3).
+            match flush_bands(&mut display, frame.as_bytes(), &dirty).await {
+                Ok(()) => {
+                    resend_at = None;
+                    if let Some(failures) = flush_retry.succeeded() {
+                        log::info!("frame flush recovered after {failures} failed attempts");
+                    }
+                    if !first_frame_sent {
+                        first_frame_sent = true;
+                        // Slint's allocations are in place once a frame is out.
+                        device::log_heap_usage();
+                    }
+                    #[cfg(feature = "frame-dump")]
+                    if dump_pending {
+                        dump_pending = false;
+                        device::dump_frame(size, frame.as_bytes());
+                    }
                 }
-                failed_flushes = 0;
-                if sending && !first_frame_sent {
-                    first_frame_sent = true;
-                    // Slint's allocations are in place once a frame is out.
-                    device::log_heap_usage();
+                Err(error) => {
+                    // The framebuffer is still right; only the panel is stale.
+                    let retry = flush_retry.failed(error.is_transient());
+                    if retry.log {
+                        match retry.after_ms {
+                            Some(_) => log::error!("frame flush failed, retrying: {error}"),
+                            None => log::error!(
+                                "frame flush failed, not retrying until the next redraw: {error}"
+                            ),
+                        }
+                    }
+                    resend_at = retry
+                        .after_ms
+                        .map(|ms| Instant::now() + Duration::from_millis(u64::from(ms)));
                 }
-                #[cfg(feature = "frame-dump")]
-                if sending && dump_pending {
-                    dump_pending = false;
-                    device::dump_frame(size, frame.as_bytes());
-                }
-            }
-            Err(error) => {
-                // The framebuffer is still right; only the panel is stale.
-                // Retry every frame period, logging once per failure streak.
-                if failed_flushes == 0 {
-                    log::error!("frame flush failed, resending the full frame: {error}");
-                }
-                failed_flushes = failed_flushes.saturating_add(1);
             }
         }
 
-        let wake_up = Timer::at(next_wake_up(&window, frame_start, failed_flushes > 0));
+        let wake_up = Timer::at(next_wake_up(&window, frame_start, resend_at));
         #[cfg_attr(
             not(feature = "frame-dump"),
             expect(unused_mut, reason = "only frame dumps update state")
@@ -338,18 +356,25 @@ fn rendering_rotation(rotation: Rotation) -> RenderingRotation {
     }
 }
 
-/// Wakes one frame period after `frame_start` while animating or retrying,
-/// otherwise at the next Slint timer (at most [`MAX_IDLE`] from now).
-fn next_wake_up(window: &MinimalSoftwareWindow, frame_start: Instant, retry: bool) -> Instant {
-    if retry || window.has_active_animations() {
-        return frame_start + FRAME_PERIOD;
-    }
-    let idle = slint::platform::duration_until_next_timer_update()
-        .and_then(|delay| u64::try_from(delay.as_micros()).ok())
-        .map_or(MAX_IDLE, |micros| {
-            Duration::from_micros(micros).min(MAX_IDLE)
-        });
-    Instant::now() + idle
+/// Wakes one frame period after `frame_start` while animating, otherwise
+/// at the next Slint timer (at most [`MAX_IDLE`] from now); earlier if a
+/// failed flush is due for a resend at `resend_at`.
+fn next_wake_up(
+    window: &MinimalSoftwareWindow,
+    frame_start: Instant,
+    resend_at: Option<Instant>,
+) -> Instant {
+    let wake_up = if window.has_active_animations() {
+        frame_start + FRAME_PERIOD
+    } else {
+        let idle = slint::platform::duration_until_next_timer_update()
+            .and_then(|delay| u64::try_from(delay.as_micros()).ok())
+            .map_or(MAX_IDLE, |micros| {
+                Duration::from_micros(micros).min(MAX_IDLE)
+            });
+        Instant::now() + idle
+    };
+    resend_at.map_or(wake_up, |resend_at| wake_up.min(resend_at))
 }
 
 /// Forwards a button change to Slint as a Return key press or release.

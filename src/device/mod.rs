@@ -50,7 +50,7 @@ use self::{esp_qspi::EspQspi, psram_tx_buf::PsramTxBuf};
 use embedded_hal::digital::PinState;
 use theo_drivers::{
     Axis, AxisMap, Co5300, Cst820, Cst820Error, Cst820InitError, DebouncedButton, ExpanderPin,
-    PanelGeometry, PanelPower, PanelSize, Qmi8658, Tca9554, TouchEvent,
+    PanelGeometry, PanelPower, PanelSize, Qmi8658, Tca9554, TouchEvent, Transient, flush_rows,
 };
 
 pub use esp_hal::main as entry;
@@ -333,6 +333,7 @@ impl Board {
         };
         let mut display = Co5300::new(bus, DISPLAY_GEOMETRY).unwrap();
         display.init(&mut Delay).await.unwrap();
+        check_display(&mut display, frame).await;
 
         let boot = Input::new(
             peripherals.GPIO0,
@@ -347,6 +348,33 @@ impl Board {
             touch,
             imu,
             frame,
+        }
+    }
+}
+
+/// Clears the panel by sending the zeroed `frame`, which also checks that
+/// a full [`esp_qspi::MAX_TRANSFER_LEN`] transfer goes through.
+///
+/// `MAX_TRANSFER_LEN` mirrors a private esp-hal limit (ADR-0003): if an
+/// upgrade lowers it, every framebuffer flush would fail for good, so this
+/// fails at boot instead.
+///
+/// # Panics
+///
+/// Panics on an error that cannot clear on retry; transient ones are
+/// logged, and the first frame resends every row anyway.
+async fn check_display(display: &mut Display, frame: &[u16]) {
+    const _: () = assert!(
+        DISPLAY_GEOMETRY.width as usize * DISPLAY_GEOMETRY.height as usize * size_of::<u16>()
+            >= esp_qspi::MAX_TRANSFER_LEN,
+        "a full frame must include a MAX_TRANSFER_LEN transfer"
+    );
+    let rows = 0..DISPLAY_GEOMETRY.height;
+    if let Err(error) = flush_rows(display, bytemuck::cast_slice(frame), rows).await {
+        if error.is_transient() {
+            log::warn!("display check failed, will retry: {error}");
+        } else {
+            panic!("display cannot send a full transfer: {error}");
         }
     }
 }

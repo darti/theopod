@@ -26,6 +26,7 @@ use crate::{
     co5300::OPCODE_WRITE_PIXELS,
     panel::Panel,
     qspi::{Lanes, QspiBus},
+    retry::Transient,
 };
 
 mod cst820;
@@ -67,9 +68,15 @@ impl Transfer {
     }
 }
 
-/// Error injected by [`RecordingBus::failing`].
+/// Error injected by [`RecordingBus::failing`]; transient.
 #[derive(Debug, PartialEq, Eq)]
 pub struct BusFault;
+
+impl Transient for BusFault {
+    fn is_transient(&self) -> bool {
+        true
+    }
+}
 
 /// QSPI bus that records successful transfers and can fail exactly once,
 /// or stay pending once, to cancel a transfer mid-way.

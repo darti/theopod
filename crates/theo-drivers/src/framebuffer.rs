@@ -1,6 +1,7 @@
 //! Sending dirty rows of a full-panel framebuffer to a [`Panel`].
 //!
 //! - [`flush_rows`]: sends a band of rows of a big-endian RGB565 frame.
+//! - [`flush_bands`]: sends every band of a [`DirtyRows`].
 //! - [`FlushError`]: why a flush was refused or failed.
 //!
 //! Rows are sent full width, so the band is one contiguous slice of the
@@ -11,7 +12,7 @@
 
 use core::{fmt, ops::Range};
 
-use crate::panel::Panel;
+use crate::{dirty_rows::DirtyRows, panel::Panel};
 
 /// Reason rows could not be flushed.
 #[derive(Debug, PartialEq, Eq)]
@@ -94,4 +95,24 @@ pub async fn flush_rows<P: Panel>(
         .map_err(FlushError::Panel)?;
     let band = &frame[usize::from(start) * row_bytes..usize::from(end) * row_bytes];
     panel.write_pixels(band).await.map_err(FlushError::Panel)
+}
+
+/// Sends each band of `rows` with [`flush_rows`], in order.
+///
+/// # Errors
+///
+/// Returns the first band's error; later bands are not sent.
+///
+/// # Cancel safety
+///
+/// As [`flush_rows`]: send the rows again after a cancellation.
+pub async fn flush_bands<P: Panel, const N: usize>(
+    panel: &mut P,
+    frame: &[u8],
+    rows: &DirtyRows<N>,
+) -> Result<(), FlushError<P::Error>> {
+    for band in rows.bands() {
+        flush_rows(panel, frame, band.clone()).await?;
+    }
+    Ok(())
 }

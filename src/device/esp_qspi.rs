@@ -25,7 +25,7 @@ use esp_hal::{
         master::{Address, Command, DataMode, SpiDma, SpiDmaTransfer},
     },
 };
-use theo_drivers::{ChipSelect, Lanes, PayloadError, QspiBus, frame_payload};
+use theo_drivers::{ChipSelect, Lanes, PayloadError, QspiBus, Transient, frame_payload};
 
 use super::psram_tx_buf::{self, PsramTxBuf};
 
@@ -74,6 +74,24 @@ impl<P: fmt::Debug> fmt::Display for EspQspiError<P> {
 }
 
 impl<P: fmt::Debug> core::error::Error for EspQspiError<P> {}
+
+impl<P> Transient for EspQspiError<P> {
+    /// Underruns, DMA and chip-select failures may clear; payloads the bus
+    /// can never send, and a lost SPI master, cannot.
+    fn is_transient(&self) -> bool {
+        match self {
+            Self::Spi(
+                SpiError::MaxDmaTransferSizeExceeded
+                | SpiError::FifoSizeExeeded
+                | SpiError::Unsupported,
+            )
+            | Self::TooLong { .. }
+            | Self::Misaligned { .. }
+            | Self::Unavailable => false,
+            Self::Spi(_) | Self::ChipSelect(_) | Self::Underrun => true,
+        }
+    }
+}
 
 impl<P> From<PayloadError> for EspQspiError<P> {
     fn from(error: PayloadError) -> Self {

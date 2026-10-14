@@ -5,7 +5,10 @@
 //!
 //! - [`DebouncedButton`], [`ButtonEvent`]: debounced push button on any input pin.
 //! - [`Panel`]: pixel-stream abstraction consumed by renderers.
-//! - [`flush_rows`], [`FlushError`]: sends dirty framebuffer rows to a [`Panel`].
+//! - [`flush_rows`], [`flush_bands`], [`DirtyRows`], [`FlushError`]: sends
+//!   dirty bands of framebuffer rows to a [`Panel`].
+//! - [`FlushRetry`], [`Retry`], [`Transient`]: when to resend the frame
+//!   after failed flushes.
 //! - [`QspiBus`], [`Lanes`]: Quad-SPI transport for display controllers.
 //! - [`ChipSelect`]: chip select released even when a transfer is cancelled.
 //! - [`dma_layout`]: descriptor and payload arithmetic of in-place DMA
@@ -29,6 +32,7 @@ pub mod button;
 pub mod chip_select;
 pub mod co5300;
 pub mod cst820;
+pub mod dirty_rows;
 pub mod dma_layout;
 pub mod framebuffer;
 pub mod geometry;
@@ -37,6 +41,7 @@ pub mod panel;
 pub mod panel_power;
 pub mod qmi8658;
 pub mod qspi;
+pub mod retry;
 pub mod tca9554;
 
 #[cfg(test)]
@@ -48,6 +53,8 @@ mod co5300_tests;
 #[cfg(test)]
 mod cst820_tests;
 #[cfg(test)]
+mod dirty_rows_tests;
+#[cfg(test)]
 mod dma_layout_tests;
 #[cfg(test)]
 mod framebuffer_tests;
@@ -58,6 +65,8 @@ mod panel_power_tests;
 #[cfg(test)]
 mod qmi8658_tests;
 #[cfg(test)]
+mod retry_tests;
+#[cfg(test)]
 mod tca9554_tests;
 #[cfg(test)]
 mod test_support;
@@ -66,12 +75,14 @@ pub use button::{ButtonEvent, DebouncedButton};
 pub use chip_select::ChipSelect;
 pub use co5300::{Co5300, Error as Co5300Error, PanelGeometry};
 pub use cst820::{Cst820, Error as Cst820Error, InitError as Cst820InitError, TouchEvent};
+pub use dirty_rows::DirtyRows;
 pub use dma_layout::{Chunk, PayloadError, descriptor_chunks, frame_payload};
-pub use framebuffer::{FlushError, flush_rows};
+pub use framebuffer::{FlushError, flush_bands, flush_rows};
 pub use geometry::{PanelSize, TouchPoint};
 pub use orientation::{Axis, AxisMap, OrientationDetector, PanelAcceleration, Rotation};
 pub use panel::Panel;
 pub use panel_power::PanelPower;
 pub use qmi8658::{Acceleration, Error as Qmi8658Error, Qmi8658};
 pub use qspi::{Lanes, QspiBus};
+pub use retry::{FlushRetry, Retry, Transient};
 pub use tca9554::{Pin as ExpanderPin, Tca9554};

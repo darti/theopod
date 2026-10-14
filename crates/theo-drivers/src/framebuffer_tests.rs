@@ -2,7 +2,8 @@ use speculoos::prelude::*;
 
 use crate::{
     co5300::{Co5300, PanelGeometry},
-    framebuffer::{FlushError, flush_rows},
+    dirty_rows::DirtyRows,
+    framebuffer::{FlushError, flush_bands, flush_rows},
     test_support::{
         AddressBus, BusFault, PanelCall, RecordingBus, RecordingPanel, Transfer, block_on,
     },
@@ -206,4 +207,56 @@ fn flush_rows_pixel_transfers_start_at_even_row_plus_whole_chunks() {
             .named(&format!("rows {rows:?}"))
             .is_equal_to(expected);
     }
+}
+
+#[test]
+fn flush_bands_sends_each_band_as_its_own_area() {
+    let mut panel = RecordingPanel::new(WIDTH, HEIGHT);
+    let frame = frame();
+    let mut rows = DirtyRows::<3>::new(HEIGHT);
+    rows.add(4..6);
+    rows.add(0..2);
+
+    let result = block_on(flush_bands(&mut panel, &frame, &rows));
+
+    assert_that!(result).is_ok();
+    assert_that!(panel.calls).is_equal_to(vec![
+        PanelCall::Begin {
+            x: 0..WIDTH,
+            y: 0..2,
+        },
+        PanelCall::Pixels(rows_bytes(&frame, 0..2)),
+        PanelCall::Begin {
+            x: 0..WIDTH,
+            y: 4..6,
+        },
+        PanelCall::Pixels(rows_bytes(&frame, 4..6)),
+    ]);
+}
+
+#[test]
+fn flush_bands_without_bands_sends_nothing() {
+    let mut panel = RecordingPanel::new(WIDTH, HEIGHT);
+
+    let result = block_on(flush_bands(
+        &mut panel,
+        &frame(),
+        &DirtyRows::<3>::new(HEIGHT),
+    ));
+
+    assert_that!(result).is_ok();
+    assert_that!(panel.calls).is_empty();
+}
+
+#[test]
+fn flush_bands_failure_stops_at_the_failing_band() {
+    let mut panel = RecordingPanel::new(WIDTH, HEIGHT).failing(2);
+    let mut rows = DirtyRows::<3>::new(HEIGHT);
+    rows.add(0..2);
+    rows.add(4..6);
+
+    let result = block_on(flush_bands(&mut panel, &frame(), &rows));
+
+    assert_that!(result).is_equal_to(Err(FlushError::Panel(BusFault)));
+    assert_that!(panel.calls).has_length(2);
 }

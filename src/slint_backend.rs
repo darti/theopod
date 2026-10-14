@@ -4,17 +4,18 @@
 //! - [`FrameBuffer`]: full-panel framebuffer Slint renders into, in the
 //!   panel's big-endian RGB565 byte order.
 //!
-//! Sending the dirty rows to a panel is [`theo_drivers::flush_rows`]' job,
+//! Sending the dirty rows to a panel is [`theo_drivers::flush_bands`]' job,
 //! which is host-tested; this module only adapts Slint's renderer.
 
 use alloc::rc::Rc;
-use core::{fmt, ops::Range, time::Duration};
+use core::{fmt, time::Duration};
 
 use embassy_time::Instant;
 use slint::platform::{
     Platform, WindowAdapter,
     software_renderer::{MinimalSoftwareWindow, Rgb565BigEndianPixel, SoftwareRenderer},
 };
+use theo_drivers::DirtyRows;
 
 /// Slint platform exposing a single software-rendered window.
 pub struct TheoPlatform {
@@ -43,6 +44,13 @@ impl Platform for TheoPlatform {
         Duration::from_micros(Instant::now().as_micros())
     }
 }
+
+/// Most row bands flushed per frame: Slint's dirty region holds at most
+/// three rectangles, so their rows form at most three bands.
+pub const DIRTY_BANDS: usize = 3;
+
+/// Dirty rows of the framebuffer, as up to [`DIRTY_BANDS`] bands.
+pub type FrameRows = DirtyRows<DIRTY_BANDS>;
 
 /// Full-panel framebuffer kept between frames.
 ///
@@ -77,16 +85,20 @@ impl FrameBuffer {
     }
 
     /// Redraws what changed with `renderer` and returns the dirty rows.
-    pub fn render(&mut self, renderer: &SoftwareRenderer) -> Range<u16> {
+    pub fn render(&mut self, renderer: &SoftwareRenderer) -> FrameRows {
         let region = renderer.render(self.pixels, usize::from(self.width));
-        let top = i64::from(region.bounding_box_origin().y);
-        let bottom = top + i64::from(region.bounding_box_size().height);
-        self.row(top)..self.row(bottom)
+        let mut rows = FrameRows::new(self.height);
+        for (origin, size) in region.iter() {
+            let top = i64::from(origin.y);
+            let bottom = top + i64::from(size.height);
+            rows.add(self.row(top)..self.row(bottom));
+        }
+        rows
     }
 
     /// Every row of the frame.
-    pub fn all_rows(&self) -> Range<u16> {
-        0..self.height
+    pub fn all_rows(&self) -> FrameRows {
+        FrameRows::all(self.height)
     }
 
     /// The frame as big-endian RGB565 bytes, ready for the panel.

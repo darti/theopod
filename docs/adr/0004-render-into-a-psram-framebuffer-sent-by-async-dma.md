@@ -4,7 +4,8 @@
 - Date: 2026-10-11
 - Amended: 2026-10-11, DMA reads the framebuffer in place (t-4)
 - Amended: 2026-10-14, cancel-safe flushes (t-3, t-29, t-31), host-tested
-  DMA arithmetic (t-30)
+  DMA arithmetic (t-30), flush retry policy (t-1, t-28), several row bands
+  per frame (t-5)
 
 ## Context
 
@@ -23,8 +24,11 @@ of PSRAM that the GDMA can read.
 - Slint renders into it with `RepaintBufferType::ReusedBuffer` and
   `Rgb565BigEndianPixel`, so pixels are already in panel byte order and
   only dirty regions are redrawn.
-- `theo_drivers::flush_rows` sends the dirty rows, widened to even rows and
-  full width, as one contiguous area; `Co5300` splits it into transfers of
+- `theo_drivers::flush_bands` sends the dirty rows as up to three bands
+  (`DirtyRows`, one per row span of Slint's at most three dirty
+  rectangles; bands touching once widened are merged, and past three the
+  closest two). Each band goes through `flush_rows`, widened to even rows
+  and full width, as one contiguous area; `Co5300` splits it into transfers of
   `QspiBus::MAX_TRANSFER_LEN` (32,704 bytes: the largest multiple of 64
   within esp-hal's 32,736-byte SPI DMA limit). Every transfer then starts
   64-byte aligned (even rows are 1,472 bytes, 23 x 64). A compile-time
@@ -52,10 +56,21 @@ of PSRAM that the GDMA can read.
   `EspQspiError::Underrun` if it is set, so the frame is resent. The flag
   is proven: during t-4 it fired on exactly the transfers that showed
   bands.
-- If a flush fails, every following wake-up (one frame period apart)
-  resends the whole frame until one succeeds: the framebuffer stays the
-  source of truth. Only the first failure of a streak and the recovery are
-  logged; a lasting failure means the bandwidth margin is gone.
+- If a flush fails, the panel is stale and the next flush sends every row:
+  the framebuffer stays the source of truth (`theo_drivers::FlushRetry`).
+  Errors say whether a retry can succeed (`Transient`). Transient ones
+  (`Underrun`, SPI DMA errors, chip select) are resent after 16 ms,
+  doubling up to 1 s; a lasting underrun means the bandwidth margin is
+  gone. Permanent ones (`TooLong`, `Misaligned`, `Unavailable`, esp-hal's
+  `MaxDmaTransferSizeExceeded`, rows or areas out of range) are not
+  retried by themselves, only resent with the next redraw: before t-1 they
+  were resent every 16 ms forever, flooding the log and keeping the loop
+  awake. The first failure of a streak, a change of kind, and the recovery
+  are logged.
+- At boot, `Board::init` clears the panel with one full-frame flush, whose
+  first transfer is `MAX_TRANSFER_LEN` long; a permanent failure panics,
+  so an esp-hal upgrade that lowers its private DMA limit fails at once
+  rather than at every frame.
 
 Out of scope: double buffering (rendering the next frame during the DMA of
 the previous one).
@@ -63,7 +78,7 @@ the previous one).
 ## Consequences
 
 - Positive: idle UI sends nothing; small changes send only the affected row
-  band; the executor runs other tasks (the button task) during transfers.
+  bands; the executor runs other tasks (the button task) during transfers.
 - Positive: no per-line byte swap; flushing logic is host-tested.
 - Negative: 330 KB of PSRAM is permanently reserved, and CPU rendering
   into PSRAM is slower than internal RAM.

@@ -1,38 +1,35 @@
 # theo-drivers
 
-HAL-independent drivers for the Theo Pod hardware, plus HAL-free input
-logic (orientation) and shared geometry. The crate is `no_std`,
-depends only on `embedded-hal` / `embedded-hal-async`, and is unit-tested on the host (`just test`).
-See `docs/adr/0001` and `0002` for why.
+HAL-independent drivers for the Theo Pod hardware, plus HAL-free logic
+(orientation, flush bands and retries, DMA arithmetic). `no_std`, depends
+only on `embedded-hal` / `embedded-hal-async`, unit-tested on the host
+(`just test`). See `docs/adr/0001` and `0002` for why.
 
 ## Contents
 
 - `panel.rs`: async `Panel` trait (open an area, stream big-endian RGB565).
-- `framebuffer.rs`: `flush_rows`, which sends dirty rows of a full-panel
-  framebuffer as one full-width, even-row-aligned area.
+- `framebuffer.rs`, `dirty_rows.rs`: `flush_rows` sends a band of rows of a
+  full-panel framebuffer as one full-width, even-row-aligned area;
+  `flush_bands` sends each band of a `DirtyRows` (few disjoint bands).
+- `retry.rs`: `Transient` errors and `FlushRetry`, the resend policy.
 - `qspi.rs`: async `QspiBus` trait (8-bit opcode, 24-bit address, single or
   quad data, `MAX_TRANSFER_LEN`). `embedded-hal` has no Quad-SPI trait.
-- `chip_select.rs`: `ChipSelect`, an active-low chip select released on
-  drop, so `QspiBus` implementations stay usable when a write is cancelled.
-- `dma_layout.rs`: descriptor chunking and framebuffer-payload checks of
-  in-place DMA transfers, used by the firmware's PSRAM DMA path.
+- `chip_select.rs`: `ChipSelect`, released on drop (cancel-safe buses).
+- `dma_layout.rs`: descriptor chunking and payload checks of the
+  firmware's in-place PSRAM DMA.
 - `co5300.rs`: CO5300 AMOLED controller. Implements `Panel` over any
   `QspiBus`; validates geometry, 2x2 alignment and pixel counts, and splits
   pixel payloads into bus-sized transfers.
-- `tca9554.rs`: TCA9554 I/O expander over async I2C, per pin (`Pin`) or
-  by mask; every change is a read-modify-write, outputs latch levels
-  before direction.
-- `panel_power.rs`: `PanelPower`, the panel rail/reset pulse through the
-  expander. Board values live in `src/device/`.
+- `tca9554.rs`, `panel_power.rs`: TCA9554 expander (read-modify-writes,
+  levels latched before direction); `PanelPower`, the panel rail pulse.
 - `cst820.rs`: `Cst820` touch controller over async I2C; pulses its reset
   through a `Tca9554` pin, waits for the interrupt edge while idle and
   polls while touched; rejects reports off the panel, and cancels (rather
   than releases) a touch whose read fails or that a reset interrupts.
 - `qmi8658.rs`: `Qmi8658` IMU over async I2C, accelerometer only.
 - `geometry.rs`, `orientation.rs`: `PanelSize`/`TouchPoint`;
-  `OrientationDetector` (gravity to view `Rotation`, dead band), `AxisMap`
-  (with the `is_rotation` const check), and the rotated view size and
-  touch mapping.
+  `OrientationDetector` (gravity to `Rotation`), `AxisMap` (const-checked
+  by `is_rotation`), the rotated view size and touch mapping.
 - `button.rs`: `DebouncedButton`, cancel-safe debounced press/release.
 
 ## Extension points
@@ -47,9 +44,7 @@ See `docs/adr/0001` and `0002` for why.
 
 ## Tests
 
-Side-by-side `*_tests.rs` files use the fakes in `test_support/`: recording
-`QspiBus` and `Panel`, `AddressBus`, `RecordingDelay`, and one async I2C
-fake per chip (`FakeTca9554`, `FakeCst820`, `FakeQmi8658`). Hardware-only:
-the QSPI phases and DMA of `src/device/esp_qspi.rs` / `psram_tx_buf.rs`
-(their arithmetic is `dma_layout.rs`), CST820 timing, and the IMU axis
-map (`src/device/mod.rs`).
+Side-by-side `*_tests.rs` files use the fakes in `test_support/`
+(recording `QspiBus` and `Panel`, delays, one async I2C fake per chip).
+Hardware-only: QSPI phases and DMA of `src/device/` (their arithmetic is
+`dma_layout.rs`), CST820 timing, and the IMU axis map.

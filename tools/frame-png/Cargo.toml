@@ -7,7 +7,7 @@ license.workspace = true
 
 [dependencies]
 png.workspace = true
-theo-frame-dump.workspace = true
+theo-frame-dump = { workspace = true, features = ["parse"] }
 
 [dev-dependencies]
 speculoos.workspace = true

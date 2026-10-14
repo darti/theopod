@@ -1,7 +1,8 @@
 # theo-frame-dump
 
 Text format for dumping a framebuffer through a serial log, so a host can
-see exactly what the firmware rendered. `no_std` with `alloc`; host-tested
+see exactly what the firmware rendered. `no_std`; the host-side parser sits
+behind the `parse` feature, the only part that needs `alloc`. Host-tested
 with `just test`.
 
 ## Contents
@@ -12,8 +13,9 @@ with `just test`.
 - `write.rs`: firmware side. `write_frame` writes a big-endian RGB565 frame
   to any `core::fmt::Write` (the firmware uses `esp_println::Printer`)
   without allocating.
-- `parse.rs`: host side. `parse_frame` returns the last complete, valid dump
-  of a log as a `Frame`; `Frame::to_rgb8` expands it for image encoders.
+- `parse.rs` (feature `parse`): host side. `parse_frame` returns the last
+  complete, valid dump of a log as a `Frame`; `Frame::to_rgb8` expands it
+  for image encoders.
   Header sizes are capped so a corrupted log cannot exhaust memory.
 
 ## Extension points
@@ -24,7 +26,8 @@ with `just test`.
 ## Dependencies
 
 - No sibling crates. Used by the firmware (`frame-dump` feature, through
-  `src/device/mod.rs`) and by `tools/frame-png`.
+  `src/device/mod.rs`, without `parse`) and by `tools/frame-png` (with
+  `parse`).
 
 ## Tests
 

@@ -24,6 +24,9 @@ the ESP toolchain and target are defined in `rust-toolchain.toml`.
 - Keep changes compatible with the `xtensa-esp32s3-none-elf` target and the
   dependency versions declared in `Cargo.toml`.
 - Record significant technical decisions in `docs/adr/`.
+- Regression tests live in the side-by-side `*_tests.rs` files, each
+  tagged `// Regression (t-N): ...` (or `Regression guard`), not in
+  `tests/regressions/` (ADR-0007).
 - Layout: `README.md`; driver map in `crates/theo-drivers/ARCHITECTURE.md`.
   Debug tooling: `crates/theo-frame-dump` (`no_std`, shared by the firmware
   and the host) and the host-only `tools/frame-png`.

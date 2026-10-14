@@ -41,7 +41,7 @@ fn flush_rows_full_frame_opens_whole_panel_and_sends_frame() {
     ]);
 }
 
-// Regression guard: the CO5300 ignores areas not aligned on 2x2 blocks, so
+// Regression guard (t-8): the CO5300 ignores areas not aligned on 2x2 blocks, so
 // dirty rows are widened to even boundaries and full width.
 #[test]
 fn flush_rows_odd_bounds_widen_to_even_rows() {
@@ -75,7 +75,7 @@ fn flush_rows_odd_panel_height_clamps_widened_end() {
     ]);
 }
 
-// Regression guard: the widening exists for the CO5300's 2x2 rule, so check
+// Regression guard (t-8): the widening exists for the CO5300's 2x2 rule, so check
 // it against the real driver, not only the permissive recording panel.
 #[test]
 fn flush_rows_odd_dirty_rows_into_co5300_opens_aligned_area() {

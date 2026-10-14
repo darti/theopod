@@ -34,7 +34,7 @@ fn power_up_pulses_panel_pins_low_once() {
     ]);
 }
 
-// Regression: the output register may hold low levels (for example after a
+// Regression (t-8): the output register may hold low levels (for example after a
 // firmware reset during a previous pulse). Switching the pins to outputs
 // before latching high levels would glitch the panel rails low.
 #[test]

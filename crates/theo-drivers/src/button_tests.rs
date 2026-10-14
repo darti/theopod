@@ -171,7 +171,7 @@ fn changed_active_high_button_reports_high_as_pressed() {
     assert_that!(button.release().0.waits).is_equal_to(vec![PinState::High]);
 }
 
-// Regression guard: cancelling `changed` mid-debounce must not change the
+// Regression guard (t-8): cancelling `changed` mid-debounce must not change the
 // state; the next call debounces again and reports the change once.
 #[test]
 fn changed_cancelled_mid_debounce_keeps_state_and_reports_next_call() {

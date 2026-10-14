@@ -8,3 +8,4 @@
 | [0004](0004-render-into-a-psram-framebuffer-sent-by-async-dma.md) | Render into a PSRAM framebuffer sent by async DMA | Accepted |
 | [0005](0005-share-an-async-i2c-bus-owned-by-board.md) | Share an async I2C bus owned by Board | Accepted |
 | [0006](0006-rotate-the-view-in-software-from-the-accelerometer.md) | Rotate the view in software from the accelerometer | Accepted |
+| [0007](0007-keep-regression-tests-inline-tagged-by-task.md) | Keep regression tests inline, tagged by task | Accepted |

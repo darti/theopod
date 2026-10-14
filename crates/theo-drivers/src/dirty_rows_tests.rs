@@ -27,7 +27,7 @@ fn all_covers_every_row() {
     assert_that!(bands(&rows)).is_equal_to(vec![(0, HEIGHT)]);
 }
 
-// Regression guard: the CO5300 ignores areas not aligned on 2x2 blocks.
+// Regression guard (t-5): the CO5300 ignores areas not aligned on 2x2 blocks.
 #[test]
 fn add_widens_to_even_rows() {
     let mut rows = DirtyRows::<3>::new(HEIGHT);

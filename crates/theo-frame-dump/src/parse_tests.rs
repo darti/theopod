@@ -114,7 +114,7 @@ fn parse_frame_corrupted_later_dump_keeps_earlier_complete_one() {
     assert_that!(frame.pixels).is_equal_to(vec![4, 5]);
 }
 
-// Regression: the header sized an allocation straight from the log, so one
+// Regression (t-8): the header sized an allocation straight from the log, so one
 // corrupted line could make the tool allocate gigabytes and abort.
 #[test]
 fn parse_frame_oversized_header_returns_bad_header() {

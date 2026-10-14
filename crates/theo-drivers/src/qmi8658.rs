@@ -118,7 +118,8 @@ impl<I: I2c> Qmi8658<I> {
         self.write(REGISTER_RESET, RESET_COMMAND).await?;
         self.wait_for_reset(delay).await?;
         self.write(REGISTER_CTRL1, CTRL1_AUTO_INCREMENT).await?;
-        self.write(REGISTER_CTRL2, CTRL2_ACCEL_2G_LOW_POWER_21HZ).await?;
+        self.write(REGISTER_CTRL2, CTRL2_ACCEL_2G_LOW_POWER_21HZ)
+            .await?;
         self.write(REGISTER_CTRL7, CTRL7_ACCEL_ONLY).await
     }
 

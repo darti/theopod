@@ -85,7 +85,7 @@ fn size_returns_visible_geometry() {
     assert_that!(panel().size()).is_equal_to((368, 448));
 }
 
-// Regression (driver half): register writes must use opcode 0x02 with
+// Regression (f954dfb, driver half): register writes must use opcode 0x02 with
 // single-lane data. Sending them on quad lanes kept the panel black. The
 // single-line command/address phases are the `QspiBus` implementation's job
 // (src/device/esp_qspi.rs) and are only verified on hardware.
@@ -161,7 +161,7 @@ fn begin_area_full_panel_spans_offset_columns() {
     assert_that!(transfers[1]).is_equal_to(Transfer::register(0x2B, &[0x00, 0x00, 0x01, 0xBF]));
 }
 
-// Regression: the CO5300 silently ignores areas not aligned on 2x2 blocks,
+// Regression (f954dfb): the CO5300 silently ignores areas not aligned on 2x2 blocks,
 // which left the screen black when lines were sent one row at a time.
 #[test]
 fn begin_area_single_row_returns_invalid_area() {
@@ -224,7 +224,7 @@ fn begin_area_bus_failure_closes_previous_area() {
     }));
 }
 
-// Regression (driver half): pixel data must use opcode 0x32 with
+// Regression (f954dfb, driver half): pixel data must use opcode 0x32 with
 // memory-write-continue and quad-lane data; see the register test above for
 // the command/address phases.
 #[test]

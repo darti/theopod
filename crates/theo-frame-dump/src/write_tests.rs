@@ -46,7 +46,7 @@ fn write_frame_wrong_pixel_count_returns_size_mismatch() {
     assert_that!(out.is_empty()).is_true();
 }
 
-// Regression: an empty frame was written but could never be parsed back.
+// Regression (t-8): an empty frame was written but could never be parsed back.
 #[test]
 fn write_frame_zero_width_returns_empty_frame() {
     let mut out = String::new();

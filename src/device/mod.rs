@@ -43,6 +43,7 @@ use esp_hal::{
     time::Rate,
     timer::timg::TimerGroup,
 };
+use static_cell::StaticCell;
 
 use self::{esp_qspi::EspQspi, psram_tx_buf::PsramTxBuf};
 use embedded_hal::digital::PinState;
@@ -135,7 +136,7 @@ pub type I2cBus = Mutex<CriticalSectionRawMutex, I2c<'static, Async>>;
 
 /// One device's handle on [`I2cBus`]; implements `embedded-hal-async` I2C.
 ///
-/// `Board::init` creates one per driver from the leaked bus. The expander
+/// `Board::init` creates one per driver from the static bus. The expander
 /// is only driven there: its read-modify-writes are not atomic across
 /// handles, so a runtime user must become its single owner (ADR-0005).
 pub type I2cDevice = SharedI2cDevice<'static, CriticalSectionRawMutex, I2c<'static, Async>>;
@@ -203,7 +204,9 @@ impl Board {
             .with_sda(peripherals.GPIO15)
             .with_scl(peripherals.GPIO14)
             .into_async();
-        let i2c: &'static I2cBus = Box::leak(Box::new(Mutex::new(i2c)));
+        // In `.bss`: internal RAM, never PSRAM, and initialized only once.
+        static I2C_BUS: StaticCell<I2cBus> = StaticCell::new();
+        let i2c: &'static I2cBus = I2C_BUS.init(Mutex::new(i2c));
         let mut expander = Tca9554::new(I2cDevice::new(i2c), TCA9554_ADDRESS);
         PANEL_POWER
             .power_up(&mut expander, &mut Delay)

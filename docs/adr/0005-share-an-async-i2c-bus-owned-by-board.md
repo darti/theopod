@@ -27,8 +27,10 @@ pulsed EXIO0..2, so it also reset the touch controller.
   the host tests run through `block_on`.
 - `Board` keeps the bus as `&'static I2cBus`, an
   `embassy_sync::mutex::Mutex<CriticalSectionRawMutex, I2c<Async>>`
-  leaked from the internal heap. Each driver takes an `I2cDevice`
-  (`embassy-embedded-hal` shared bus), which locks the bus per transaction.
+  in a `StaticCell` (t-21: in `.bss`, so internal RAM and never PSRAM; it
+  was first leaked from the heap, which can spill to PSRAM). Each driver
+  takes an `I2cDevice` (`embassy-embedded-hal` shared bus), which locks
+  the bus per transaction.
   The critical-section mutex makes the bus `Sync`: it can be shared with
   another executor (interrupt priority, second core) at the cost of a short
   critical section per lock. Today every task runs on the one esp-rtos

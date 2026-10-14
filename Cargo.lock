@@ -5211,6 +5211,7 @@ dependencies = [
  "log",
  "slint",
  "slint-build",
+ "static_cell",
  "theo-drivers",
  "theo-frame-dump",
 ]

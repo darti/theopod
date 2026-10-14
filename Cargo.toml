@@ -30,6 +30,7 @@ png = "0.18"
 slint = { version = "1.18", default-features = false, features = ["compat-1-2", "unsafe-single-threaded", "libm", "renderer-software"] }
 slint-build = "1.18"
 speculoos = "0.13"
+static_cell = "2.1"
 theo-drivers = { path = "crates/theo-drivers" }
 theo-frame-dump = { path = "crates/theo-frame-dump" }
 
@@ -59,6 +60,7 @@ esp-println.workspace = true
 esp-rtos.workspace = true
 log.workspace = true
 slint.workspace = true
+static_cell.workspace = true
 theo-drivers.workspace = true
 theo-frame-dump = { workspace = true, optional = true }
 

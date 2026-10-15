@@ -11,9 +11,9 @@
 //! bytes, else DMA in place from internal RAM or PSRAM (16-byte bursts, too
 //! slow for long PSRAM payloads), or a copy for flash. See `docs/adr/0004`.
 //!
-//! Writes are cancel-safe: dropping one mid-transfer releases chip select
-//! and, for a framebuffer payload, stops the DMA and keeps the SPI master
-//! (for other payloads, chip select may rise up to one byte early).
+//! Writes are cancel-safe: dropping one mid-transfer stops the transfer,
+//! waits for the SPI to go idle, then releases chip select; for a
+//! framebuffer payload it also keeps the SPI master.
 //! Leaking one (`mem::forget`) is not: see [`EspQspi::new`].
 
 use core::{fmt, ops::Range};
@@ -187,9 +187,9 @@ impl<'d, CS: OutputPin> EspQspi<'d, CS> {
 
     /// Sends `source` with esp-hal's slice API (FIFO, DMA in place, or copy).
     ///
-    /// Cancel-safe, mostly: esp-hal stops the DMA when the future is
-    /// dropped but does not wait for the SPI to go idle, so chip select may
-    /// rise up to one byte early.
+    /// Cancel-safe: esp-hal stops the DMA when the future is dropped, but
+    /// does not wait for the SPI to go idle; `write`'s [`IdleOnDrop`] does,
+    /// before chip select rises.
     async fn send(
         bus: &mut Option<Idle<'d>>,
         mode: DataMode,
@@ -308,8 +308,10 @@ impl<CS: OutputPin> QspiBus for EspQspi<'_, CS> {
             underrun::clear();
         }
         let selected = ChipSelect::select(&mut self.cs).map_err(EspQspiError::ChipSelect)?;
-        // The transfer future must drop before `selected`: on cancellation
-        // the DMA then stops (and waits idle) before chip select rises.
+        // Dropped in reverse order on cancellation: the transfer future
+        // (stops the DMA), then `_idle` (waits for the SPI to finish its
+        // last byte), then `selected` (raises chip select).
+        let _idle = IdleOnDrop;
         let transferred = if frame_payload {
             Self::send_frame(&mut self.bus, mode, command, address, data).await
         } else {
@@ -324,6 +326,34 @@ impl<CS: OutputPin> QspiBus for EspQspi<'_, CS> {
         }
         released.map_err(EspQspiError::ChipSelect)
     }
+}
+
+/// Waits for the display SPI (SPI2) to go idle when dropped (t-47).
+///
+/// A cancelled esp-hal slice transfer aborts the SPI without waiting for
+/// it: chip select must not rise while the last byte is still clocked out.
+struct IdleOnDrop;
+
+impl Drop for IdleOnDrop {
+    fn drop(&mut self) {
+        // One aborted byte takes well under a microsecond at 40 MHz; the
+        // bound only keeps a stuck peripheral from hanging the executor.
+        for _ in 0..10_000 {
+            if !spi_busy() {
+                return;
+            }
+            core::hint::spin_loop();
+        }
+    }
+}
+
+/// Tells whether SPI2 is still running a transaction (esp-hal's `busy`).
+fn spi_busy() -> bool {
+    esp_hal::peripherals::SPI2::regs()
+        .cmd()
+        .read()
+        .usr()
+        .bit_is_set()
 }
 
 /// "DMA TX slower than SPI" flag of the display SPI (SPI2), latched by the

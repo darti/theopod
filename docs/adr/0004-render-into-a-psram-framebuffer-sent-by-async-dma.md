@@ -94,7 +94,9 @@ the previous one).
   through esp-hal's 16-byte bursts, too slow for long transfers.
 - Neutral: flushes are cancel-safe (t-3, t-29). Dropping `EspQspi::write`
   releases chip select (`theo_drivers::ChipSelect`) and, mid-framebuffer
-  transfer, stops the DMA and puts the SPI master back (`InFlight`);
+  transfer, stops the DMA and puts the SPI master back (`InFlight`); on
+  any write it waits for the SPI to go idle before chip select rises
+  (`IdleOnDrop`, t-47: esp-hal's slice path aborts without waiting);
   `Co5300` refuses further pixels until a new area is opened. The rows of
   a cancelled flush are stale and must be sent again.
 - Negative: leaking a write future (`mem::forget`) skips those guards: the

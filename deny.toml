@@ -1,0 +1,55 @@
+# cargo-deny configuration (`just audit`): security advisories and licenses.
+
+[graph]
+# The firmware and the host tools.
+targets = ["xtensa-esp32s3-none-elf", "aarch64-apple-darwin", "x86_64-unknown-linux-gnu"]
+
+[advisories]
+# Unmaintained crates are reported but do not fail the audit: they come from
+# upstream dependencies (Slint's build tooling) we cannot replace.
+unmaintained = "none"
+
+[licenses]
+# Permissive licenses compatible with MIT OR Apache-2.0.
+allow = [
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "ISC",
+    "MIT",
+    "Unicode-3.0",
+    "Zlib",
+]
+confidence-threshold = 0.9
+
+# Slint is GPL-3.0-only, royalty-free (desktop, mobile, web only) or
+# commercial. The firmware image is embedded, so it follows the GPL-3.0
+# unless a commercial license applies (README, License).
+[[licenses.exceptions]]
+crate = "slint"
+allow = ["GPL-3.0-only"]
+[[licenses.exceptions]]
+crate = "slint-build"
+allow = ["GPL-3.0-only"]
+[[licenses.exceptions]]
+crate = "slint-macros"
+allow = ["GPL-3.0-only"]
+[[licenses.exceptions]]
+crate = "i-slint-backend-selector"
+allow = ["GPL-3.0-only"]
+[[licenses.exceptions]]
+crate = "i-slint-common"
+allow = ["GPL-3.0-only"]
+[[licenses.exceptions]]
+crate = "i-slint-compiler"
+allow = ["GPL-3.0-only"]
+[[licenses.exceptions]]
+crate = "i-slint-core"
+allow = ["GPL-3.0-only"]
+[[licenses.exceptions]]
+crate = "i-slint-core-macros"
+allow = ["GPL-3.0-only"]
+[[licenses.exceptions]]
+crate = "i-slint-renderer-software"
+allow = ["GPL-3.0-only"]

@@ -64,6 +64,8 @@ the ESP toolchain and target are defined in `rust-toolchain.toml`.
 - Run `just check` to verify compilation with the ESP toolchain.
 - Run `just test` to run the host unit tests (drivers, frame dump, frame-png).
 - Run `just lint` to run clippy on the firmware and the host crates.
+- Run `just miri` after changing `unsafe` code in `crates/theo-drivers`
+  (slow, about 5 minutes), and `just audit` after changing dependencies.
 - Run `just build` to produce a release firmware image.
 
 Flashing and the serial monitor (`just flash`, `just monitor`, `just run`,

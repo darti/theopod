@@ -5,6 +5,7 @@ chip := "esp32s3"
 esp_toolchain := `dirname "$(rustup which rustc --toolchain esp)"`
 libclang_path := `find "$(dirname "$(rustup which rustc --toolchain esp)")/../xtensa-esp32-elf-clang" -type d -path '*/esp-clang/lib' -print -quit`
 host_target := `rustc +stable -vV | sed -n 's/^host: //p'`
+nightly_bin := `dirname "$(rustup which rustc --toolchain nightly)"`
 gcc_path := `find "$(dirname "$(rustup which rustc --toolchain esp)")/../xtensa-esp-elf" -type d -path '*/xtensa-esp-elf/bin' -print -quit`
 
 default:
@@ -64,6 +65,17 @@ frame-png log="target/frame.log" out="target/frame.png":
 # Run the HAL-independent unit tests on the host.
 test:
     RUSTUP_TOOLCHAIN=stable cargo test -p theo-drivers -p theo-frame-dump -p frame-png --target {{host_target}}
+
+# Run the driver tests under Miri, to catch undefined behaviour in their
+# unsafe code (`rustup +nightly component add miri rust-src` once). Cargo
+# runs from a neutral directory: `.cargo/config.toml` (xtensa target,
+# `build-std`) applies to the working directory and would break Miri.
+miri:
+    cd "${TMPDIR:-/tmp}" && PATH="{{nightly_bin}}:${PATH}" cargo miri test --manifest-path "{{justfile_directory()}}/crates/theo-drivers/Cargo.toml" --target {{host_target}}
+
+# Check dependencies for security advisories and license compatibility.
+audit:
+    RUSTUP_TOOLCHAIN=stable cargo deny check advisories licenses
 
 fmt:
     cargo fmt --all

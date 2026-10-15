@@ -5,6 +5,7 @@
 //! - [`Display`]: concrete display type of this board, owning the PSRAM
 //!   framebuffer; implements [`theo_drivers::Panel`].
 //! - [`Button`]: the BOOT push button, debounced.
+//! - [`DeepSleep`]: stops the chip until the BOOT button is pressed.
 //! - [`Touch`]: the CST820 touch controller, with the expander that resets
 //!   it.
 //! - [`Expander`]: the TCA9554, shared by its runtime users.
@@ -37,9 +38,10 @@ use embassy_time::{Delay, Instant};
 use esp_alloc::ExternalMemory;
 use esp_hal::{
     Async,
-    gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull},
+    gpio::{Event, Input, InputConfig, Level, Output, OutputConfig, Pull, WakeupConfig},
     i2c::master::{BusTimeout, Config as I2cConfig, Error as I2cError, I2c},
     psram::{PsramConfig, PsramMode, SpiRamFreq},
+    rtc_cntl::sleep::{LowPower, RtcSleepConfig},
     spi::{
         Mode,
         master::{Config as SpiConfig, Spi},
@@ -135,7 +137,63 @@ const BUTTON_DEBOUNCE_MS: u32 = 20;
 pub type Display = Co5300<EspQspi<'static, Output<'static>>>;
 
 /// BOOT button on GPIO0 (pulled up, low while pressed).
+///
+/// A press held at start-up, such as the one that woke the chip from
+/// [`DeepSleep`], only reports its release.
 pub type Button = DebouncedButton<Input<'static>, Delay>;
+
+/// Deep sleep of the ESP32-S3, ended by a press of the BOOT button.
+///
+/// GPIO0 is an RTC pad, so it can wake the chip while the digital domain
+/// is off. Waking resets the chip: the firmware starts again from
+/// [`Board::init`].
+pub struct DeepSleep {
+    low_power: LowPower<'static>,
+}
+
+impl DeepSleep {
+    /// Waits for `button` to be released, then sleeps until it is pressed.
+    ///
+    /// Waking restarts the firmware. Sleeping with the button down would
+    /// wake the chip at once, hence the wait. Peripherals outside the chip
+    /// (the panel, its expander, touch and IMU) keep their state; put them
+    /// to sleep first (only the panel is so far: t-50).
+    ///
+    /// If GPIO0 cannot be armed as a wakeup source, which its RTC pad rules
+    /// out, the chip restarts instead: the panel is already dark, and a
+    /// halted chip would look dead.
+    pub async fn until_pressed(mut self, mut button: Button) -> ! {
+        while button.is_pressed() {
+            match button.changed().await {
+                Ok(_) => {}
+                Err(never) => match never {},
+            }
+        }
+        let (mut pin, _) = button.release();
+        // The low-power path is the one that works with the digital domain
+        // off; sleep keeps the pin's pull-up, so the pad stays high.
+        if let Err(error) =
+            pin.apply_wakeup_config(&WakeupConfig::default().with_low_power_path(true))
+        {
+            log::error!("BOOT button cannot wake the chip, restarting: {error:?}");
+            esp_hal::system::software_reset();
+        }
+        log::info!("entering deep sleep until BOOT is pressed");
+        // The wake level is the listen trigger. Interrupts stay off from
+        // here: the async GPIO handler would stop listening on a press
+        // and leave the sleep without a wakeup source.
+        critical_section::with(|_| {
+            pin.listen(Event::LowLevel);
+            self.low_power.sleep_deep(RtcSleepConfig::deep())
+        })
+    }
+}
+
+impl fmt::Debug for DeepSleep {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DeepSleep").finish_non_exhaustive()
+    }
+}
 
 /// CST820 touch controller; interrupt on GPIO21 (Waveshare BSP
 /// `BSP_LCD_TOUCH_INT`, active low), points in panel pixels.
@@ -213,8 +271,10 @@ pub type I2cDevice = SharedI2cDevice<'static, CriticalSectionRawMutex, I2c<'stat
 pub struct Board {
     /// Initialized and powered AMOLED panel.
     pub display: Display,
-    /// BOOT push button.
+    /// BOOT push button, in sync with its level at start-up.
     pub button: Button,
+    /// Deep sleep, woken by the BOOT button.
+    pub deep_sleep: DeepSleep,
     /// Touch controller; reset and with its interrupts enabled unless its
     /// init failed (logged).
     pub touch: Touch,
@@ -227,6 +287,7 @@ impl fmt::Debug for Board {
         f.debug_struct("Board")
             .field("display", &self.display)
             .field("button", &self.button)
+            .field("deep_sleep", &self.deep_sleep)
             .field("touch", &self.touch)
             .field("imu", &self.imu.is_some())
             .finish()
@@ -365,12 +426,23 @@ impl Board {
             peripherals.GPIO0,
             InputConfig::default().with_pull(Pull::Up),
         );
-        let button = DebouncedButton::new(boot, Delay, PinState::Low, BUTTON_DEBOUNCE_MS);
+        let mut button = DebouncedButton::new(boot, Delay, PinState::Low, BUTTON_DEBOUNCE_MS);
+        // Still held after the press that woke the chip: report only its
+        // release, so it neither clicks nor counts as a long press.
+        match button.sync_state() {
+            Ok(true) => log::info!("BOOT held at start-up, waiting for its release"),
+            Ok(false) => {}
+            Err(never) => match never {},
+        }
+        let deep_sleep = DeepSleep {
+            low_power: LowPower::new(peripherals.LPWR),
+        };
 
         log_heap_usage();
         Self {
             display,
             button,
+            deep_sleep,
             touch,
             imu,
         }
@@ -424,8 +496,9 @@ async fn start_imu(i2c: &'static I2cBus) -> Option<Imu> {
 /// Reboots for a broken display in a row, kept across software resets.
 ///
 /// In RTC fast RAM, which a software reset keeps. Its contents are
-/// arbitrary after an early reset (esp-hal `persistent`); the complement
-/// ([`encode_resets`]) makes those read as zero.
+/// arbitrary after an early reset (esp-hal `persistent`) or a deep sleep,
+/// which powers that RAM down (`DeepSleep`); the complement
+/// ([`encode_resets`]) makes those read as zero, so a stop clears the count.
 #[esp_hal::ram(unstable(rtc_fast, persistent))]
 static mut DISPLAY_RESETS: [u32; 2] = [0; 2];
 

@@ -9,7 +9,9 @@ export component MainWindow inherits Window {
     property <int> count;
 
     // The firmware forwards the BOOT button as the Return key; a click
-    // counts on release, like a TouchArea click.
+    // counts on release, like a TouchArea click. Keep Return actions on
+    // release: a long press, which stops the pod, only sends the press
+    // (ADR-0008).
     keys := FocusScope {
         property <bool> pressed;
 

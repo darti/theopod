@@ -207,3 +207,43 @@ fn changed_pin_failure_returns_pin_error_and_keeps_pressed_state() {
     assert_that!(result.err()).is_equal_to(Some(ErrorKind::Other));
     assert_that!(button.is_pressed()).is_true();
 }
+
+#[test]
+fn sync_state_low_pin_reports_held_button_only_when_released() {
+    let mut button = button(&[LOW, HIGH]);
+
+    let held = button.sync_state();
+    let event = block_on(button.changed());
+
+    assert_that!(held).is_ok().is_true();
+    assert_that!(event)
+        .is_ok()
+        .is_equal_to(ButtonEvent::Released);
+    assert_that!(button.release().0.waits).is_equal_to(vec![PinState::High]);
+}
+
+#[test]
+fn sync_state_high_pin_after_held_reports_released() {
+    let mut button = button(&[LOW, HIGH]);
+    button.sync_state().unwrap();
+
+    let held = button.sync_state();
+
+    assert_that!(held).is_ok().is_false();
+    assert_that!(button.is_pressed()).is_false();
+}
+
+#[test]
+fn sync_state_pin_failure_returns_pin_error_and_keeps_state() {
+    let pin = ScriptedPin {
+        fail_when_exhausted: true,
+        ..ScriptedPin::new(&[LOW])
+    };
+    let mut button = DebouncedButton::new(pin, RecordingDelay::default(), PinState::Low, 5);
+    button.sync_state().unwrap();
+
+    let result = button.sync_state();
+
+    assert_that!(result.err()).is_equal_to(Some(ErrorKind::Other));
+    assert_that!(button.is_pressed()).is_true();
+}

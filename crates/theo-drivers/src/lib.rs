@@ -4,6 +4,7 @@
 //! builds for any target and is unit-tested on the host.
 //!
 //! - [`DebouncedButton`], [`ButtonEvent`]: debounced push button on any input pin.
+//! - [`LongPress`]: tells short presses from long ones.
 //! - [`Panel`]: panel owning its framebuffer, sent to it by byte ranges.
 //! - [`flush_rows`], [`flush_bands`], [`DirtyRows`], [`FlushError`]: sends
 //!   dirty bands of framebuffer rows to a [`Panel`].
@@ -42,6 +43,7 @@ pub mod dirty_rows;
 pub mod dma_layout;
 pub mod framebuffer;
 pub mod geometry;
+pub mod long_press;
 pub mod memory_check;
 pub mod orientation;
 pub mod panel;
@@ -67,6 +69,8 @@ mod dma_layout_tests;
 #[cfg(test)]
 mod framebuffer_tests;
 #[cfg(test)]
+mod long_press_tests;
+#[cfg(test)]
 mod memory_check_tests;
 #[cfg(test)]
 mod orientation_tests;
@@ -91,6 +95,7 @@ pub use dirty_rows::DirtyRows;
 pub use dma_layout::{DmaChunk, FramePayloadError, descriptor_chunks, frame_payload};
 pub use framebuffer::{FlushError, flush_bands, flush_rows};
 pub use geometry::{PanelSize, TouchPoint};
+pub use long_press::LongPress;
 pub use memory_check::{PatternMismatch, check_pattern, check_pattern_with};
 pub use orientation::{Axis, AxisMap, OrientationDetector, PanelAcceleration, Rotation};
 pub use panel::Panel;

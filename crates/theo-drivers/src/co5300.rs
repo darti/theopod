@@ -1,7 +1,7 @@
 //! HAL-independent CO5300 AMOLED controller driver.
 //!
-//! - [`Co5300`]: initializes the panel and streams the bus's RGB565
-//!   framebuffer over any [`QspiBus`], with delays from any
+//! - [`Co5300`]: initializes the panel, puts it to sleep, and streams the
+//!   bus's RGB565 framebuffer over any [`QspiBus`], with delays from any
 //!   `embedded-hal-async` [`DelayNs`]. Framebuffer ranges longer than
 //!   [`QspiBus::MAX_TRANSFER_LEN`] are split.
 //! - [`PanelGeometry`]: visible size and RAM offset of the attached panel.
@@ -27,8 +27,10 @@ const OPCODE_WRITE_REGISTER: u8 = 0x02;
 pub(crate) const OPCODE_WRITE_PIXELS: u8 = 0x32;
 
 const CMD_SOFTWARE_RESET: u8 = 0x01;
+const CMD_SLEEP_IN: u8 = 0x10;
 const CMD_SLEEP_OUT: u8 = 0x11;
 const CMD_INVERSION_OFF: u8 = 0x20;
+const CMD_DISPLAY_OFF: u8 = 0x28;
 const CMD_DISPLAY_ON: u8 = 0x29;
 const CMD_COLUMN_ADDRESS: u8 = 0x2A;
 const CMD_ROW_ADDRESS: u8 = 0x2B;
@@ -60,6 +62,8 @@ const MADCTL_RGB: u8 = 0x00;
 const RESET_SETTLE_MS: u32 = 200;
 const SLEEP_OUT_SETTLE_MS: u32 = 120;
 const DISPLAY_ON_SETTLE_MS: u32 = 10;
+/// The controller needs this long after sleep-in before its supply may go.
+const SLEEP_IN_SETTLE_MS: u32 = 120;
 
 /// Failure while talking to the CO5300.
 #[derive(Debug, PartialEq, Eq)]
@@ -215,6 +219,20 @@ impl<B: QspiBus> Co5300<B> {
         self.write_register(CMD_MEMORY_ACCESS_CONTROL, &[MADCTL_RGB])
             .await?;
         self.write_register(CMD_INVERSION_OFF, &[]).await
+    }
+
+    /// Blanks the panel and puts the controller to sleep.
+    ///
+    /// [`Co5300::init`] wakes it again.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Bus`] on the first failed register write.
+    pub async fn sleep(&mut self, delay: &mut impl DelayNs) -> Result<(), Error<B::Error>> {
+        self.write_register(CMD_DISPLAY_OFF, &[]).await?;
+        self.write_register(CMD_SLEEP_IN, &[]).await?;
+        delay.delay_ms(SLEEP_IN_SETTLE_MS).await;
+        Ok(())
     }
 
     async fn write_register(&mut self, command: u8, data: &[u8]) -> Result<(), Error<B::Error>> {

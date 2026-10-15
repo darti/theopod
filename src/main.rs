@@ -12,6 +12,11 @@
 //! pointer events, and orientation changes rotate the rendering, the window
 //! size and the touch coordinates together.
 //!
+//! Holding BOOT for [`LONG_PRESS_MS`] stops the pod: the loop puts the
+//! panel to sleep, then [`watch_button`] waits for the release and puts the
+//! chip in deep sleep. The next BOOT press wakes it, which restarts the
+//! firmware; that press never reaches Slint.
+//!
 //! Each input runs in its own task ([`watch_button`], [`watch_touch`],
 //! [`watch_orientation`]) and reaches the loop through a channel
 //! ([`BUTTON_EVENTS`], [`TOUCH_EVENTS`]) or a signal ([`ROTATION`]):
@@ -30,11 +35,11 @@ mod slint_backend;
 use alloc::boxed::Box;
 
 use embassy_executor::Spawner;
-use embassy_futures::select::{Either4, select4};
+use embassy_futures::select::{Either, Either4, select, select4};
 use embassy_sync::{
     blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel, signal::Signal,
 };
-use embassy_time::{Duration, Instant, Ticker, TimeoutError, Timer, with_timeout};
+use embassy_time::{Delay, Duration, Instant, Ticker, TimeoutError, Timer, with_timeout};
 use slint::{
     ComponentHandle, LogicalPosition, PhysicalSize,
     platform::{
@@ -43,8 +48,8 @@ use slint::{
     },
 };
 use theo_drivers::{
-    ButtonEvent, FlushRetry, OrientationDetector, Panel, PanelSize, Rotation, StaleWatch,
-    TouchEvent, TouchPoint, Transient, WatchAction, flush_bands, reset_due,
+    ButtonEvent, FlushRetry, LongPress, OrientationDetector, Panel, PanelSize, Rotation,
+    StaleWatch, TouchEvent, TouchPoint, Transient, WatchAction, flush_bands, reset_due,
 };
 
 use crate::{
@@ -77,6 +82,8 @@ const DISPLAY_RESET_AFTER: Duration = Duration::from_secs(10);
 const MAX_DISPLAY_RESETS: u32 = 3;
 /// Uninterrupted healthy display after which past reboots are forgotten.
 const DISPLAY_HEALTHY_AFTER: Duration = Duration::from_secs(60);
+/// How long BOOT is held to stop the pod, from the debounced press.
+const LONG_PRESS_MS: u32 = 2000;
 /// Button changes queued while the loop renders or flushes.
 const BUTTON_QUEUE: usize = 4;
 /// Touch changes queued while the loop renders or flushes; a full queue
@@ -100,23 +107,37 @@ const ORIENTATION_PERIOD: Duration = Duration::from_millis(100);
 /// View rotation at boot, until the accelerometer says otherwise.
 const INITIAL_ROTATION: Rotation = Rotation::Deg0;
 
-/// Debounced BOOT button changes, from [`watch_button`] to the UI loop.
-static BUTTON_EVENTS: Channel<CriticalSectionRawMutex, ButtonEvent, BUTTON_QUEUE> = Channel::new();
+/// BOOT button changes and stop requests, from [`watch_button`] to the UI
+/// loop.
+static BUTTON_EVENTS: Channel<CriticalSectionRawMutex, ButtonMessage, BUTTON_QUEUE> =
+    Channel::new();
+/// The panel is asleep, from the UI loop to [`watch_button`].
+static PANEL_ASLEEP: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 /// Touch presses, moves, releases and cancellations, from [`watch_touch`]
 /// to the UI loop.
 static TOUCH_EVENTS: Channel<CriticalSectionRawMutex, TouchEvent, TOUCH_QUEUE> = Channel::new();
 /// Latest view rotation, from [`watch_orientation`] to the UI loop.
 static ROTATION: Signal<CriticalSectionRawMutex, Rotation> = Signal::new();
 
+/// What [`watch_button`] tells the UI loop.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ButtonMessage {
+    /// A press or release for Slint.
+    Changed(ButtonEvent),
+    /// BOOT was held: put the panel to sleep, then stop.
+    Stop,
+}
+
 #[device::entry]
 async fn main(spawner: Spawner) {
     let Board {
         mut display,
         button,
+        deep_sleep,
         touch,
         imu,
     } = Board::init().await;
-    spawner.spawn(watch_button(button).unwrap());
+    spawner.spawn(watch_button(button, deep_sleep).unwrap());
     spawner.spawn(watch_touch(touch).unwrap());
     if let Some(imu) = imu {
         spawner.spawn(watch_orientation(imu).unwrap());
@@ -150,6 +171,7 @@ async fn main(spawner: Spawner) {
     // a press and its release are mapped the same way.
     let mut deferred_rotation: Option<Rotation> = None;
     let mut finger_down = false;
+    let mut stop = false;
     // Dump the first frame, then the frame after each BOOT press.
     #[cfg(feature = "frame-dump")]
     let mut dump_pending = true;
@@ -234,16 +256,15 @@ async fn main(spawner: Spawner) {
         display_watch.check(flush_retry.is_stale());
 
         let wake_up = Timer::at(next_wake_up(&window, frame_start, resend_at));
-        #[cfg_attr(
-            not(feature = "frame-dump"),
-            expect(unused_mut, reason = "only frame dumps update state")
-        )]
-        let mut on_button = |event| {
-            #[cfg(feature = "frame-dump")]
-            if event == ButtonEvent::Pressed {
-                dump_pending = true;
+        let mut on_button = |message| match message {
+            ButtonMessage::Changed(event) => {
+                #[cfg(feature = "frame-dump")]
+                if event == ButtonEvent::Pressed {
+                    dump_pending = true;
+                }
+                dispatch_button(&window, event);
             }
-            dispatch_button(&window, event);
+            ButtonMessage::Stop => stop = true,
         };
         let mut on_touch = |event| {
             finger_down = matches!(event, TouchEvent::Pressed(_) | TouchEvent::Moved(_));
@@ -270,6 +291,22 @@ async fn main(spawner: Spawner) {
         while let Ok(event) = TOUCH_EVENTS.try_receive() {
             on_touch(event);
         }
+        if stop {
+            // No flush is in flight here: flushes are awaited above. Best
+            // effort: a panel that ignores sleep-in would ignore a retry
+            // too, and staying awake would not darken it either. Bounded
+            // like a flush, so a hung bus cannot keep the pod from stopping.
+            match with_timeout(FLUSH_TIMEOUT, display.sleep(&mut Delay)).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => log::error!("panel sleep failed: {error}"),
+                Err(TimeoutError) => {
+                    log::error!("panel sleep timed out after {FLUSH_TIMEOUT:?}");
+                }
+            }
+            PANEL_ASLEEP.signal(());
+            // `watch_button` puts the chip to sleep; nothing to draw until then.
+            core::future::pending::<()>().await;
+        }
         if let Some(new_rotation) = deferred_rotation.filter(|_| !finger_down) {
             deferred_rotation = None;
             rotation = new_rotation;
@@ -284,15 +321,42 @@ async fn main(spawner: Spawner) {
     }
 }
 
-/// Debounces the BOOT button and queues its changes for the UI loop.
+/// Debounces the BOOT button and queues its changes for the UI loop, until
+/// it is held for [`LONG_PRESS_MS`]; then stops the pod.
+///
+/// A long press asks the UI loop to put the panel to sleep, waits for that
+/// and for the release, then puts the chip in deep sleep until the next
+/// press. Its release is not forwarded: it is not a click.
 #[embassy_executor::task]
-async fn watch_button(mut button: device::Button) {
+async fn watch_button(mut button: device::Button, deep_sleep: device::DeepSleep) {
+    let mut press = LongPress::new(LONG_PRESS_MS);
     loop {
-        match button.changed().await {
-            Ok(event) => BUTTON_EVENTS.send(event).await,
+        let changed = match press.deadline_ms() {
+            // Cancelling `changed` keeps the debounced state (pressed). A
+            // release still in its debounce at the deadline loses: the
+            // stop window is at most one debounce delay short.
+            Some(at) => match select(button.changed(), Timer::at(Instant::from_millis(at))).await {
+                Either::First(changed) => changed,
+                Either::Second(()) => {
+                    press.held();
+                    break;
+                }
+            },
+            None => button.changed().await,
+        };
+        match changed {
+            Ok(event) => {
+                if let Some(event) = press.changed(event, Instant::now().as_millis()) {
+                    BUTTON_EVENTS.send(ButtonMessage::Changed(event)).await;
+                }
+            }
             Err(error) => log::error!("button read failed: {error:?}"),
         }
     }
+    log::info!("BOOT held for {LONG_PRESS_MS} ms, stopping");
+    BUTTON_EVENTS.send(ButtonMessage::Stop).await;
+    PANEL_ASLEEP.wait().await;
+    deep_sleep.until_pressed(button).await
 }
 
 /// Reports touches to the UI loop.
@@ -483,6 +547,9 @@ fn next_wake_up(
 }
 
 /// Forwards a button change to Slint as a Return key press or release.
+///
+/// A long press only sends the press: UI actions on Return must fire on
+/// release, or every stop would trigger them (ADR-0008).
 fn dispatch_button(window: &MinimalSoftwareWindow, event: ButtonEvent) {
     let text = Key::Return.into();
     let event = match event {

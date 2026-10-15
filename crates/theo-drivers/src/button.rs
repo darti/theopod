@@ -18,7 +18,8 @@ pub enum ButtonEvent {
 /// Push button whose changes are confirmed after a debounce delay.
 ///
 /// The button starts released; one held at start-up is reported by the
-/// first [`DebouncedButton::changed`] call.
+/// first [`DebouncedButton::changed`] call, unless
+/// [`DebouncedButton::sync_state`] took it as the starting state.
 #[derive(Debug)]
 pub struct DebouncedButton<P, D> {
     pin: P,
@@ -49,6 +50,20 @@ impl<P: InputPin + Wait, D: DelayNs> DebouncedButton<P, D> {
     /// Debounced state as of the last reported change.
     pub fn is_pressed(&self) -> bool {
         self.pressed
+    }
+
+    /// Takes the pin's current level as the state, without reporting it.
+    ///
+    /// Returns whether the button is held. A button held now, such as the
+    /// press that woke the chip, then only reports its release. The level
+    /// is read once, not debounced: call it while the button is steady.
+    ///
+    /// # Errors
+    ///
+    /// Returns the pin error; the state is kept.
+    pub fn sync_state(&mut self) -> Result<bool, P::Error> {
+        self.pressed = self.read_pressed()?;
+        Ok(self.pressed)
     }
 
     /// Waits for the next debounced press or release.

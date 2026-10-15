@@ -4,7 +4,9 @@ use crate::{
     co5300::{Co5300, Error, PanelGeometry},
     panel::Panel,
     qspi::Lanes,
-    test_support::{BusFault, NoDelay, RecordingBus, Transfer, block_on, poll_once},
+    test_support::{
+        BusFault, NoDelay, RecordingBus, RecordingDelay, Transfer, block_on, poll_once,
+    },
 };
 
 const GEOMETRY: PanelGeometry = PanelGeometry {
@@ -134,6 +136,50 @@ fn init_bus_failure_returns_bus_error_and_stops() {
 
     assert_that!(result.err()).is_equal_to(Some(Error::Bus(BusFault)));
     assert_that!(panel.release().transfers).has_length(2);
+}
+
+#[test]
+fn sleep_turns_display_off_then_enters_sleep() {
+    let mut panel = panel();
+
+    block_on(panel.sleep(&mut NoDelay)).unwrap();
+
+    assert_that!(panel.release().transfers).is_equal_to(vec![
+        Transfer::register(0x28, &[]),
+        Transfer::register(0x10, &[]),
+    ]);
+}
+
+#[test]
+fn sleep_waits_for_controller_to_settle() {
+    let mut panel = panel();
+    let mut delay = RecordingDelay::default();
+
+    block_on(panel.sleep(&mut delay)).unwrap();
+
+    assert_that!(delay.delays_ms).is_equal_to(vec![120]);
+}
+
+#[test]
+fn sleep_in_failure_returns_bus_error_without_settling() {
+    let mut panel = Co5300::new(RecordingBus::failing(1), GEOMETRY).unwrap();
+    let mut delay = RecordingDelay::default();
+
+    let result = block_on(panel.sleep(&mut delay));
+
+    assert_that!(result.err()).is_equal_to(Some(Error::Bus(BusFault)));
+    assert_that!(panel.release().transfers).is_equal_to(vec![Transfer::register(0x28, &[])]);
+    assert_that!(delay.delays_ms).is_empty();
+}
+
+#[test]
+fn sleep_bus_failure_returns_bus_error_and_stops() {
+    let mut panel = Co5300::new(RecordingBus::failing(0), GEOMETRY).unwrap();
+
+    let result = block_on(panel.sleep(&mut NoDelay));
+
+    assert_that!(result.err()).is_equal_to(Some(Error::Bus(BusFault)));
+    assert_that!(panel.release().transfers).is_empty();
 }
 
 #[test]

@@ -9,3 +9,4 @@
 | [0005](0005-share-an-async-i2c-bus-owned-by-board.md) | Share an async I2C bus owned by Board | Accepted |
 | [0006](0006-rotate-the-view-in-software-from-the-accelerometer.md) | Rotate the view in software from the accelerometer | Accepted |
 | [0007](0007-keep-regression-tests-inline-tagged-by-task.md) | Keep regression tests inline, tagged by task | Accepted |
+| [0008](0008-stop-with-a-boot-long-press-into-deep-sleep.md) | Stop with a BOOT long press into deep sleep | Accepted |

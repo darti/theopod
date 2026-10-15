@@ -16,11 +16,10 @@ only on `embedded-hal` / `embedded-hal-async`, unit-tested on the host
 - `qspi.rs`: async `QspiBus` trait (8-bit opcode, 24-bit address, single or
   quad data, `MAX_TRANSFER_LEN`; holds the framebuffer, `write_frame`).
 - `chip_select.rs`: `ChipSelect`, released on drop (cancel-safe buses).
-- `dma_layout.rs`, `memory_check.rs`: descriptor chunking and payload
-  checks of the in-place PSRAM DMA; `check_pattern`, a RAM self-test.
-- `co5300.rs`: CO5300 AMOLED controller. Implements `Panel` over any
-  `QspiBus`; validates geometry, 2x2 alignment and pixel counts, and splits
-  pixel payloads into bus-sized transfers.
+- `dma_layout.rs`, `memory_check.rs`: in-place PSRAM DMA arithmetic;
+  `check_pattern`, a RAM self-test.
+- `co5300.rs`: CO5300 AMOLED (init, sleep), a `Panel` on any `QspiBus`;
+  checks geometry, 2x2 areas and pixel counts, splits long payloads.
 - `tca9554.rs`, `panel_power.rs`: TCA9554 expander (registers read once,
   then cached; levels before direction); `PanelPower`, the rail pulse.
 - `cst820.rs`: `Cst820` touch controller; reset through a `Tca9554` pin,
@@ -30,7 +29,8 @@ only on `embedded-hal` / `embedded-hal-async`, unit-tested on the host
 - `geometry.rs`, `orientation.rs`: `PanelSize`/`TouchPoint`;
   `OrientationDetector` (gravity to `Rotation`), `AxisMap` (const-checked
   by `is_rotation`), the rotated view size and touch mapping.
-- `button.rs`: `DebouncedButton`, cancel-safe debounced press/release.
+- `button.rs`, `long_press.rs`: `DebouncedButton`, cancel-safe debounced
+  press/release; `LongPress`, short vs long presses (ADR-0008).
 
 ## Extension points
 

@@ -128,3 +128,13 @@ Out of scope: the touch driver itself (t-19).
   these reads.
 - Not covered: a device holding SDA low that the nine pulses do not
   release.
+
+## Update (t-43): shared expander
+
+- The expander is `device::Expander`, one `Tca9554` behind a
+  critical-section mutex in a `StaticCell`; `device::Touch` keeps a
+  `&'static Expander` and locks it for the whole reset pulse (about
+  210 ms). A later user (panel sleep or power-off on EXIO0/EXIO1, a panel
+  re-init) takes the same reference: changes cannot interleave, and the
+  driver's register copy stays the single view of the chip. Never create a
+  second `Tca9554`.

@@ -7,6 +7,7 @@
 //! - [`Button`]: the BOOT push button, debounced.
 //! - [`Touch`]: the CST820 touch controller, with the expander that resets
 //!   it.
+//! - [`Expander`]: the TCA9554, shared by its runtime users.
 //! - [`Imu`], [`IMU_AXES`]: the QMI8658 accelerometer, and how its axes lie
 //!   on the panel.
 //! - [`I2cBus`], [`I2cDevice`]: the async I2C bus shared by the TCA9554
@@ -139,13 +140,20 @@ pub type Button = DebouncedButton<Input<'static>, Delay>;
 /// CST820 touch controller; interrupt on GPIO21 (Waveshare BSP
 /// `BSP_LCD_TOUCH_INT`, active low), points in panel pixels.
 ///
-/// It owns the TCA9554 expander after boot, to reset the controller at
-/// run time: the touch task is the expander's only runtime user, so its
-/// read-modify-writes cannot race (ADR-0005).
+/// It reaches the shared [`Expander`] to reset the controller at run time.
 pub struct Touch {
     controller: Cst820<I2cDevice, Input<'static>, Delay>,
-    expander: Tca9554<I2cDevice>,
+    expander: &'static Expander,
 }
+
+/// The TCA9554 expander (EXIO0/1 panel reset and power, EXIO2 touch reset),
+/// shared by its runtime users (ADR-0005).
+///
+/// One `Tca9554` behind a mutex: a user locks it for a whole change, so
+/// read-modify-writes cannot interleave, and the driver's register copy
+/// stays the single view of the chip. Hand out `&'static Expander`, never a
+/// second `Tca9554`.
+pub type Expander = Mutex<CriticalSectionRawMutex, Tca9554<I2cDevice>>;
 
 /// Failure of [`Touch::changed`].
 pub type TouchError = Cst820Error<I2cDeviceError<I2cError>, Infallible>;
@@ -171,7 +179,10 @@ impl Touch {
     ///
     /// Returns the expander or controller error; see [`Cst820::init`].
     pub async fn reset(&mut self) -> Result<(), TouchResetError> {
-        self.controller.init(&mut self.expander, TOUCH_RESET).await
+        // Held for the whole reset (about 210 ms): no other expander change
+        // can slip between the pulse's writes.
+        let mut expander = self.expander.lock().await;
+        self.controller.init(&mut expander, TOUCH_RESET).await
     }
 }
 
@@ -194,8 +205,8 @@ pub type I2cBus = Mutex<CriticalSectionRawMutex, I2c<'static, Async>>;
 /// One device's handle on [`I2cBus`]; implements `embedded-hal-async` I2C.
 ///
 /// `Board::init` creates one per driver from the static bus. The expander
-/// has a single handle, owned by [`Touch`] after boot: its
-/// read-modify-writes are not atomic across handles (ADR-0005).
+/// has a single handle, shared as [`Expander`]: its read-modify-writes are
+/// not atomic across handles (ADR-0005).
 pub type I2cDevice = SharedI2cDevice<'static, CriticalSectionRawMutex, I2c<'static, Async>>;
 
 /// Board peripherals initialized and ready to use.
@@ -231,7 +242,7 @@ impl Board {
     /// Starts the chip, heaps, logger and scheduler, then brings up the
     /// display, its PSRAM framebuffer, the touch controller and the IMU.
     ///
-    /// The expander then goes to [`Touch`], its only runtime user, so its
+    /// The expander then becomes the shared [`Expander`], so runtime
     /// read-modify-writes cannot race (ADR-0005).
     ///
     /// # Panics
@@ -288,9 +299,10 @@ impl Board {
         if let Err(error) = controller.init(&mut expander, TOUCH_RESET).await {
             log::error!("touch controller init failed: {error}");
         }
+        static EXPANDER: StaticCell<Expander> = StaticCell::new();
         let touch = Touch {
             controller,
-            expander,
+            expander: EXPANDER.init(Mutex::new(expander)),
         };
         let imu = start_imu(i2c).await;
 

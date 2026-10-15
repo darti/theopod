@@ -52,7 +52,9 @@ Out of scope: the touch driver itself (t-19).
 - Negative: an expander read-modify-write spans two bus transactions, so
   two `Tca9554` handles in different tasks could lose each other's
   changes. Drive the expander from one task; who owns it after boot is
-  decided with the touch driver (resolved by the t-19 update: no one).
+  decided with the touch driver (resolved by the t-19 update: no one;
+  then by the t-20/t-34 update: `device::Touch`, and `Tca9554` keeps a
+  copy of its registers).
 - Negative: the touch controller is no longer reset at boot. After a cold
   boot it relies on its power-on reset; after an MCU-only reset (flash,
   panic, watchdog) the TCA9554 keeps EXIO2 high, so the controller keeps
@@ -83,10 +85,11 @@ Out of scope: the touch driver itself (t-19).
   EXIO2 there (`Cst820::init`, before its first access), then the expander
   handle is dropped: no task owns it after boot, so its read-modify-writes
   cannot race. A later runtime user of the expander must become its single
-  owner instead of creating a second handle.
+  owner instead of creating a second handle (superseded by the t-20/t-34
+  update: `device::Touch` owns it).
 - Consequence: the touch controller cannot be reset at runtime. If it
   wedges, touch stays dead until the next boot; recovering it needs that
-  single expander owner.
+  single expander owner (resolved by the t-20/t-34 update).
 - The touch task waits for the CST820 interrupt (GPIO21) while idle and
   polls the registers every 10 ms while a finger is down, sharing the bus
   with nothing else at runtime today. A stuck bus would block every device
@@ -97,7 +100,8 @@ Out of scope: the touch driver itself (t-19).
 - esp-hal disables the I2C SCL timeout by default on the ESP32-S3, so the
   advice above was not followed: a device holding SCL low would hang every
   transfer on the bus. `Board::init` now sets `I2C_BUS_TIMEOUT` (1000 bus
-  cycles, 10 ms at 100 kHz). A timed-out transfer fails with
+  cycles, at least 10 ms at 100 kHz; esp-hal rounds it up to a power of
+  two of clock cycles, about 13 ms). A timed-out transfer fails with
   `Error::Timeout`, and esp-hal 1.2 then resets its state machine and
   clocks the bus free (nine SCL pulses, ESP-IDF's `clear_bus`); it also
   clears a bus left busy before each transfer. Recreating the driver is
@@ -105,11 +109,22 @@ Out of scope: the touch driver itself (t-19).
 - The expander gets a single runtime owner: `device::Touch` holds the
   CST820 and the one `Tca9554` handle, handed over at the end of
   `Board::init`. Another runtime user of the expander must go through it.
+  `Tca9554` reads each register once and then works from its copy: a
+  reset runs on a suspect bus, and I2C has no checksum, so a corrupted
+  read written back could otherwise drop the panel power pins (EXIO0,
+  EXIO1).
 - `watch_touch` resets the controller (`Touch::reset`, i.e.
-  `Cst820::init`) after 8 failed reads in a row, then after 16, 32...,
-  so a wedged controller recovers without a reboot and a dead one does not
-  flood the log. `Cst820::init` reports a touch in progress as cancelled,
-  so the UI never keeps a pointer pressed across a reset.
-- Not covered: a controller whose interrupt line stays idle produces no
-  failed read, so it is never reset; nor is a device holding SDA low that
-  the nine pulses do not release.
+  `Cst820::init`) after 8 failed reads in a row, then after 16, 32 and 64,
+  then every 64 (`theo_drivers::reset_due`): a wedged controller recovers
+  without a reboot and a dead one does not flood the log. A reset that
+  fails half-way can hold the controller in reset, so it is retried until
+  it succeeds (pauses doubling from 10 ms to 1 s). `Cst820::init` reports
+  a touch in progress as cancelled, even when the reset fails, so the UI
+  never keeps a pointer pressed across a reset.
+- While idle, `Cst820::changed` reads the registers after a second
+  without an interrupt edge: a controller that went silent (failed boot
+  init, brown-out, stuck interrupt line) fails that read and is reset, and
+  a missed press is still reported. On the board, an idle CST820 answers
+  these reads.
+- Not covered: a device holding SDA low that the nine pulses do not
+  release.

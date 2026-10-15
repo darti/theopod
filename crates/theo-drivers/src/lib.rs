@@ -8,15 +8,16 @@
 //! - [`flush_rows`], [`flush_bands`], [`DirtyRows`], [`FlushError`]: sends
 //!   dirty bands of framebuffer rows to a [`Panel`].
 //! - [`FlushRetry`], [`Retry`], [`Transient`]: when to resend the frame
-//!   after failed flushes.
+//!   after failed flushes; [`reset_due`]: when to reset a failing device.
 //! - [`QspiBus`], [`Lanes`]: Quad-SPI transport for display controllers.
 //! - [`ChipSelect`]: chip select released even when a transfer is cancelled.
 //! - [`dma_layout`]: descriptor and payload arithmetic of in-place DMA
-//!   transfers ([`descriptor_chunks`], [`frame_payload`]).
+//!   transfers ([`descriptor_chunks`], [`DmaChunk`], [`frame_payload`],
+//!   [`FramePayloadError`]).
 //! - [`Co5300`], [`PanelGeometry`], [`Co5300Error`]: CO5300 AMOLED controller.
 //! - [`Cst820`], [`TouchEvent`], [`Cst820Error`], [`Cst820InitError`]:
 //!   CST820 capacitive touch controller, interrupt-driven.
-//! - [`check_pattern`], [`Mismatch`]: pattern test of a RAM region.
+//! - [`check_pattern`], [`PatternMismatch`]: pattern test of a RAM region.
 //! - [`PanelSize`], [`TouchPoint`]: pixel sizes and positions of the panel
 //!   or of a view drawn on it.
 //! - [`Qmi8658`], [`Acceleration`], [`Qmi8658Error`]: QMI8658 inertial
@@ -80,14 +81,14 @@ pub use chip_select::ChipSelect;
 pub use co5300::{Co5300, Error as Co5300Error, PanelGeometry};
 pub use cst820::{Cst820, Error as Cst820Error, InitError as Cst820InitError, TouchEvent};
 pub use dirty_rows::DirtyRows;
-pub use dma_layout::{Chunk, PayloadError, descriptor_chunks, frame_payload};
+pub use dma_layout::{DmaChunk, FramePayloadError, descriptor_chunks, frame_payload};
 pub use framebuffer::{FlushError, flush_bands, flush_rows};
 pub use geometry::{PanelSize, TouchPoint};
-pub use memory_check::{Mismatch, check_pattern};
+pub use memory_check::{PatternMismatch, check_pattern};
 pub use orientation::{Axis, AxisMap, OrientationDetector, PanelAcceleration, Rotation};
 pub use panel::Panel;
 pub use panel_power::PanelPower;
 pub use qmi8658::{Acceleration, Error as Qmi8658Error, Qmi8658};
 pub use qspi::{Lanes, QspiBus};
-pub use retry::{FlushRetry, Retry, Transient};
+pub use retry::{FlushRetry, Retry, Transient, reset_due};
 pub use tca9554::{Pin as ExpanderPin, Tca9554};

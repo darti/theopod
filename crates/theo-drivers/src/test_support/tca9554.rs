@@ -23,6 +23,7 @@ pub struct FakeTca9554 {
     fail_at: Option<usize>,
     fail_writes_only: bool,
     yielding: bool,
+    corrupt_reads: Option<(usize, u8)>,
 }
 
 impl FakeTca9554 {
@@ -38,6 +39,7 @@ impl FakeTca9554 {
             fail_at: None,
             fail_writes_only: false,
             yielding: false,
+            corrupt_reads: None,
         }
     }
 
@@ -51,6 +53,13 @@ impl FakeTca9554 {
     pub fn failing_writes(mut self, fail_at: usize) -> Self {
         self.fail_writes_only = true;
         self.failing(fail_at)
+    }
+
+    /// Makes every register read return `value` once `after` writes are
+    /// recorded, as a corrupted bus would, without an error.
+    pub fn corrupting_reads(mut self, after: usize, value: u8) -> Self {
+        self.corrupt_reads = Some((after, value));
+        self
     }
 
     /// Makes every transaction return `Pending` once before running.
@@ -115,7 +124,12 @@ impl I2c for FakeTca9554 {
                     }
                 }
                 Operation::Read(buffer) => {
-                    let value = if self.pointer == TCA_INPUT {
+                    let corrupted = self
+                        .corrupt_reads
+                        .filter(|&(after, _)| self.writes.len() >= after);
+                    let value = if let Some((_, value)) = corrupted {
+                        value
+                    } else if self.pointer == TCA_INPUT {
                         self.inputs
                     } else {
                         self.registers[usize::from(self.pointer)]

@@ -271,18 +271,21 @@ fn write_pixels_non_multiple_of_bus_limit_sends_remainder_last() {
     ]);
 }
 
+// Regression (t-3 review): a failed transfer may have reached the panel (a
+// DMA underrun is only seen once every byte is out), so the area's budget
+// is unknown, as after a cancellation.
 #[test]
-fn write_pixels_failure_after_first_chunk_keeps_sent_bytes_counted() {
+fn write_pixels_failure_after_first_chunk_closes_the_area() {
     let mut panel = Co5300::new(RecordingBus::failing(4), GEOMETRY).unwrap();
     block_on(panel.begin_area(0..4, 0..4)).unwrap();
 
     let failed = block_on(panel.write_pixels(&[0; 32]));
-    let result = block_on(panel.write_pixels(&[0; 18]));
+    let result = block_on(panel.write_pixels(&[0; 2]));
 
     assert_that!(failed.err()).is_equal_to(Some(Error::Bus(BusFault)));
     assert_that!(result.err()).is_equal_to(Some(Error::PixelOverflow {
-        remaining: 16,
-        submitted: 18,
+        remaining: 0,
+        submitted: 2,
     }));
 }
 
@@ -302,11 +305,12 @@ fn write_pixels_after_area_filled_returns_pixel_overflow() {
 }
 
 #[test]
-fn write_pixels_bus_failure_keeps_remaining_budget() {
+fn write_pixels_bus_failure_requires_new_area() {
     let mut panel = Co5300::new(RecordingBus::failing(3), GEOMETRY).unwrap();
     block_on(panel.begin_area(0..2, 0..2)).unwrap();
 
     let failed = block_on(panel.write_pixels(&[0; 8]));
+    block_on(panel.begin_area(0..2, 0..2)).unwrap();
     let retried = block_on(panel.write_pixels(&[0; 8]));
 
     assert_that!(failed.err()).is_equal_to(Some(Error::Bus(BusFault)));
@@ -331,6 +335,9 @@ fn write_pixels_cancelled_mid_transfer_requires_new_area() {
         submitted: 8,
     }));
     assert_that!(reopened).is_ok();
+    // The refused write sent nothing: two areas of 3 registers, one pixel
+    // write (the cancelled one was never recorded).
+    assert_that!(panel.release().transfers).has_length(7);
 }
 
 #[test]

@@ -2,6 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-10-11
+- Amended: 2026-10-15, HAL-free logic and the current `device` items
 
 ## Context
 
@@ -16,11 +17,16 @@ for `xtensa-esp32s3-none-elf`, so nothing in it can run as a host unit test.
 
 - `crates/theo-drivers` holds every driver. It is `no_std`, depends only on
   `embedded-hal`, `embedded-hal-async` and its own `QspiBus`
-  trait (ADR-0002), and is unit-tested on the host with `just test`.
+  trait (ADR-0002), and is unit-tested on the host with `just test`. It
+  also holds the firmware's HAL-free logic, so it is host-tested too:
+  view orientation, flush bands and retry policy, the arithmetic of the
+  PSRAM DMA path, and the RAM self-test. Logic needing esp-hal stays in
+  `src/device/`.
 - `src/device/` is the only code that touches esp-hal, the ESP runtime
   crates, pin numbers, panel geometry and board timings. It exposes
-  `entry`, `Board` (display, button, PSRAM framebuffer), `Display`,
-  `Button`, `log_heap_usage` and, with the `frame-dump` feature,
+  `entry`, `Board` (display, button, touch, IMU, PSRAM framebuffer),
+  `Display`, `Button`, `Touch`, `Imu`, `IMU_AXES`, the shared I2C bus
+  types, `log_heap_usage` and, with the `frame-dump` feature,
   `dump_frame`.
 - `src/main.rs` and `src/slint_backend.rs` see the board only through
   `device` and driver traits such as `Panel`.

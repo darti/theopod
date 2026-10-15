@@ -11,7 +11,7 @@ only on `embedded-hal` / `embedded-hal-async`, unit-tested on the host
 - `framebuffer.rs`, `dirty_rows.rs`: `flush_rows` sends a band of rows of a
   full-panel framebuffer as one full-width, even-row-aligned area;
   `flush_bands` sends each band of a `DirtyRows` (few disjoint bands).
-- `retry.rs`: `Transient` errors and `FlushRetry`, the resend policy.
+- `retry.rs`: `Transient` errors, `FlushRetry` and `reset_due` policies.
 - `qspi.rs`: async `QspiBus` trait (8-bit opcode, 24-bit address, single or
   quad data, `MAX_TRANSFER_LEN`). `embedded-hal` has no Quad-SPI trait.
 - `chip_select.rs`: `ChipSelect`, released on drop (cancel-safe buses).
@@ -20,12 +20,11 @@ only on `embedded-hal` / `embedded-hal-async`, unit-tested on the host
 - `co5300.rs`: CO5300 AMOLED controller. Implements `Panel` over any
   `QspiBus`; validates geometry, 2x2 alignment and pixel counts, and splits
   pixel payloads into bus-sized transfers.
-- `tca9554.rs`, `panel_power.rs`: TCA9554 expander (read-modify-writes,
-  levels latched before direction); `PanelPower`, the panel rail pulse.
-- `cst820.rs`: `Cst820` touch controller over async I2C; pulses its reset
-  through a `Tca9554` pin, waits for the interrupt edge while idle and
-  polls while touched; rejects reports off the panel, and cancels (rather
-  than releases) a touch whose read fails or that a reset interrupts.
+- `tca9554.rs`, `panel_power.rs`: TCA9554 expander (registers read once,
+  then cached; levels before direction); `PanelPower`, the rail pulse.
+- `cst820.rs`: `Cst820` touch controller; reset through a `Tca9554` pin,
+  interrupt-driven when idle (probed each second), polled while touched;
+  cancels a touch whose read fails or that a reset interrupts.
 - `qmi8658.rs`: `Qmi8658` IMU over async I2C, accelerometer only.
 - `geometry.rs`, `orientation.rs`: `PanelSize`/`TouchPoint`;
   `OrientationDetector` (gravity to `Rotation`), `AxisMap` (const-checked

@@ -10,10 +10,12 @@
 
 use core::ops::Range;
 
+use crate::framebuffer::even_rows;
+
 /// Up to `N` sorted, disjoint bands of rows of a `height`-row panel.
 ///
 /// Every band starts on an even row and ends on an even row or the panel's
-/// last row, as [`crate::flush_rows`] would widen it.
+/// last row, widened by the same rule as [`crate::flush_rows`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DirtyRows<const N: usize> {
     bands: [Range<u16>; N],
@@ -57,15 +59,11 @@ impl<const N: usize> DirtyRows<N> {
 
     /// Marks `rows` dirty, clamped to the panel; empty `rows` are ignored.
     pub fn add(&mut self, rows: Range<u16>) {
-        let start = rows.start.min(self.height) & !1;
         let end = rows.end.min(self.height);
         if rows.start >= end {
             return;
         }
-        // Rounding up may pass the panel (odd height) or u16: clamp.
-        let end = u16::try_from(usize::from(end).next_multiple_of(2))
-            .map_or(self.height, |end| end.min(self.height));
-        let mut merged = start..end;
+        let mut merged = even_rows(rows.start..end, self.height);
 
         // Rebuild in order, absorbing every band `merged` touches.
         let mut bands: [Range<u16>; N] = [const { 0..0 }; N];

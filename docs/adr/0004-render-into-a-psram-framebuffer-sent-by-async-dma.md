@@ -59,14 +59,19 @@ of PSRAM that the GDMA can read.
 - If a flush fails, the panel is stale and the next flush sends every row:
   the framebuffer stays the source of truth (`theo_drivers::FlushRetry`).
   Errors say whether a retry can succeed (`Transient`). Transient ones
-  (`Underrun`, SPI DMA errors, chip select) are resent after 16 ms,
+  (`Underrun`, unknown SPI errors, chip select) are resent after 16 ms,
   doubling up to 1 s; a lasting underrun means the bandwidth margin is
   gone. Permanent ones (`TooLong`, `Misaligned`, `Unavailable`, esp-hal's
-  `MaxDmaTransferSizeExceeded`, rows or areas out of range) are not
-  retried by themselves, only resent with the next redraw: before t-1 they
-  were resent every 16 ms forever, flooding the log and keeping the loop
-  awake. The first failure of a streak, a change of kind, and the recovery
-  are logged.
+  DMA setup errors and `MaxDmaTransferSizeExceeded`, rows or areas out of
+  range) schedule no resend: before t-1 they were resent every 16 ms
+  forever, flooding the log and keeping the loop awake. While the panel is
+  stale, the loop flushes nothing until the resend is due, so redraws (an
+  animation) cannot bypass the backoff; after a permanent failure a redraw
+  schedules a resend 1 s later, so an animation retries at most once a
+  second. A change of kind restarts the backoff. Each kind is logged once
+  per streak, and the recovery is logged. A failed or cancelled transfer
+  closes the `Co5300` area: its progress on the panel is unknown (an
+  underrun is only seen once every byte is out).
 - At boot, `Board::init` clears the panel with one full-frame flush, whose
   first transfer is `MAX_TRANSFER_LEN` long; a permanent failure panics,
   so an esp-hal upgrade that lowers its private DMA limit fails at once

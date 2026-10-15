@@ -250,13 +250,17 @@ fn flush_bands_without_bands_sends_nothing() {
 
 #[test]
 fn flush_bands_failure_stops_at_the_failing_band() {
-    let mut panel = RecordingPanel::new(WIDTH, HEIGHT).failing(2);
-    let mut rows = DirtyRows::<3>::new(HEIGHT);
+    const ROWS: u16 = 10;
+    let mut panel = RecordingPanel::new(WIDTH, ROWS).failing(2);
+    let frame = vec![0; ROW_BYTES * usize::from(ROWS)];
+    let mut rows = DirtyRows::<3>::new(ROWS);
     rows.add(0..2);
     rows.add(4..6);
+    rows.add(8..10);
 
-    let result = block_on(flush_bands(&mut panel, &frame(), &rows));
+    let result = block_on(flush_bands(&mut panel, &frame, &rows));
 
     assert_that!(result).is_equal_to(Err(FlushError::Panel(BusFault)));
-    assert_that!(panel.calls).has_length(2);
+    // First band, then the failed begin of the second; the third is skipped.
+    assert_that!(panel.attempts).is_equal_to(3);
 }

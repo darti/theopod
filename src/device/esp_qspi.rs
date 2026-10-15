@@ -12,7 +12,8 @@
 //! slow for long PSRAM payloads), or a copy for flash. See `docs/adr/0004`.
 //!
 //! Writes are cancel-safe: dropping one mid-transfer releases chip select
-//! and, for a framebuffer payload, stops the DMA and keeps the SPI master.
+//! and, for a framebuffer payload, stops the DMA and keeps the SPI master
+//! (for other payloads, chip select may rise up to one byte early).
 //! Leaking one (`mem::forget`) is not: see [`EspQspi::new`].
 
 use core::{fmt, ops::Range};
@@ -25,7 +26,7 @@ use esp_hal::{
         master::{Address, Command, DataMode, SpiDma, SpiDmaTransfer},
     },
 };
-use theo_drivers::{ChipSelect, Lanes, PayloadError, QspiBus, Transient, frame_payload};
+use theo_drivers::{ChipSelect, FramePayloadError, Lanes, QspiBus, Transient, frame_payload};
 
 use super::psram_tx_buf::{self, PsramTxBuf};
 
@@ -76,28 +77,33 @@ impl<P: fmt::Debug> fmt::Display for EspQspiError<P> {
 impl<P: fmt::Debug> core::error::Error for EspQspiError<P> {}
 
 impl<P> Transient for EspQspiError<P> {
-    /// Underruns, DMA and chip-select failures may clear; payloads the bus
-    /// can never send, and a lost SPI master, cannot.
+    /// Underruns, unknown SPI and chip-select failures may clear. Payloads
+    /// the bus can never send, DMA setup errors (raised when a transfer
+    /// starts, from its descriptors or buffer) and a lost SPI master
+    /// cannot.
     fn is_transient(&self) -> bool {
         match self {
             Self::Spi(
-                SpiError::MaxDmaTransferSizeExceeded
+                SpiError::DmaError(_)
+                | SpiError::MaxDmaTransferSizeExceeded
                 | SpiError::FifoSizeExeeded
                 | SpiError::Unsupported,
             )
             | Self::TooLong { .. }
             | Self::Misaligned { .. }
             | Self::Unavailable => false,
+            // `SpiError` is non-exhaustive: a variant added by an esp-hal
+            // upgrade counts as transient until classified (ADR-0003).
             Self::Spi(_) | Self::ChipSelect(_) | Self::Underrun => true,
         }
     }
 }
 
-impl<P> From<PayloadError> for EspQspiError<P> {
-    fn from(error: PayloadError) -> Self {
+impl<P> From<FramePayloadError> for EspQspiError<P> {
+    fn from(error: FramePayloadError) -> Self {
         match error {
-            PayloadError::TooLong { len } => Self::TooLong { len },
-            PayloadError::Misaligned { offset } => Self::Misaligned { offset },
+            FramePayloadError::TooLong { len } => Self::TooLong { len },
+            FramePayloadError::Misaligned { offset } => Self::Misaligned { offset },
         }
     }
 }
@@ -117,6 +123,9 @@ const ESP_HAL_MAX_DMA_SIZE: usize = 32_736;
 /// `crates/theo-drivers/src/framebuffer_tests.rs`.
 pub const MAX_TRANSFER_LEN: usize =
     ESP_HAL_MAX_DMA_SIZE / psram_tx_buf::BURST * psram_tx_buf::BURST;
+// Host tests use this value: keep `crates/theo-drivers/src/dma_layout_tests.rs`
+// in sync.
+const _: () = assert!(MAX_TRANSFER_LEN == 32_704);
 
 /// Async esp-hal DMA SPI master in half-duplex mode with a software chip
 /// select.
@@ -144,8 +153,11 @@ impl<'d, CS: OutputPin> EspQspi<'d, CS> {
     ///
     /// # Safety
     ///
-    /// `frame` must stay allocated for the rest of the program (leaked).
-    /// Leaking a write future (`mem::forget`) skips the guard that stops the
+    /// `frame` must be one allocation in PSRAM (the descriptors write back
+    /// the PSRAM cache and claim PSRAM accesses) that stays allocated for
+    /// the rest of the program (leaked). It is a raw pointer because the
+    /// renderer holds the framebuffer as `&'static mut` meanwhile: only its
+    /// address range is kept, never dereferenced. Leaking a write future (`mem::forget`) skips the guard that stops the
     /// DMA, which then keeps reading the framebuffer after the write's
     /// borrow ended; this keeps that read inside live memory. The CPU may
     /// still change the pixels meanwhile: the panel then shows wrong pixels,
@@ -175,7 +187,9 @@ impl<'d, CS: OutputPin> EspQspi<'d, CS> {
 
     /// Sends `source` with esp-hal's slice API (FIFO, DMA in place, or copy).
     ///
-    /// Cancel-safe: esp-hal stops the DMA when the future is dropped.
+    /// Cancel-safe, mostly: esp-hal stops the DMA when the future is
+    /// dropped but does not wait for the SPI to go idle, so chip select may
+    /// rise up to one byte early.
     async fn send(
         bus: &mut Option<Idle<'d>>,
         mode: DataMode,
@@ -216,8 +230,8 @@ impl<'d, CS: OutputPin> EspQspi<'d, CS> {
                 in_flight.wait_for_done().await;
                 Ok(())
             }
-            // A failed start leaves no transfer running: the next one
-            // resets the channel.
+            // esp-hal halts the channel on a failed start (descriptor
+            // error); the next transfer resets it.
             Err((error, master, mut buffer)) => {
                 buffer.clear_source();
                 *bus = Some((master, buffer));
@@ -294,6 +308,8 @@ impl<CS: OutputPin> QspiBus for EspQspi<'_, CS> {
             underrun::clear();
         }
         let selected = ChipSelect::select(&mut self.cs).map_err(EspQspiError::ChipSelect)?;
+        // The transfer future must drop before `selected`: on cancellation
+        // the DMA then stops (and waits idle) before chip select rises.
         let transferred = if frame_payload {
             Self::send_frame(&mut self.bus, mode, command, address, data).await
         } else {

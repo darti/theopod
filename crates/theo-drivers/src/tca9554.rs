@@ -5,11 +5,12 @@
 //! - [`Pin`]: one of the eight expander pins (P0..P7, EXIO0..7 on Waveshare
 //!   schematics).
 //!
-//! Every change is a read-modify-write of the chip's registers, so pins
-//! outside the mask keep their direction and level whoever set them.
-//! The read and the write are separate bus transactions: on a shared bus,
-//! drive the expander through a single `Tca9554` (one task), or concurrent
-//! changes can be lost.
+//! Every change is a read-modify-write of the chip's output or config
+//! register, so pins outside the mask keep their direction and level. Each
+//! register is read once; later changes start from the driver's copy, so a
+//! corrupted read on a suspect bus is never written back to other pins
+//! (such as panel power). Drive the expander through a single `Tca9554`
+//! (one owner): changes made through another handle are not seen.
 
 use embedded_hal::digital::PinState;
 use embedded_hal_async::i2c::I2c;
@@ -62,13 +63,22 @@ const fn level_bits(mask: u8, level: PinState) -> u8 {
 pub struct Tca9554<I> {
     i2c: I,
     address: u8,
+    /// Last value written, or meant to be written, to the output register.
+    output: Option<u8>,
+    /// Same for the config register.
+    config: Option<u8>,
 }
 
 impl<I: I2c> Tca9554<I> {
     /// Drives the expander at `address` (0x20..=0x27) over `i2c`.
     pub fn new(i2c: I, address: u8) -> Self {
         debug_assert!((0x20..=0x27).contains(&address), "not a TCA9554 address");
-        Self { i2c, address }
+        Self {
+            i2c,
+            address,
+            output: None,
+            config: None,
+        }
     }
 
     /// Releases the underlying bus.
@@ -165,9 +175,24 @@ impl<I: I2c> Tca9554<I> {
     }
 
     /// Replaces the `mask` bits of `register` with those of `bits`.
+    ///
+    /// Reads the register only the first time; the copy then keeps the
+    /// requested value even if the write fails, so the next change retries
+    /// it.
     async fn update(&mut self, register: u8, mask: u8, bits: u8) -> Result<(), I::Error> {
-        let current = self.read(register).await?;
+        let cached = match register {
+            REGISTER_OUTPUT => self.output,
+            _ => self.config,
+        };
+        let current = match cached {
+            Some(value) => value,
+            None => self.read(register).await?,
+        };
         let value = (current & !mask) | (bits & mask);
+        match register {
+            REGISTER_OUTPUT => self.output = Some(value),
+            _ => self.config = Some(value),
+        }
         self.i2c.write(self.address, &[register, value]).await
     }
 }

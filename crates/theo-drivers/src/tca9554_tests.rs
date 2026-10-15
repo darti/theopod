@@ -27,6 +27,8 @@ fn write_levels_changes_only_masked_pins() {
     assert_that!(expander.release().writes).is_equal_to(vec![(TCA_OUTPUT, 0xFB)]);
 }
 
+// Regression guard (t-8): an output switched on before its level is
+// latched glitches the panel rails.
 #[test]
 fn configure_outputs_latches_levels_before_direction() {
     let mut expander = expander();
@@ -163,6 +165,7 @@ fn configure_outputs_on_suspending_bus_yields_to_executor() {
     assert_that!(completed).is_false();
 }
 
+// Regression guard (t-8): as above, on a bus that suspends mid-change.
 #[test]
 fn configure_outputs_on_suspending_bus_latches_levels_before_direction() {
     let mut expander = Tca9554::new(FakeTca9554::new(0x20).yielding(), 0x20);
@@ -171,4 +174,19 @@ fn configure_outputs_on_suspending_bus_latches_levels_before_direction() {
 
     assert_that!(expander.release().writes)
         .is_equal_to(vec![(TCA_OUTPUT, 0xFD), (TCA_CONFIG, 0xF8)]);
+}
+
+// Regression (t-34 review): a runtime touch reset read-modify-wrote the
+// register holding the panel power pins on a suspect bus; a corrupted read
+// would have been written back to them.
+#[test]
+fn write_levels_after_first_read_uses_its_copy_of_the_register() {
+    let mut expander = Tca9554::new(FakeTca9554::new(0x20).corrupting_reads(1, 0x00), 0x20);
+    block_on(expander.write_levels(0x01, 0x01)).unwrap();
+
+    block_on(expander.write_levels(0x02, 0x00)).unwrap();
+
+    // 0xFF from the first read, P1 cleared: the corrupted 0x00 is never used.
+    assert_that!(expander.release().writes)
+        .is_equal_to(vec![(TCA_OUTPUT, 0xFF), (TCA_OUTPUT, 0xFD)]);
 }

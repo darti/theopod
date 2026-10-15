@@ -1,6 +1,8 @@
 use speculoos::prelude::*;
 
-use crate::memory_check::{Mismatch, check_pattern, fill_pattern, find_mismatch};
+use crate::memory_check::{
+    PatternMismatch, check_pattern, check_with, fill_pattern, find_mismatch,
+};
 
 #[test]
 fn check_pattern_sound_memory_passes_and_leaves_zeros() {
@@ -51,7 +53,7 @@ fn find_mismatch_reports_the_first_corrupted_word() {
 
     let result = find_mismatch(&words, true);
 
-    assert_that!(result).is_equal_to(Some(Mismatch {
+    assert_that!(result).is_equal_to(Some(PatternMismatch {
         index: 40,
         expected,
         actual: expected ^ 0x0100,
@@ -64,4 +66,37 @@ fn find_mismatch_intact_pattern_finds_nothing() {
     fill_pattern(&mut words, false);
 
     assert_that!(find_mismatch(&words, false)).is_none();
+}
+
+#[test]
+fn check_with_bit_stuck_high_is_found_by_the_complement_pass() {
+    let mut words = vec![0; 64];
+    // Bit 0 of word 5 reads 1 whatever is written: the plain pattern has it
+    // set there (odd index times odd constant), so only the complement fails.
+    let stuck = |words: &mut [u32]| words[5] |= 1;
+    let mut expected = vec![0; 64];
+    fill_pattern(&mut expected, true);
+
+    let result = check_with(&mut words, stuck);
+
+    assert_that!(result).is_equal_to(Err(PatternMismatch {
+        index: 5,
+        expected: expected[5],
+        actual: expected[5] | 1,
+    }));
+}
+
+#[test]
+fn check_with_fault_in_the_plain_pass_stops_before_the_complement() {
+    let mut words = vec![0; 64];
+    let mut fills = 0;
+    let flip = |words: &mut [u32]| {
+        fills += 1;
+        words[0] ^= 0x8000_0000;
+    };
+
+    let result = check_with(&mut words, flip);
+
+    assert_that!(result.map_err(|mismatch| mismatch.index)).is_equal_to(Err(0));
+    assert_that!(fills).is_equal_to(1);
 }

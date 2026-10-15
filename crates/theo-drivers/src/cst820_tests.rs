@@ -9,7 +9,7 @@ use embedded_hal_async::{
 use speculoos::prelude::*;
 
 use crate::{
-    cst820::{Cst820, Error, InitError, POLL_MS, TouchEvent},
+    cst820::{Cst820, Error, IDLE_PROBE_MS, InitError, POLL_MS, TouchEvent},
     geometry::{PanelSize, TouchPoint},
     tca9554::{Pin, Tca9554},
     test_support::{FakeCst820, FakeTca9554, RecordingDelay, block_on},
@@ -23,10 +23,12 @@ const SIZE: PanelSize = PanelSize {
 };
 
 /// Interrupt pin whose falling edges arrive at once; counts the waits.
+/// A `silent` pin never sees an edge.
 #[derive(Debug, Default)]
 struct EdgePin {
     falling_edges: usize,
     fail: bool,
+    silent: bool,
 }
 
 impl PinErrorType for EdgePin {
@@ -49,6 +51,9 @@ impl Wait for EdgePin {
     async fn wait_for_falling_edge(&mut self) -> Result<(), Self::Error> {
         if self.fail {
             return Err(PinErrorKind::Other);
+        }
+        if self.silent {
+            core::future::pending::<()>().await;
         }
         self.falling_edges += 1;
         Ok(())
@@ -130,6 +135,20 @@ fn touch(reports: impl IntoIterator<Item = Result<[u8; 5], ErrorKind>>) -> Touch
         FakeCst820::new(ADDRESS, reports),
         ADDRESS,
         EdgePin::default(),
+        RecordingDelay::default(),
+        SIZE,
+    )
+}
+
+/// Touch controller whose interrupt line never moves.
+fn silent_touch(reports: impl IntoIterator<Item = Result<[u8; 5], ErrorKind>>) -> Touch {
+    Cst820::new(
+        FakeCst820::new(ADDRESS, reports),
+        ADDRESS,
+        EdgePin {
+            silent: true,
+            ..EdgePin::default()
+        },
         RecordingDelay::default(),
         SIZE,
     )
@@ -493,4 +512,50 @@ fn changed_pin_failure_returns_pin_error() {
     let event = block_on(touch.changed());
 
     assert_that!(event).is_equal_to(Err(Error::Pin(PinErrorKind::Other)));
+}
+
+// Regression (t-34 review): a controller that stopped pulsing its interrupt
+// never failed a read, so it was never reset.
+#[test]
+fn changed_silent_interrupt_probes_and_reports_bus_error() {
+    let mut touch = silent_touch([Err(ErrorKind::Bus)]);
+
+    let result = block_on(touch.changed());
+
+    assert_that!(result).is_equal_to(Err(Error::Bus(ErrorKind::Bus)));
+    assert_that!(touch.release().2.delays_ms).is_equal_to(vec![IDLE_PROBE_MS]);
+}
+
+#[test]
+fn changed_silent_interrupt_probe_reports_missed_press() {
+    let mut touch = silent_touch([FakeCst820::touch(5, 6, 0)]);
+
+    let result = block_on(touch.changed());
+
+    assert_that!(result).is_equal_to(Ok(TouchEvent::Pressed(point(5, 6))));
+}
+
+#[test]
+fn changed_silent_interrupt_idle_probe_keeps_waiting() {
+    let mut touch = silent_touch([FakeCst820::no_touch(), FakeCst820::touch(5, 6, 0)]);
+
+    let result = block_on(touch.changed());
+
+    assert_that!(result).is_equal_to(Ok(TouchEvent::Pressed(point(5, 6))));
+    assert_that!(touch.release().2.delays_ms).is_equal_to(vec![IDLE_PROBE_MS, IDLE_PROBE_MS]);
+}
+
+#[test]
+fn init_failed_reset_still_cancels_touch_in_progress() {
+    let mut touch = touch([FakeCst820::touch(1, 2, 0)]);
+    block_on(touch.changed()).unwrap();
+    let mut failing = Tca9554::new(
+        FakeTca9554::new(EXPANDER_ADDRESS).failing(0),
+        EXPANDER_ADDRESS,
+    );
+
+    block_on(touch.init(&mut failing, Pin::P2)).unwrap_err();
+    let cancelled = block_on(touch.changed());
+
+    assert_that!(cancelled).is_equal_to(Ok(TouchEvent::Cancelled(point(1, 2))));
 }

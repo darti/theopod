@@ -69,10 +69,12 @@ const PSRAM_MODE: PsramMode = PsramMode::OctalSpi;
 /// framebuffer region, as esp-hal does no timing tuning at 80 MHz.
 const PSRAM_FREQUENCY: SpiRamFreq = SpiRamFreq::Freq80m;
 
-/// SCL may stay unchanged for this many bus cycles (10 ms at 100 kHz)
-/// before a transfer fails with a timeout, and esp-hal clocks the bus free.
-/// The ESP32-S3 default disables this timeout: a device holding SCL low
-/// would hang every transfer on the bus (t-20).
+/// I2C bus timeout: at least 10 ms of SCL unchanged at 100 kHz.
+///
+/// esp-hal rounds it up to a power of two of clock cycles (about 13 ms).
+/// A timed-out transfer fails and esp-hal clocks the bus free. The ESP32-S3
+/// default disables it: a device holding SCL low would hang every transfer
+/// on the bus (t-20).
 const I2C_BUS_TIMEOUT: BusTimeout = BusTimeout::BusCycles(1000);
 
 const TCA9554_ADDRESS: u8 = 0x20;
@@ -301,7 +303,8 @@ impl Board {
             &mut raw[skip..skip + pixels]
         };
         // PSRAM runs at 80 MHz without timing tuning (ADR-0004): fail here
-        // rather than corrupt pixels and heap data silently (t-27).
+        // rather than corrupt data silently (t-27). This region stands in
+        // for all of PSRAM, the heap spill included.
         let started = Instant::now();
         // Whole 32-bit words: two pixels per access, the frame is 64-byte aligned.
         if let Err(mismatch) = check_pattern(bytemuck::cast_slice_mut(frame)) {
@@ -366,9 +369,10 @@ impl Board {
     }
 }
 
-/// Clears the panel by sending the zeroed `frame`, which also checks that
-/// a full [`esp_qspi::MAX_TRANSFER_LEN`] transfer goes through.
+/// Clears the panel and checks a full-length transfer goes through.
 ///
+/// Sends the zeroed `frame`, whose first transfer is
+/// [`esp_qspi::MAX_TRANSFER_LEN`] long.
 /// `MAX_TRANSFER_LEN` mirrors a private esp-hal limit (ADR-0003): if an
 /// upgrade lowers it, every framebuffer flush would fail for good, so this
 /// fails at boot instead.

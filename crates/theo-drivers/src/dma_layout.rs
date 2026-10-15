@@ -1,7 +1,7 @@
 //! Layout arithmetic of DMA transfers read in place from a framebuffer.
 //!
-//! - [`descriptor_chunks`], [`Chunk`]: splits a transfer into descriptors.
-//! - [`frame_payload`], [`PayloadError`]: tells whether a payload lies in
+//! - [`descriptor_chunks`], [`DmaChunk`]: splits a transfer into descriptors.
+//! - [`frame_payload`], [`FramePayloadError`]: tells whether a payload lies in
 //!   the framebuffer and can be read there in place.
 //!
 //! The firmware's PSRAM DMA path (`src/device/psram_tx_buf.rs`,
@@ -13,7 +13,7 @@ use core::ops::Range;
 
 /// One descriptor of a transfer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Chunk {
+pub struct DmaChunk {
     /// Start, in bytes from the start of the transfer.
     pub offset: usize,
     /// Length in bytes; never zero.
@@ -30,12 +30,12 @@ pub struct Chunk {
 /// # Panics
 ///
 /// Panics if `chunk` is zero.
-pub fn descriptor_chunks(len: usize, chunk: usize) -> impl Iterator<Item = Chunk> {
+pub fn descriptor_chunks(len: usize, chunk: usize) -> impl Iterator<Item = DmaChunk> {
     assert!(chunk > 0, "descriptor chunk size must not be zero");
     let count = len.div_ceil(chunk);
     (0..count).map(move |index| {
         let offset = index * chunk;
-        Chunk {
+        DmaChunk {
             offset,
             len: (len - offset).min(chunk),
             last: index + 1 == count,
@@ -45,7 +45,7 @@ pub fn descriptor_chunks(len: usize, chunk: usize) -> impl Iterator<Item = Chunk
 
 /// Reason a framebuffer payload cannot be read in place.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PayloadError {
+pub enum FramePayloadError {
     /// The payload is longer than one transfer.
     TooLong {
         /// Payload length in bytes.
@@ -67,23 +67,23 @@ pub enum PayloadError {
 ///
 /// # Errors
 ///
-/// Returns [`PayloadError::TooLong`] for a framebuffer payload longer than
-/// `max_len`, else [`PayloadError::Misaligned`] if it does not start on a
+/// Returns [`FramePayloadError::TooLong`] for a framebuffer payload longer than
+/// `max_len`, else [`FramePayloadError::Misaligned`] if it does not start on a
 /// multiple of `align`.
 pub fn frame_payload(
     frame: Range<usize>,
     payload: Range<usize>,
     max_len: usize,
     align: usize,
-) -> Result<bool, PayloadError> {
+) -> Result<bool, FramePayloadError> {
     if payload.is_empty() || payload.start < frame.start || payload.end > frame.end {
         return Ok(false);
     }
     if payload.len() > max_len {
-        return Err(PayloadError::TooLong { len: payload.len() });
+        return Err(FramePayloadError::TooLong { len: payload.len() });
     }
     if !payload.start.is_multiple_of(align) {
-        return Err(PayloadError::Misaligned {
+        return Err(FramePayloadError::Misaligned {
             offset: payload.start - frame.start,
         });
     }

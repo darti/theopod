@@ -40,6 +40,7 @@ impl OutputPin for RecordingPin {
 fn select_drives_pin_low() {
     let mut pin = RecordingPin::default();
 
+    // Forgotten on purpose: dropping the guard would release the pin.
     let selected = ChipSelect::select(&mut pin).map(core::mem::forget);
 
     assert_that!(selected).is_ok();
@@ -67,7 +68,7 @@ fn drop_without_release_drives_pin_high() {
 }
 
 #[test]
-fn cancelled_transfer_releases_chip_select() {
+fn drop_mid_transfer_releases_chip_select() {
     let mut pin = RecordingPin::default();
     let transfer = async {
         let selected = ChipSelect::select(&mut pin).unwrap();

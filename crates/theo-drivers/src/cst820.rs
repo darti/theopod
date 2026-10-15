@@ -9,12 +9,14 @@
 //! The controller pulses its interrupt line low when a finger lands, then
 //! periodically while it stays. [`Cst820::changed`] waits for that edge
 //! while idle and polls the registers while touched: the lift is seen by
-//! the next poll, without relying on an interrupt for it. A failed read
+//! the next poll, without relying on an interrupt for it. Without an edge
+//! for a second, it reads the registers anyway, so a controller that went
+//! silent shows up as a failed read (and a missed press is still seen). A failed read
 //! mid-touch cancels the touch rather than releasing it, so the UI never
 //! takes a glitch for a tap. The CST820 shares the CST816 register set
 //! (Waveshare drives it as a CST816).
 
-use core::fmt;
+use core::{fmt, future::poll_fn, pin::pin, task::Poll};
 
 use embedded_hal::digital::PinState;
 use embedded_hal_async::{delay::DelayNs, digital::Wait, i2c::I2c};
@@ -43,6 +45,8 @@ const RESET_PULSE_MS: u32 = 10;
 const BOOT_MS: u32 = 200;
 /// Register poll period while a finger is down.
 pub(crate) const POLL_MS: u32 = 10;
+/// Longest wait for an interrupt edge before reading the registers anyway.
+pub(crate) const IDLE_PROBE_MS: u32 = 1000;
 
 /// Change of the touch state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -152,7 +156,8 @@ impl<I: I2c, P: Wait, D: DelayNs> Cst820<I, P, D> {
     /// recover a controller that keeps failing. `reset` ends as an output
     /// driven high; other expander pins are kept. A touch in progress, or
     /// one abandoned by a failed read and not yet reported, is reported by
-    /// the next [`Self::changed`] as [`TouchEvent::Cancelled`].
+    /// the next [`Self::changed`] as [`TouchEvent::Cancelled`], even if the
+    /// reset fails.
     ///
     /// # Errors
     ///
@@ -164,6 +169,11 @@ impl<I: I2c, P: Wait, D: DelayNs> Cst820<I, P, D> {
         expander: &mut Tca9554<J>,
         reset: Pin,
     ) -> Result<(), InitError<J::Error, I::Error>> {
+        // Whatever the reset does, the touch the caller has seen ends here,
+        // so it does not stay pressed.
+        if let Some(point) = self.touched.take() {
+            self.cancelled = Some(point);
+        }
         expander
             .configure_output(reset, PinState::Low)
             .await
@@ -174,11 +184,6 @@ impl<I: I2c, P: Wait, D: DelayNs> Cst820<I, P, D> {
             .await
             .map_err(InitError::Reset)?;
         self.delay.delay_ms(BOOT_MS).await;
-        // The controller restarts without a finger: end the touch the
-        // caller has seen, so it does not stay pressed.
-        if let Some(point) = self.touched.take() {
-            self.cancelled = Some(point);
-        }
         self.i2c
             .write(
                 self.address,
@@ -190,8 +195,9 @@ impl<I: I2c, P: Wait, D: DelayNs> Cst820<I, P, D> {
 
     /// Waits for the next press, move, release or cancellation.
     ///
-    /// While idle, waits for an interrupt edge; while touched, polls every
-    /// 10 ms and skips reports where the finger did not move.
+    /// While idle, waits for an interrupt edge, or reads the registers after
+    /// a second without one; while touched, polls every 10 ms and skips
+    /// reports where the finger did not move.
     ///
     /// Cancelling it after an interrupt edge but before the read that
     /// follows loses that edge: the press is then only seen at the
@@ -211,10 +217,7 @@ impl<I: I2c, P: Wait, D: DelayNs> Cst820<I, P, D> {
             if self.touched.is_some() {
                 self.delay.delay_ms(POLL_MS).await;
             } else {
-                self.interrupt
-                    .wait_for_falling_edge()
-                    .await
-                    .map_err(Error::Pin)?;
+                self.wait_for_edge_or_probe().await?;
             }
             let point = match self.read_point().await {
                 Ok(point) => point,
@@ -240,6 +243,21 @@ impl<I: I2c, P: Wait, D: DelayNs> Cst820<I, P, D> {
                 (Some(_), Some(_)) | (None, None) => {}
             }
         }
+    }
+
+    /// Waits for an interrupt edge, or [`IDLE_PROBE_MS`] at most.
+    async fn wait_for_edge_or_probe(&mut self) -> Result<(), Error<I::Error, P::Error>> {
+        let mut edge = pin!(self.interrupt.wait_for_falling_edge());
+        let mut timeout = pin!(self.delay.delay_ms(IDLE_PROBE_MS));
+        // Whichever completes first, the other is dropped: a pin wait and a
+        // delay are both cancel-safe.
+        poll_fn(|context| {
+            if let Poll::Ready(result) = edge.as_mut().poll(context) {
+                return Poll::Ready(result.map_err(Error::Pin));
+            }
+            timeout.as_mut().poll(context).map(Ok)
+        })
+        .await
     }
 
     /// Reads the current point, `None` when no finger is down.

@@ -190,6 +190,8 @@ pub enum PanelCall {
 #[derive(Debug)]
 pub struct RecordingPanel {
     pub calls: Vec<PanelCall>,
+    /// Calls made, failed ones included.
+    pub attempts: usize,
     width: u16,
     height: u16,
     fail_at: Option<usize>,
@@ -200,6 +202,7 @@ impl RecordingPanel {
     pub fn new(width: u16, height: u16) -> Self {
         Self {
             calls: Vec::new(),
+            attempts: 0,
             width,
             height,
             fail_at: None,
@@ -213,6 +216,7 @@ impl RecordingPanel {
     }
 
     fn record(&mut self, call: PanelCall) -> Result<(), BusFault> {
+        self.attempts += 1;
         if self.fail_at == Some(self.calls.len()) {
             return Err(BusFault);
         }

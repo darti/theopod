@@ -1,21 +1,23 @@
 use speculoos::prelude::*;
 
-use crate::dma_layout::{Chunk, PayloadError, descriptor_chunks, frame_payload};
+use crate::dma_layout::{DmaChunk, FramePayloadError, descriptor_chunks, frame_payload};
 
 /// Bytes per descriptor of the firmware's `PsramTxBuf` (63 bursts of 64).
+/// Keep in sync with the const assert in `src/device/psram_tx_buf.rs`.
 const CHUNK: usize = 4032;
-/// `MAX_TRANSFER_LEN` of the firmware's `EspQspi`.
+/// `MAX_TRANSFER_LEN` of the firmware's `EspQspi`. Keep in sync with the
+/// const assert in `src/device/esp_qspi.rs`.
 const MAX_TRANSFER_LEN: usize = 32_704;
 const BURST: usize = 64;
 /// A burst-aligned 1 KB frame.
 const FRAME: core::ops::Range<usize> = 0x1000..0x1400;
 
-fn chunks(len: usize) -> Vec<Chunk> {
+fn chunks(len: usize) -> Vec<DmaChunk> {
     descriptor_chunks(len, CHUNK).collect()
 }
 
-fn chunk(offset: usize, len: usize, last: bool) -> Chunk {
-    Chunk { offset, len, last }
+fn chunk(offset: usize, len: usize, last: bool) -> DmaChunk {
+    DmaChunk { offset, len, last }
 }
 
 #[test]
@@ -87,7 +89,7 @@ fn frame_payload_misaligned_start_returns_its_offset() {
     let payload = FRAME.start + 32..FRAME.start + 96;
 
     assert_that!(frame_payload(FRAME, payload, MAX_TRANSFER_LEN, BURST))
-        .is_equal_to(Err(PayloadError::Misaligned { offset: 32 }));
+        .is_equal_to(Err(FramePayloadError::Misaligned { offset: 32 }));
 }
 
 #[test]
@@ -95,7 +97,7 @@ fn frame_payload_longer_than_a_transfer_returns_too_long() {
     let payload = FRAME.start..FRAME.start + 512;
 
     assert_that!(frame_payload(FRAME, payload, 256, BURST))
-        .is_equal_to(Err(PayloadError::TooLong { len: 512 }));
+        .is_equal_to(Err(FramePayloadError::TooLong { len: 512 }));
 }
 
 #[test]
@@ -122,6 +124,39 @@ fn frame_payload_straddling_the_frame_end_is_not_a_frame_payload() {
 #[test]
 fn frame_payload_empty_is_not_a_frame_payload() {
     let payload = FRAME.start + 32..FRAME.start + 32;
+
+    assert_that!(frame_payload(FRAME, payload, MAX_TRANSFER_LEN, BURST)).is_equal_to(Ok(false));
+}
+
+#[test]
+fn descriptor_chunks_whole_descriptors_fill_exactly_that_many() {
+    // `PsramTxBuf::prepare` indexes descriptors by chunk: a source of its
+    // full capacity must need exactly all of them.
+    let chunks = chunks(8 * CHUNK);
+
+    assert_that!(chunks).has_length(8);
+    assert_that!(chunks[7]).is_equal_to(chunk(7 * CHUNK, CHUNK, true));
+}
+
+#[test]
+fn frame_payload_one_past_the_transfer_limit_returns_too_long() {
+    let payload = FRAME.start..FRAME.start + 257;
+
+    assert_that!(frame_payload(FRAME, payload, 256, BURST))
+        .is_equal_to(Err(FramePayloadError::TooLong { len: 257 }));
+}
+
+#[test]
+fn frame_payload_too_long_and_misaligned_reports_too_long() {
+    let payload = FRAME.start + 32..FRAME.start + 512;
+
+    assert_that!(frame_payload(FRAME, payload, 256, BURST))
+        .is_equal_to(Err(FramePayloadError::TooLong { len: 480 }));
+}
+
+#[test]
+fn frame_payload_straddling_the_frame_start_is_not_a_frame_payload() {
+    let payload = FRAME.start - 64..FRAME.start + 64;
 
     assert_that!(frame_payload(FRAME, payload, MAX_TRANSFER_LEN, BURST)).is_equal_to(Ok(false));
 }

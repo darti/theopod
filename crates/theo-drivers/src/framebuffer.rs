@@ -12,7 +12,7 @@
 
 use core::{fmt, ops::Range};
 
-use crate::{dirty_rows::DirtyRows, panel::Panel};
+use crate::{dirty_rows::DirtyRows, panel::Panel, retry::Transient};
 
 /// Reason rows could not be flushed.
 #[derive(Debug, PartialEq, Eq)]
@@ -46,6 +46,15 @@ impl<E: fmt::Debug> fmt::Display for FlushError<E> {
 }
 
 impl<E: fmt::Debug> core::error::Error for FlushError<E> {}
+
+impl<E: Transient> Transient for FlushError<E> {
+    fn is_transient(&self) -> bool {
+        match self {
+            Self::Panel(error) => error.is_transient(),
+            Self::FrameSizeMismatch { .. } | Self::RowsOutOfRange { .. } => false,
+        }
+    }
+}
 
 /// Sends `rows` of `frame`, a full panel of big-endian RGB565 pixels.
 ///
@@ -85,10 +94,7 @@ pub async fn flush_rows<P: Panel>(
         return Ok(());
     }
 
-    let start = rows.start & !1;
-    // Rounding up may pass the panel (odd height) or u16: clamp to the panel.
-    let end = u16::try_from(usize::from(rows.end).next_multiple_of(2))
-        .map_or(height, |end| end.min(height));
+    let Range { start, end } = even_rows(rows, height);
     panel
         .begin_area(0..width, start..end)
         .await
@@ -115,4 +121,15 @@ pub async fn flush_bands<P: Panel, const N: usize>(
         flush_rows(panel, frame, band.clone()).await?;
     }
     Ok(())
+}
+
+/// Widens `rows` (within a `height`-row panel) to even boundaries.
+///
+/// The start rounds down; the end rounds up, clamped to the panel (odd
+/// height). The one place this rule lives: [`DirtyRows`] relies on it too.
+pub(crate) fn even_rows(rows: Range<u16>, height: u16) -> Range<u16> {
+    // Rounding up may pass the panel (odd height) or u16: clamp.
+    let end = u16::try_from(usize::from(rows.end).next_multiple_of(2))
+        .map_or(height, |end| end.min(height));
+    rows.start & !1..end
 }

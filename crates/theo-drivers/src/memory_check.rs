@@ -1,6 +1,6 @@
 //! Pattern test of a RAM region, for external RAM clocked without tuning.
 //!
-//! - [`check_pattern`], [`Mismatch`]: writes and reads back an
+//! - [`check_pattern`], [`PatternMismatch`]: writes and reads back an
 //!   address-dependent pattern and its complement, then zeroes the region.
 //!
 //! The firmware runs PSRAM at 80 MHz without the timing tuning ESP-IDF
@@ -13,7 +13,7 @@ use core::ptr;
 
 /// First word that did not read back as written.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Mismatch {
+pub struct PatternMismatch {
     /// Index of the word in the region.
     pub index: usize,
     /// Value written.
@@ -30,11 +30,21 @@ pub struct Mismatch {
 ///
 /// # Errors
 ///
-/// Returns the first [`Mismatch`]; the region's contents are then
+/// Returns the first [`PatternMismatch`]; the region's contents are then
 /// unspecified.
-pub fn check_pattern(words: &mut [u32]) -> Result<(), Mismatch> {
+pub fn check_pattern(words: &mut [u32]) -> Result<(), PatternMismatch> {
+    check_with(words, |_| {})
+}
+
+/// [`check_pattern`], calling `after_fill` between each fill and its check,
+/// so tests can stand in for faulty memory.
+pub(crate) fn check_with(
+    words: &mut [u32],
+    mut after_fill: impl FnMut(&mut [u32]),
+) -> Result<(), PatternMismatch> {
     for inverted in [false, true] {
         fill_pattern(words, inverted);
+        after_fill(words);
         if let Some(mismatch) = find_mismatch(words, inverted) {
             return Err(mismatch);
         }
@@ -63,12 +73,12 @@ pub(crate) fn fill_pattern(words: &mut [u32], inverted: bool) {
 }
 
 /// Finds the first word of `words` that differs from the pattern.
-pub(crate) fn find_mismatch(words: &[u32], inverted: bool) -> Option<Mismatch> {
+pub(crate) fn find_mismatch(words: &[u32], inverted: bool) -> Option<PatternMismatch> {
     words.iter().enumerate().find_map(|(index, word)| {
         let expected = pattern(index, inverted);
         // SAFETY: `word` is a valid reference.
         let actual = unsafe { ptr::read_volatile(word) };
-        (actual != expected).then_some(Mismatch {
+        (actual != expected).then_some(PatternMismatch {
             index,
             expected,
             actual,

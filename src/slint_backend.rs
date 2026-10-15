@@ -45,8 +45,10 @@ impl Platform for TheoPlatform {
     }
 }
 
-/// Most row bands flushed per frame: Slint's dirty region holds at most
-/// three rectangles, so their rows form at most three bands.
+/// Most row bands flushed per frame.
+///
+/// Slint's dirty region holds at most three rectangles, so their rows form
+/// at most three bands.
 pub const DIRTY_BANDS: usize = 3;
 
 /// Dirty rows of the framebuffer, as up to [`DIRTY_BANDS`] bands.

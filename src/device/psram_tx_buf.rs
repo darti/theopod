@@ -28,6 +28,9 @@ const BURST_CONFIG: BurstConfig = BurstConfig {
 
 /// Bytes per descriptor: the largest multiple of [`BURST`] a descriptor holds.
 pub const CHUNK: usize = BURST_CONFIG.max_compatible_chunk_size();
+// Host tests use this value: keep `crates/theo-drivers/src/dma_layout_tests.rs`
+// in sync.
+const _: () = assert!(CHUNK == 4032);
 
 /// DMA transmit buffer over a PSRAM region, set by [`PsramTxBuf::set_source`].
 ///

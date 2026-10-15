@@ -44,7 +44,7 @@ use slint::{
 };
 use theo_drivers::{
     ButtonEvent, FlushRetry, OrientationDetector, Panel, PanelSize, Rotation, TouchEvent,
-    TouchPoint, Transient, flush_bands,
+    TouchPoint, Transient, flush_bands, reset_due,
 };
 
 use crate::{
@@ -61,9 +61,11 @@ slint::include_modules!();
 const FRAME_PERIOD: Duration = Duration::from_millis(16);
 /// Longest sleep when nothing is scheduled.
 const MAX_IDLE: Duration = Duration::from_millis(1000);
-/// Resend delay after a transient flush failure, doubled per failure up to
-/// [`FLUSH_RETRY_MAX_MS`]: one frame period, then backing off to one second.
+/// First resend delay after a transient flush failure: one frame period.
+///
+/// It doubles per failure up to [`FLUSH_RETRY_MAX_MS`].
 const FLUSH_RETRY_FIRST_MS: u32 = 16;
+/// Longest resend delay after failed flushes.
 const FLUSH_RETRY_MAX_MS: u32 = 1000;
 /// Button changes queued while the loop renders or flushes.
 const BUTTON_QUEUE: usize = 4;
@@ -73,10 +75,15 @@ const TOUCH_QUEUE: usize = 8;
 /// Pause after a failed touch read, so a faulty controller toggling its
 /// interrupt cannot keep the touch task busy.
 const TOUCH_RETRY: Duration = Duration::from_millis(10);
-/// Consecutive failed touch reads before the controller is reset; each
-/// further reset waits for twice as many failures. A power of two.
+/// Failed touch reads in a row before the first controller reset.
+///
+/// Later resets come after 16, 32 and 64 failures, then every
+/// [`TOUCH_RESET_EVERY`] (see [`reset_due`]). Powers of two.
 const TOUCH_RESET_AFTER: u32 = 8;
-const _: () = assert!(TOUCH_RESET_AFTER.is_power_of_two());
+/// Failed touch reads between resets, once the interval stops doubling.
+const TOUCH_RESET_EVERY: u32 = 64;
+/// Longest pause between attempts to reset the touch controller.
+const TOUCH_RESET_RETRY_MAX: Duration = Duration::from_secs(1);
 /// Accelerometer sample period; a rotation needs
 /// [`OrientationDetector::STABLE_SAMPLES`] samples in a row.
 const ORIENTATION_PERIOD: Duration = Duration::from_millis(100);
@@ -154,9 +161,19 @@ async fn main(spawner: Spawner) {
         if drawn {
             rotate_pending = false;
         }
-        let resend_due = resend_at.is_some_and(|at| Instant::now() >= at);
-        if flush_retry.is_stale() && (resend_due || !dirty.is_empty()) {
-            dirty = frame.all_rows();
+        if flush_retry.is_stale() {
+            // Hold flushes until the resend is due, so redraws (an animation)
+            // cannot bypass the backoff. After a permanent failure nothing is
+            // scheduled: a redraw schedules one, at most once a second.
+            if !dirty.is_empty() && resend_at.is_none() {
+                resend_at = Some(Instant::now() + retry_delay(flush_retry.max_ms()));
+            }
+            let resend_due = resend_at.is_some_and(|at| Instant::now() >= at);
+            dirty = if resend_due {
+                frame.all_rows()
+            } else {
+                FrameRows::new(size.1)
+            };
         }
         if !dirty.is_empty() {
             // Cancel-safe, but awaited outside `select`: a cancelled flush
@@ -189,9 +206,7 @@ async fn main(spawner: Spawner) {
                             ),
                         }
                     }
-                    resend_at = retry
-                        .after_ms
-                        .map(|ms| Instant::now() + Duration::from_millis(u64::from(ms)));
+                    resend_at = retry.after_ms.map(|ms| Instant::now() + retry_delay(ms));
                 }
             }
         }
@@ -262,8 +277,10 @@ async fn watch_button(mut button: device::Button) {
 ///
 /// A failed read mid-touch reaches the loop as [`TouchEvent::Cancelled`]
 /// (from the driver). Failures are logged once per streak, and each one
-/// pauses the task for [`TOUCH_RETRY`]. After [`TOUCH_RESET_AFTER`]
-/// failures in a row the controller is reset, then again after 16, 32...
+/// pauses the task for [`TOUCH_RETRY`]. Failures in a row reset the
+/// controller ([`TOUCH_RESET_AFTER`]); a failed reset is retried until it
+/// succeeds, so the controller is never left held in reset. An idle
+/// controller is read once a second, so one that went silent fails too.
 #[embassy_executor::task]
 async fn watch_touch(mut touch: device::Touch) {
     // Consecutive failed reads.
@@ -283,15 +300,31 @@ async fn watch_touch(mut touch: device::Touch) {
                     log::error!("touch read failed: {error}");
                 }
                 failures = failures.saturating_add(1);
-                if failures >= TOUCH_RESET_AFTER && failures.is_power_of_two() {
+                if reset_due(failures, TOUCH_RESET_AFTER, TOUCH_RESET_EVERY) {
                     log::warn!("resetting the touch controller after {failures} failed reads");
-                    if let Err(error) = touch.reset().await {
-                        log::error!("touch controller reset failed: {error}");
-                    }
+                    reset_touch(&mut touch).await;
                 }
                 Timer::after(TOUCH_RETRY).await;
             }
         }
+    }
+}
+
+/// Resets the touch controller, retrying with a growing pause until it
+/// works: a reset that fails half-way can hold the controller in reset.
+async fn reset_touch(touch: &mut device::Touch) {
+    let mut pause = TOUCH_RETRY;
+    let mut attempts: u32 = 0;
+    while let Err(error) = touch.reset().await {
+        if attempts == 0 {
+            log::error!("touch controller reset failed, retrying: {error}");
+        }
+        attempts = attempts.saturating_add(1);
+        Timer::after(pause).await;
+        pause = (pause * 2).min(TOUCH_RESET_RETRY_MAX);
+    }
+    if attempts > 0 {
+        log::info!("touch controller reset after {attempts} failed attempts");
     }
 }
 
@@ -346,6 +379,11 @@ async fn watch_orientation(mut imu: device::Imu) {
     }
 }
 
+/// A [`FlushRetry`] delay as a [`Duration`].
+fn retry_delay(ms: u32) -> Duration {
+    Duration::from_millis(u64::from(ms))
+}
+
 /// Slint's name for `rotation`: both turn the view clockwise.
 fn rendering_rotation(rotation: Rotation) -> RenderingRotation {
     match rotation {
@@ -356,9 +394,11 @@ fn rendering_rotation(rotation: Rotation) -> RenderingRotation {
     }
 }
 
-/// Wakes one frame period after `frame_start` while animating, otherwise
-/// at the next Slint timer (at most [`MAX_IDLE`] from now); earlier if a
-/// failed flush is due for a resend at `resend_at`.
+/// When the UI loop wakes next.
+///
+/// One frame period after `frame_start` while animating, otherwise at the
+/// next Slint timer (at most [`MAX_IDLE`] from now); earlier if a failed
+/// flush is due for a resend at `resend_at`.
 fn next_wake_up(
     window: &MinimalSoftwareWindow,
     frame_start: Instant,

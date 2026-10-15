@@ -12,6 +12,8 @@
 //! - [`I2cBus`], [`I2cDevice`]: the async I2C bus shared by the TCA9554
 //!   expander and the touch controller, and one device's handle on it.
 //! - [`log_heap_usage`]: logs internal RAM and PSRAM heap usage.
+//! - [`display_resets`], [`reset_for_display`], [`clear_display_resets`]:
+//!   reboots for a broken display, counted across software resets.
 //! - `dump_frame` (feature `frame-dump`): prints the framebuffer to the
 //!   serial log.
 //!
@@ -411,6 +413,38 @@ async fn start_imu(i2c: &'static I2cBus) -> Option<Imu> {
     }
     log::error!("IMU not found: the screen will not rotate");
     None
+}
+
+/// Reboots for a broken display in a row, kept across software resets.
+///
+/// In RTC fast RAM, which a software reset keeps. Stored with its
+/// complement: RAM that was never written (after power-on) reads as zero.
+#[esp_hal::ram(unstable(rtc_fast, persistent))]
+static mut DISPLAY_RESETS: [u32; 2] = [0; 2];
+
+/// Reboots for a broken display since the display last stayed healthy.
+pub fn display_resets() -> u32 {
+    // SAFETY: plain read of a `static` of plain integers; only the UI task
+    // touches it, and every bit pattern is valid.
+    let [count, check] = unsafe { core::ptr::addr_of!(DISPLAY_RESETS).read_volatile() };
+    if check == !count { count } else { 0 }
+}
+
+fn set_display_resets(count: u32) {
+    // SAFETY: as in `display_resets`; a reset during the write leaves a
+    // pair that fails the check and reads as zero.
+    unsafe { core::ptr::addr_of_mut!(DISPLAY_RESETS).write_volatile([count, !count]) };
+}
+
+/// Forgets past display reboots, once the display has stayed healthy.
+pub fn clear_display_resets() {
+    set_display_resets(0);
+}
+
+/// Reboots the device to recover a broken display, counting the reboot.
+pub fn reset_for_display() -> ! {
+    set_display_resets(display_resets().saturating_add(1));
+    esp_hal::system::software_reset()
 }
 
 /// Logs used and free bytes of every heap region (internal RAM and PSRAM).

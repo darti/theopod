@@ -44,7 +44,7 @@ use slint::{
 };
 use theo_drivers::{
     ButtonEvent, FlushRetry, OrientationDetector, Panel, PanelSize, Rotation, TouchEvent,
-    TouchPoint, Transient, flush_bands, reset_due,
+    TouchPoint, Transient, display_reset_due, flush_bands, reset_due,
 };
 
 use crate::{
@@ -67,6 +67,12 @@ const MAX_IDLE: Duration = Duration::from_millis(1000);
 const FLUSH_RETRY_FIRST_MS: u32 = 16;
 /// Longest resend delay after failed flushes.
 const FLUSH_RETRY_MAX_MS: u32 = 1000;
+/// How long the panel may stay stale before the device reboots (t-44).
+const DISPLAY_RESET_AFTER: Duration = Duration::from_secs(10);
+/// Reboots in a row for a broken display before giving up on rebooting.
+const MAX_DISPLAY_RESETS: u32 = 3;
+/// Uptime with a healthy display after which past reboots are forgotten.
+const DISPLAY_HEALTHY_AFTER: Duration = Duration::from_secs(60);
 /// Button changes queued while the loop renders or flushes.
 const BUTTON_QUEUE: usize = 4;
 /// Touch changes queued while the loop renders or flushes; a full queue
@@ -133,6 +139,7 @@ async fn main(spawner: Spawner) {
     let mut flush_retry = FlushRetry::new(FLUSH_RETRY_FIRST_MS, FLUSH_RETRY_MAX_MS);
     let mut resend_at: Option<Instant> = None;
     let mut first_frame_sent = false;
+    let mut display_watch = DisplayWatch::new();
     let mut rotation = INITIAL_ROTATION;
     // Set when `rotation` changed and the next frame must redraw everything.
     let mut rotate_pending = false;
@@ -210,6 +217,8 @@ async fn main(spawner: Spawner) {
                 }
             }
         }
+
+        display_watch.check(flush_retry.is_stale());
 
         let wake_up = Timer::at(next_wake_up(&window, frame_start, resend_at));
         #[cfg_attr(
@@ -375,6 +384,60 @@ async fn watch_orientation(mut imu: device::Imu) {
                 }
                 failures = failures.saturating_add(1);
             }
+        }
+    }
+}
+
+/// Reboots the device when the panel stays stale (t-44).
+///
+/// A display no flush can repair (a lost SPI master, a permanent error)
+/// is recovered by a reboot, as at boot; after [`MAX_DISPLAY_RESETS`] in a
+/// row the cause survives reboots, so the device keeps running instead.
+/// The count is forgotten once the display stays healthy.
+struct DisplayWatch {
+    /// When the panel last became stale.
+    stale_since: Option<Instant>,
+    /// Whether giving up on reboots was logged.
+    gave_up: bool,
+}
+
+impl DisplayWatch {
+    fn new() -> Self {
+        let resets = device::display_resets();
+        if resets > 0 {
+            log::warn!("rebooted {resets} times in a row for a broken display");
+        }
+        Self {
+            stale_since: None,
+            gave_up: false,
+        }
+    }
+
+    /// Checks the panel after a frame; reboots if it stayed stale too long.
+    fn check(&mut self, stale: bool) {
+        let now = Instant::now();
+        if !stale {
+            self.stale_since = None;
+            let uptime = Duration::from_micros(now.as_micros());
+            if uptime >= DISPLAY_HEALTHY_AFTER && device::display_resets() > 0 {
+                device::clear_display_resets();
+                log::info!("display healthy: reboot count cleared");
+            }
+            return;
+        }
+        let stale_for = now - *self.stale_since.get_or_insert(now);
+        let resets = device::display_resets();
+        if display_reset_due(
+            stale_for.as_millis(),
+            DISPLAY_RESET_AFTER.as_millis(),
+            resets,
+            MAX_DISPLAY_RESETS,
+        ) {
+            log::error!("display stale for {} ms, rebooting", stale_for.as_millis());
+            device::reset_for_display();
+        }
+        if stale_for >= DISPLAY_RESET_AFTER && !core::mem::replace(&mut self.gave_up, true) {
+            log::error!("display still broken after {resets} reboots; not rebooting again");
         }
     }
 }

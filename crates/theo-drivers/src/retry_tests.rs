@@ -3,7 +3,7 @@ use speculoos::prelude::*;
 use crate::{
     co5300::Error as Co5300Error,
     framebuffer::FlushError,
-    retry::{FlushRetry, Retry, Transient, reset_due},
+    retry::{FlushRetry, Retry, Transient, display_reset_due, reset_due},
     test_support::BusFault,
 };
 
@@ -240,4 +240,20 @@ fn co5300_invalid_geometry_is_permanent() {
 #[test]
 fn co5300_bus_fault_is_transient() {
     assert_that!(Co5300Error::Bus(BusFault).is_transient()).is_true();
+}
+
+#[test]
+fn display_reset_due_before_the_limit_is_false() {
+    assert_that!(display_reset_due(9_999, 10_000, 0, 3)).is_false();
+}
+
+#[test]
+fn display_reset_due_at_the_limit_is_true() {
+    assert_that!(display_reset_due(10_000, 10_000, 2, 3)).is_true();
+}
+
+// Regression guard (t-44): a cause that survives reboots must not loop.
+#[test]
+fn display_reset_due_after_max_resets_in_a_row_is_false() {
+    assert_that!(display_reset_due(60_000, 10_000, 3, 3)).is_false();
 }

@@ -8,7 +8,8 @@
 //! - [`flush_rows`], [`flush_bands`], [`DirtyRows`], [`FlushError`]: sends
 //!   dirty bands of framebuffer rows to a [`Panel`].
 //! - [`FlushRetry`], [`Retry`], [`Transient`]: when to resend the frame
-//!   after failed flushes; [`reset_due`]: when to reset a failing device.
+//!   after failed flushes; [`reset_due`], [`display_reset_due`]: when to
+//!   reset a failing device.
 //! - [`QspiBus`], [`Lanes`]: Quad-SPI transport for display controllers.
 //! - [`ChipSelect`]: chip select released even when a transfer is cancelled.
 //! - [`dma_layout`]: descriptor and payload arithmetic of in-place DMA
@@ -90,5 +91,5 @@ pub use panel::Panel;
 pub use panel_power::PanelPower;
 pub use qmi8658::{Acceleration, Error as Qmi8658Error, Qmi8658};
 pub use qspi::{Lanes, QspiBus};
-pub use retry::{FlushRetry, Retry, Transient, reset_due};
+pub use retry::{FlushRetry, Retry, Transient, display_reset_due, reset_due};
 pub use tca9554::{Pin as ExpanderPin, Tca9554};

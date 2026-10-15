@@ -72,6 +72,14 @@ of PSRAM that the GDMA can read.
   per streak, and the recovery is logged. A failed or cancelled transfer
   closes the `Co5300` area: its progress on the panel is unknown (an
   underrun is only seen once every byte is out).
+- A panel stale for 10 s (a lost SPI master, an error no flush can clear)
+  reboots the device (`DisplayWatch` in `src/main.rs`, t-44), as a boot
+  recovers it. The reboots are counted in RTC fast RAM, which a software
+  reset keeps (stored with its complement, so RAM never written reads as
+  zero); after 3 in a row the cause survives reboots, and the device keeps
+  running with the error logged rather than looping. A minute of uptime
+  with a healthy display clears the count. Checked on the board with an
+  injected permanent error: three reboots 10 s apart, then it gives up.
 - At boot, `Board::init` clears the panel with one full-frame flush, whose
   first transfer is `MAX_TRANSFER_LEN` long; a permanent failure panics,
   so an esp-hal upgrade that lowers its private DMA limit fails at once

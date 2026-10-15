@@ -1,7 +1,7 @@
 use speculoos::prelude::*;
 
 use crate::memory_check::{
-    PatternMismatch, check_pattern, check_with, fill_pattern, find_mismatch,
+    PatternMismatch, check_pattern, check_pattern_with, fill_pattern, find_mismatch,
 };
 
 #[test]
@@ -77,7 +77,7 @@ fn check_with_bit_stuck_high_is_found_by_the_complement_pass() {
     let mut expected = vec![0; 64];
     fill_pattern(&mut expected, true);
 
-    let result = check_with(&mut words, stuck);
+    let result = check_pattern_with(&mut words, stuck);
 
     assert_that!(result).is_equal_to(Err(PatternMismatch {
         index: 5,
@@ -95,7 +95,7 @@ fn check_with_fault_in_the_plain_pass_stops_before_the_complement() {
         words[0] ^= 0x8000_0000;
     };
 
-    let result = check_with(&mut words, flip);
+    let result = check_pattern_with(&mut words, flip);
 
     assert_that!(result.map_err(|mismatch| mismatch.index)).is_equal_to(Err(0));
     assert_that!(fills).is_equal_to(1);

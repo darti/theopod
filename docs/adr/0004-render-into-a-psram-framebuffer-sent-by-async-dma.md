@@ -119,9 +119,16 @@ the previous one).
   81% of 1,000 flushes underran with an idle CPU, and every one with a
   task copying PSRAM meanwhile; 80 MHz underran none of 2,000 in the same
   test. To catch a marginal clock, `Board::init` pattern-tests the
-  framebuffer region (`theo_drivers::check_pattern`, an address hash and
-  its complement in 32-bit words, 81 ms) and panics on a mismatch; the
-  last data-cache-sized part may be read back from the cache.
+  framebuffer region (`theo_drivers::check_pattern_with`, an address hash
+  and its complement in 32-bit words, 98 ms) and panics on a mismatch.
+  Each pattern is written back and dropped from the data cache before it
+  is checked (`psram_tx_buf::write_back_and_invalidate`, ROM
+  `Cache_Invalidate_Addr`), so every word is read from PSRAM itself
+  (t-45; checked on the board: a value left only in the cache is gone
+  after the invalidate). Limits: the CPU path is checked, not the DMA
+  reads, whose bandwidth the boot full-frame flush and the underrun flag
+  cover; and the framebuffer region stands in for the rest of PSRAM,
+  the heap spill included.
 - Negative: PSRAM is part of the global heap, so general allocations spill
   there once internal RAM is full; atomics must not live in PSRAM on the
   ESP32-S3.

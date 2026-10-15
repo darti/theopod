@@ -1,7 +1,8 @@
 //! Pattern test of a RAM region, for external RAM clocked without tuning.
 //!
-//! - [`check_pattern`], [`PatternMismatch`]: writes and reads back an
-//!   address-dependent pattern and its complement, then zeroes the region.
+//! - [`check_pattern`], [`check_pattern_with`], [`PatternMismatch`]: writes
+//!   and reads back an address-dependent pattern and its complement, then
+//!   zeroes the region; `check_pattern_with` syncs a cache between the two.
 //!
 //! The firmware runs PSRAM at 80 MHz without the timing tuning ESP-IDF
 //! performs (ADR-0004): a marginal clock would corrupt data silently, the
@@ -33,12 +34,19 @@ pub struct PatternMismatch {
 /// Returns the first [`PatternMismatch`]; the region's contents are then
 /// unspecified.
 pub fn check_pattern(words: &mut [u32]) -> Result<(), PatternMismatch> {
-    check_with(words, |_| {})
+    check_pattern_with(words, |_| {})
 }
 
-/// [`check_pattern`], calling `after_fill` between each fill and its check,
-/// so tests can stand in for faulty memory.
-pub(crate) fn check_with(
+/// [`check_pattern`], calling `after_fill` between each fill and its check.
+///
+/// Use it to push the pattern past a CPU cache (write back and invalidate
+/// the region), so the check reads the memory itself; tests use it to
+/// stand in for faulty memory.
+///
+/// # Errors
+///
+/// As [`check_pattern`].
+pub fn check_pattern_with(
     words: &mut [u32],
     mut after_fill: impl FnMut(&mut [u32]),
 ) -> Result<(), PatternMismatch> {

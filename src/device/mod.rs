@@ -53,8 +53,8 @@ use self::{esp_qspi::EspQspi, psram_tx_buf::PsramTxBuf};
 use embedded_hal::digital::PinState;
 use theo_drivers::{
     Axis, AxisMap, Co5300, Cst820, Cst820Error, Cst820InitError, DebouncedButton, ExpanderPin,
-    PanelGeometry, PanelPower, PanelSize, Qmi8658, Tca9554, TouchEvent, Transient, check_pattern,
-    flush_rows,
+    PanelGeometry, PanelPower, PanelSize, Qmi8658, Tca9554, TouchEvent, Transient,
+    check_pattern_with, flush_rows,
 };
 
 pub use esp_hal::main as entry;
@@ -320,8 +320,14 @@ impl Board {
         // rather than corrupt data silently (t-27). This region stands in
         // for all of PSRAM, the heap spill included.
         let started = Instant::now();
-        // Whole 32-bit words: two pixels per access, the frame is 64-byte aligned.
-        if let Err(mismatch) = check_pattern(bytemuck::cast_slice_mut(frame)) {
+        // Whole 32-bit words: two pixels per access, the frame is 64-byte
+        // aligned. Each pattern is pushed past the data cache before it is
+        // checked, so the check reads PSRAM itself.
+        let words: &mut [u32] = bytemuck::cast_slice_mut(frame);
+        let sync = |words: &mut [u32]| {
+            psram_tx_buf::write_back_and_invalidate(bytemuck::cast_slice(words));
+        };
+        if let Err(mismatch) = check_pattern_with(words, sync) {
             panic!("PSRAM self-test failed: {mismatch:?}");
         }
         log::info!(

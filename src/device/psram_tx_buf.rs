@@ -158,8 +158,46 @@ unsafe impl DmaTxBuffer for PsramTxBuf {
 // there shows up as a link error. Re-check on every esp-hal upgrade.
 unsafe extern "C" {
     fn rom_Cache_WriteBack_Addr(addr: u32, size: u32);
+    fn Cache_Invalidate_Addr(addr: u32, size: u32);
     fn Cache_Suspend_DCache_Autoload() -> u32;
     fn Cache_Resume_DCache_Autoload(value: u32);
+}
+
+/// Writes `region` back to PSRAM, then drops it from the data cache.
+///
+/// The next CPU reads of `region` then come from PSRAM itself (t-45). The
+/// region must be [`BURST`]-aligned and a whole number of bursts, so no
+/// cache line it touches holds other data; it goes in [`CHUNK`]-sized
+/// steps to bound the time with interrupts off.
+///
+/// # Panics
+///
+/// Panics if `region` is not burst-aligned or not whole bursts.
+pub fn write_back_and_invalidate(region: &[u8]) {
+    let start = region.as_ptr() as usize;
+    assert!(
+        start.is_multiple_of(BURST) && region.len().is_multiple_of(BURST),
+        "cache sync needs whole, aligned bursts"
+    );
+    for chunk in descriptor_chunks(region.len(), CHUNK) {
+        invalidate(start + chunk.offset, chunk.len);
+    }
+}
+
+/// Writes back then invalidates `len` bytes from `start`, as [`writeback`].
+#[esp_hal::ram]
+fn invalidate(start: usize, len: usize) {
+    critical_section::with(|_| {
+        // SAFETY: ROM routines on a readable, line-aligned range: the write
+        // back keeps every byte, so invalidating loses nothing. Addresses
+        // fit u32 on the ESP32-S3.
+        unsafe {
+            let autoload = Cache_Suspend_DCache_Autoload();
+            rom_Cache_WriteBack_Addr(start as u32, len as u32);
+            Cache_Invalidate_Addr(start as u32, len as u32);
+            Cache_Resume_DCache_Autoload(autoload);
+        }
+    });
 }
 
 /// Writes `len` bytes from `start` back to PSRAM, interrupts and autoload off.

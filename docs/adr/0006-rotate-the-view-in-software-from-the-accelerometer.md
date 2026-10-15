@@ -71,8 +71,32 @@ row/column exchange and mirroring) or Slint's software renderer
 
 ## Alternatives considered
 
-- CO5300 row/column exchange: rejected for now. It changes the drawing
+- CO5300 row/column exchange: rejected for now (and tried for t-40, see
+  below). It changes the drawing
   window and the 2x2 alignment rules the driver enforces, and touch would
   still need the same mapping in software.
 - Two orientations only (portrait and landscape): rejected, the user asked
   for all four.
+
+## Update (t-40): hardware rotation tried and dropped
+
+In landscape a wide but short change spans many panel rows, and
+`flush_rows` sends whole rows. A landscape update of the button (240 x 72
+view pixels) costs about 176 KB, 9 ms on the bus: within a 16 ms frame,
+and the UI has no animation. t-40 tried the real fix anyway: lay the
+framebuffer out as the 448 x 368 view and let the CO5300 turn it with its
+row/column exchange (MADCTL MV, plus MY), so a wide change covers few
+framebuffer rows (two landscape rows are 1,792 bytes, 28 x 64, so the
+DMA alignment holds). Espressif's `esp_lcd_co5300` 2.1.0 uses MV for
+`swap_xy`, so the controller has the bit.
+
+On the board, with a test pattern (green corner square, red vertical and
+blue horizontal bands), the panel drew lines of 368 pixels along the
+view's 448-pixel rows, whichever address window (CASET or RASET) carried
+the long axis: rows sheared by about 80 pixels each (448 - 368), a strip
+about 80 pixels wide stayed unwritten, and the vertical axis came out
+mirrored. In row/column exchange the controller caps a written line at
+the panel's physical width, so a landscape row cannot be one line.
+Sending the frame column-major instead would bring back exactly the row
+cost t-40 meant to remove. Rotation stays in software for all four
+orientations; the experiment's patch is not kept.

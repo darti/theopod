@@ -5,7 +5,8 @@
 - Amended: 2026-10-11, DMA reads the framebuffer in place (t-4)
 - Amended: 2026-10-14, cancel-safe flushes (t-3, t-29, t-31), host-tested
   DMA arithmetic (t-30), flush retry policy (t-1, t-28), several row bands
-  per frame (t-5), PSRAM clock measured and self-tested (t-27)
+  per frame (t-5), PSRAM clock measured and self-tested (t-27); the
+  display owns the framebuffer (t-46)
 
 ## Context
 
@@ -20,8 +21,12 @@ of PSRAM that the GDMA can read.
 
 - `Board::init` maps the octal PSRAM at 80 MHz, adds it as an esp-alloc
   region, and allocates one zeroed full-panel framebuffer there with
-  `allocator_api2` + `esp_alloc::ExternalMemory`, 64-byte aligned.
-- Slint renders into it with `RepaintBufferType::ReusedBuffer` and
+  `allocator_api2` + `esp_alloc::ExternalMemory`, 64-byte aligned. The
+  display owns it from then on (t-46): `EspQspi` holds it as
+  `&'static mut [u8]`, `QspiBus`/`Panel` expose it (`frame`, `frame_mut`)
+  and send byte ranges of it (`write_frame`), so framebuffer transfers are
+  an explicit API rather than inferred from payload addresses.
+- Slint renders into it (borrowed through `Panel::frame_mut`) with `RepaintBufferType::ReusedBuffer` and
   `Rgb565BigEndianPixel`, so pixels are already in panel byte order and
   only dirty regions are redrawn.
 - `theo_drivers::flush_bands` sends the dirty rows as up to three bands
@@ -34,8 +39,9 @@ of PSRAM that the GDMA can read.
   64-byte aligned (even rows are 1,472 bytes, 23 x 64). A compile-time
   assert in `src/device/mod.rs` keeps two panel rows a multiple of 64
   bytes, and a host test pins the transfer starts; `EspQspi` refuses a
-  framebuffer payload that is misaligned or too long
-  (`EspQspiError::Misaligned`, `TooLong`) rather than send it slowly.
+  framebuffer range that is misaligned, too long or outside the frame
+  (`EspQspiError::Misaligned`, `TooLong`, `OutOfFrame`) rather than send
+  it slowly.
 - `QspiBus` and `Panel` are async; `EspQspi` uses
   `SpiDma::half_duplex_write_buffer` for framebuffer transfers and
   `half_duplex_write_async` for the rest. Transfers under 64 bytes
@@ -109,10 +115,11 @@ the previous one).
   a cancelled flush are stale and must be sent again.
 - Negative: leaking a write future (`mem::forget`) skips those guards: the
   SPI master is lost (`EspQspiError::Unavailable`) and the DMA keeps
-  reading the framebuffer after the write's borrow ended. `EspQspi::new` is
-  `unsafe` and requires a framebuffer that is never freed, so that read
-  stays in live memory and can only show wrong pixels, as with esp-hal's
-  own in-place DMA (t-31).
+  reading the framebuffer after the write's borrow ended. `EspQspi` owns
+  the framebuffer as `&'static mut [u8]`, so that read stays in live
+  memory and can only show pixels the renderer changed meanwhile, as with
+  esp-hal's own in-place DMA (t-31). Since t-46 this needs no `unsafe`
+  constructor: owning the frame replaces the raw-pointer contract.
 - Negative: PSRAM runs at 80 MHz without the MSPI timing tuning ESP-IDF
   performs (esp-hal 1.2.2 has none). 40 MHz is not an option even with
   the bursts and alignment (t-27): resending the full frame every 16 ms,

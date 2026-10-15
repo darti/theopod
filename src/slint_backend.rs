@@ -1,8 +1,8 @@
 //! Slint platform and framebuffer rendering.
 //!
 //! - [`TheoPlatform`]: minimal Slint platform backed by one software window.
-//! - [`FrameBuffer`]: full-panel framebuffer Slint renders into, in the
-//!   panel's big-endian RGB565 byte order.
+//! - [`FrameRenderer`]: renders into the display's framebuffer, in the
+//!   panel's big-endian RGB565 byte order, and reports the dirty rows.
 //!
 //! Sending the dirty rows to a panel is [`theo_drivers::flush_bands`]' job,
 //! which is host-tested; this module only adapts Slint's renderer.
@@ -54,41 +54,40 @@ pub const DIRTY_BANDS: usize = 3;
 /// Dirty rows of the framebuffer, as up to [`DIRTY_BANDS`] bands.
 pub type FrameRows = DirtyRows<DIRTY_BANDS>;
 
-/// Full-panel framebuffer kept between frames.
+/// Renders Slint into the display's full-panel framebuffer.
 ///
-/// The window must use `RepaintBufferType::ReusedBuffer`: Slint then only
-/// redraws what changed since the previous frame.
-pub struct FrameBuffer {
-    pixels: &'static mut [Rgb565BigEndianPixel],
+/// The display owns the framebuffer (`Panel::frame_mut`), so it persists
+/// between frames. The window must use `RepaintBufferType::ReusedBuffer`:
+/// Slint then only redraws what changed since the previous frame.
+#[derive(Debug)]
+pub struct FrameRenderer {
     width: u16,
     height: u16,
 }
 
-impl FrameBuffer {
-    /// Wraps `pixels`, a row-major `width` x `height` RGB565 buffer.
+impl FrameRenderer {
+    /// Renders for a `width` x `height` panel.
+    pub fn new((width, height): (u16, u16)) -> Self {
+        Self { width, height }
+    }
+
+    /// Redraws what changed into `frame` and returns the dirty rows.
     ///
-    /// The slots are reinterpreted as [`Rgb565BigEndianPixel`]: they hold
-    /// the panel's byte order, not native-endian values.
+    /// `frame` holds the panel's big-endian RGB565 bytes, reinterpreted as
+    /// [`Rgb565BigEndianPixel`]s.
     ///
     /// # Panics
     ///
-    /// Panics if `pixels` does not hold exactly `width * height` pixels.
-    pub fn new(pixels: &'static mut [u16], (width, height): (u16, u16)) -> Self {
+    /// Panics if `frame` is not 2-byte aligned or does not hold exactly
+    /// `width * height` pixels.
+    pub fn render(&self, renderer: &SoftwareRenderer, frame: &mut [u8]) -> FrameRows {
+        let pixels: &mut [Rgb565BigEndianPixel] = bytemuck::cast_slice_mut(frame);
         assert_eq!(
             pixels.len(),
-            usize::from(width) * usize::from(height),
+            usize::from(self.width) * usize::from(self.height),
             "framebuffer size does not match the panel"
         );
-        Self {
-            pixels: bytemuck::cast_slice_mut(pixels),
-            width,
-            height,
-        }
-    }
-
-    /// Redraws what changed with `renderer` and returns the dirty rows.
-    pub fn render(&mut self, renderer: &SoftwareRenderer) -> FrameRows {
-        let region = renderer.render(self.pixels, usize::from(self.width));
+        let region = renderer.render(pixels, usize::from(self.width));
         let mut rows = FrameRows::new(self.height);
         for (origin, size) in region.iter() {
             let top = i64::from(origin.y);
@@ -103,22 +102,8 @@ impl FrameBuffer {
         FrameRows::all(self.height)
     }
 
-    /// The frame as big-endian RGB565 bytes, ready for the panel.
-    pub fn as_bytes(&self) -> &[u8] {
-        bytemuck::cast_slice(self.pixels)
-    }
-
     /// Clamps a rendered row coordinate to the frame.
     fn row(&self, y: i64) -> u16 {
         u16::try_from(y.clamp(0, i64::from(self.height))).unwrap_or(self.height)
-    }
-}
-
-impl fmt::Debug for FrameBuffer {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("FrameBuffer")
-            .field("width", &self.width)
-            .field("height", &self.height)
-            .finish_non_exhaustive()
     }
 }

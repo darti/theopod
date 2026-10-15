@@ -1,20 +1,22 @@
 //! [`QspiBus`] implementation for an esp-hal SPI master with DMA.
 //!
-//! - [`EspQspi`]: async half-duplex SPI master with a software chip select.
-//! - [`EspQspiError`]: SPI, chip-select, payload or DMA underrun failure.
+//! - [`EspQspi`]: async half-duplex SPI master with a software chip select,
+//!   owning the PSRAM framebuffer.
+//! - [`EspQspiError`]: SPI, chip-select, framebuffer range or DMA underrun
+//!   failure.
 //! - [`MAX_TRANSFER_LEN`]: longest payload of one transfer.
 //!
-//! Framebuffer payloads are read in place from PSRAM through a
-//! [`PsramTxBuf`] (64-byte bursts, burst-aligned descriptors); they must be
-//! burst-aligned, and the hardware underrun flag is checked after each.
-//! Other payloads go through esp-hal's slice API: the SPI FIFO below 64
-//! bytes, else DMA in place from internal RAM or PSRAM (16-byte bursts, too
-//! slow for long PSRAM payloads), or a copy for flash. See `docs/adr/0004`.
+//! Framebuffer transfers (`write_frame`) are read in place from PSRAM
+//! through a [`PsramTxBuf`] (64-byte bursts, burst-aligned descriptors);
+//! they must start burst-aligned, and the hardware underrun flag is checked
+//! after each. Other payloads (`write`, register writes) go through
+//! esp-hal's slice API: the SPI FIFO below 64 bytes, else DMA in place from
+//! internal RAM, or a copy for flash. See `docs/adr/0004`.
 //!
 //! Writes are cancel-safe: dropping one mid-transfer stops the transfer,
-//! waits for the SPI to go idle, then releases chip select; for a
-//! framebuffer payload it also keeps the SPI master.
-//! Leaking one (`mem::forget`) is not: see [`EspQspi::new`].
+//! waits for the SPI to go idle, then releases chip select; a framebuffer
+//! transfer also keeps the SPI master. Leaking one (`mem::forget`) loses
+//! the SPI master ([`EspQspiError::Unavailable`]).
 
 use core::{fmt, ops::Range};
 
@@ -37,12 +39,18 @@ pub enum EspQspiError<P> {
     Spi(SpiError),
     /// The chip-select pin failed.
     ChipSelect(P),
-    /// A framebuffer payload exceeds [`MAX_TRANSFER_LEN`]; nothing was sent.
+    /// A framebuffer range is empty or extends past the frame; nothing was
+    /// sent.
+    OutOfFrame {
+        /// Requested bytes.
+        bytes: Range<usize>,
+    },
+    /// A framebuffer range exceeds [`MAX_TRANSFER_LEN`]; nothing was sent.
     TooLong {
         /// Payload length in bytes.
         len: usize,
     },
-    /// A framebuffer payload does not start burst-aligned; nothing was sent.
+    /// A framebuffer range does not start burst-aligned; nothing was sent.
     Misaligned {
         /// Payload offset in the framebuffer, in bytes.
         offset: usize,
@@ -59,13 +67,14 @@ impl<P: fmt::Debug> fmt::Display for EspQspiError<P> {
         match self {
             Self::Spi(error) => write!(f, "spi transfer failed: {error:?}"),
             Self::ChipSelect(error) => write!(f, "chip select failed: {error:?}"),
+            Self::OutOfFrame { bytes } => write!(f, "bytes {bytes:?} outside the framebuffer"),
             Self::TooLong { len } => write!(
                 f,
-                "framebuffer payload of {len} bytes exceeds {MAX_TRANSFER_LEN}"
+                "framebuffer range of {len} bytes exceeds {MAX_TRANSFER_LEN}"
             ),
             Self::Misaligned { offset } => write!(
                 f,
-                "framebuffer payload at offset {offset} is not {}-byte aligned",
+                "framebuffer range at offset {offset} is not {}-byte aligned",
                 psram_tx_buf::BURST
             ),
             Self::Unavailable => write!(f, "spi master lost to a leaked transfer"),
@@ -89,6 +98,7 @@ impl<P> Transient for EspQspiError<P> {
                 | SpiError::FifoSizeExeeded
                 | SpiError::Unsupported,
             )
+            | Self::OutOfFrame { .. }
             | Self::TooLong { .. }
             | Self::Misaligned { .. }
             | Self::Unavailable => false,
@@ -102,6 +112,7 @@ impl<P> Transient for EspQspiError<P> {
 impl<P> From<FramePayloadError> for EspQspiError<P> {
     fn from(error: FramePayloadError) -> Self {
         match error {
+            FramePayloadError::OutOfFrame { bytes } => Self::OutOfFrame { bytes },
             FramePayloadError::TooLong { len } => Self::TooLong { len },
             FramePayloadError::Misaligned { offset } => Self::Misaligned { offset },
         }
@@ -110,6 +121,14 @@ impl<P> From<FramePayloadError> for EspQspiError<P> {
 
 /// SPI master and framebuffer descriptor chain, while no transfer runs.
 type Idle<'d> = (SpiDma<'d, Async>, PsramTxBuf);
+
+/// What a transfer sends.
+enum Source<'a> {
+    /// Bytes outside the framebuffer, through esp-hal's slice API.
+    Slice(&'a [u8]),
+    /// Framebuffer bytes, read in place through the [`PsramTxBuf`].
+    Frame(Range<usize>),
+}
 
 /// esp-hal 1.2.2's private SPI `MAX_DMA_SIZE` (`src/spi/master/dma.rs`):
 /// re-check it on every esp-hal upgrade (ADR-0003).
@@ -128,61 +147,103 @@ pub const MAX_TRANSFER_LEN: usize =
 const _: () = assert!(MAX_TRANSFER_LEN == 32_704);
 
 /// Async esp-hal DMA SPI master in half-duplex mode with a software chip
-/// select.
-#[derive(Debug)]
+/// select, owning the framebuffer it sends in place.
 pub struct EspQspi<'d, CS> {
     /// SPI master and framebuffer descriptor chain; `None` while a
     /// framebuffer transfer runs, and forever after one is leaked.
     bus: Option<Idle<'d>>,
     cs: CS,
-    /// Addresses of the framebuffer, sent through the [`PsramTxBuf`].
-    frame: Range<usize>,
+    /// The framebuffer, in PSRAM and burst-aligned; never freed.
+    frame: &'static mut [u8],
+}
+
+impl<CS> fmt::Debug for EspQspi<'_, CS> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("EspQspi")
+            .field("available", &self.bus.is_some())
+            .field("frame_len", &self.frame.len())
+            .finish_non_exhaustive()
+    }
 }
 
 impl<'d, CS: OutputPin> EspQspi<'d, CS> {
     /// Wraps the SPI2 DMA master, whose SIO0..3 lines are already routed.
     ///
-    /// Payloads inside `frame` (a burst-aligned PSRAM framebuffer) are read
-    /// in place through `psram_tx`. `spi` must be SPI2: the underrun check
-    /// reads SPI2's registers.
+    /// `frame` becomes the bus's framebuffer: one PSRAM allocation (the
+    /// descriptors write back the PSRAM cache and claim PSRAM accesses),
+    /// burst-aligned, read in place through `psram_tx`. Owning it for good
+    /// is what keeps a leaked transfer future (`mem::forget`) sound: the DMA
+    /// then keeps reading live memory, at worst showing pixels the renderer
+    /// changed meanwhile. `spi` must be SPI2: the underrun check reads
+    /// SPI2's registers.
     ///
     /// # Panics
     ///
     /// Panics if `psram_tx` cannot chain [`MAX_TRANSFER_LEN`] bytes or if
     /// `frame` is not burst-aligned.
-    ///
-    /// # Safety
-    ///
-    /// `frame` must be one allocation in PSRAM (the descriptors write back
-    /// the PSRAM cache and claim PSRAM accesses) that stays allocated for
-    /// the rest of the program (leaked). It is a raw pointer because the
-    /// renderer holds the framebuffer as `&'static mut` meanwhile: only its
-    /// address range is kept, never dereferenced. Leaking a write future (`mem::forget`) skips the guard that stops the
-    /// DMA, which then keeps reading the framebuffer after the write's
-    /// borrow ended; this keeps that read inside live memory. The CPU may
-    /// still change the pixels meanwhile: the panel then shows wrong pixels,
-    /// as with esp-hal's own in-place DMA, and the bus is lost
-    /// ([`EspQspiError::Unavailable`]).
-    pub unsafe fn new(
+    pub fn new(
         spi: SpiDma<'d, Async>,
         cs: CS,
         psram_tx: PsramTxBuf,
-        frame: *const [u8],
+        frame: &'static mut [u8],
     ) -> Self {
         assert!(
             psram_tx.capacity() >= MAX_TRANSFER_LEN,
             "PsramTxBuf shorter than MAX_TRANSFER_LEN"
         );
-        let start = frame.cast::<u8>() as usize;
         assert!(
-            start.is_multiple_of(psram_tx_buf::BURST),
+            (frame.as_ptr() as usize).is_multiple_of(psram_tx_buf::BURST),
             "framebuffer not burst-aligned"
         );
         Self {
             bus: Some((spi, psram_tx)),
             cs,
-            frame: start..start + frame.len(),
+            frame,
         }
+    }
+
+    /// Runs one transfer of `source` with chip select asserted.
+    ///
+    /// Cancel-safe: see the module docs.
+    async fn transfer(
+        &mut self,
+        opcode: u8,
+        address: u32,
+        lanes: Lanes,
+        source: Source<'_>,
+    ) -> Result<(), EspQspiError<CS::Error>> {
+        let mode = match lanes {
+            Lanes::Single => DataMode::Single,
+            Lanes::Quad => DataMode::Quad,
+        };
+        let command = Command::_8Bit(u16::from(opcode), DataMode::Single);
+        let address = Address::_24Bit(address, DataMode::Single);
+        let in_frame = matches!(source, Source::Frame(_));
+        if in_frame {
+            // esp-hal also clears it when the transfer starts; this keeps the
+            // check correct without relying on that.
+            underrun::clear();
+        }
+        let selected = ChipSelect::select(&mut self.cs).map_err(EspQspiError::ChipSelect)?;
+        // Dropped in reverse order on cancellation: the transfer future
+        // (stops the DMA), then `_idle` (waits for the SPI to finish its
+        // last byte), then `selected` (raises chip select).
+        let _idle = IdleOnDrop;
+        let transferred = match source {
+            Source::Slice(data) => Self::send(&mut self.bus, mode, command, address, data).await,
+            Source::Frame(bytes) => {
+                let data = &self.frame[bytes];
+                Self::send_frame(&mut self.bus, mode, command, address, data).await
+            }
+        };
+        // Always release chip select. Errors are reported in this order:
+        // SPI, then underrun, then chip select.
+        let released = selected.release();
+        transferred?;
+        if in_frame && underrun::happened() {
+            return Err(EspQspiError::Underrun);
+        }
+        released.map_err(EspQspiError::ChipSelect)
     }
 
     /// Sends `source` with esp-hal's slice API (FIFO, DMA in place, or copy).
@@ -218,8 +279,8 @@ impl<'d, CS: OutputPin> EspQspi<'d, CS> {
         // SAFETY: `source` is borrowed for this whole call, and the transfer
         // below is owned by `InFlight`, which stops the DMA before this call
         // returns or its future is dropped. Leaking the future skips that:
-        // `EspQspi::new`'s contract keeps the frame, which holds `source`,
-        // allocated, so the DMA then only reads stale pixels.
+        // `source` lies in the `'static` frame the bus owns, so the DMA then
+        // only reads live memory, at worst pixels changed meanwhile.
         unsafe { buffer.set_source(source) };
         match master.half_duplex_write_buffer(mode, command, address, 0, source.len(), buffer) {
             Ok(transfer) => {
@@ -281,7 +342,7 @@ impl<CS: OutputPin> QspiBus for EspQspi<'_, CS> {
     const MAX_TRANSFER_LEN: usize = MAX_TRANSFER_LEN;
 
     /// Cancel-safe: dropping the future mid-transfer releases chip select
-    /// and keeps the SPI master; the panel then holds a partial transfer.
+    /// once the SPI is idle; the panel then holds a partial transfer.
     async fn write(
         &mut self,
         opcode: u8,
@@ -289,42 +350,35 @@ impl<CS: OutputPin> QspiBus for EspQspi<'_, CS> {
         lanes: Lanes,
         data: &[u8],
     ) -> Result<(), Self::Error> {
-        let mode = match lanes {
-            Lanes::Single => DataMode::Single,
-            Lanes::Quad => DataMode::Quad,
-        };
-        let command = Command::_8Bit(u16::from(opcode), DataMode::Single);
-        let address = Address::_24Bit(address, DataMode::Single);
-        let span = data.as_ptr_range();
-        let frame_payload = frame_payload(
-            self.frame.clone(),
-            span.start as usize..span.end as usize,
+        self.transfer(opcode, address, lanes, Source::Slice(data))
+            .await
+    }
+
+    fn frame(&self) -> &[u8] {
+        &*self.frame
+    }
+
+    fn frame_mut(&mut self) -> &mut [u8] {
+        &mut *self.frame
+    }
+
+    /// Cancel-safe, keeping the SPI master; the panel then holds a partial
+    /// transfer.
+    async fn write_frame(
+        &mut self,
+        opcode: u8,
+        address: u32,
+        lanes: Lanes,
+        bytes: Range<usize>,
+    ) -> Result<(), Self::Error> {
+        frame_payload(
+            self.frame.len(),
+            bytes.clone(),
             MAX_TRANSFER_LEN,
             psram_tx_buf::BURST,
         )?;
-        if frame_payload {
-            // esp-hal also clears it when the transfer starts; this keeps the
-            // check correct without relying on that.
-            underrun::clear();
-        }
-        let selected = ChipSelect::select(&mut self.cs).map_err(EspQspiError::ChipSelect)?;
-        // Dropped in reverse order on cancellation: the transfer future
-        // (stops the DMA), then `_idle` (waits for the SPI to finish its
-        // last byte), then `selected` (raises chip select).
-        let _idle = IdleOnDrop;
-        let transferred = if frame_payload {
-            Self::send_frame(&mut self.bus, mode, command, address, data).await
-        } else {
-            Self::send(&mut self.bus, mode, command, address, data).await
-        };
-        // Always release chip select. Errors are reported in this order:
-        // SPI, then underrun, then chip select.
-        let released = selected.release();
-        transferred?;
-        if frame_payload && underrun::happened() {
-            return Err(EspQspiError::Underrun);
-        }
-        released.map_err(EspQspiError::ChipSelect)
+        self.transfer(opcode, address, lanes, Source::Frame(bytes))
+            .await
     }
 }
 

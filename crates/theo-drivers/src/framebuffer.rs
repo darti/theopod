@@ -1,6 +1,6 @@
 //! Sending dirty rows of a full-panel framebuffer to a [`Panel`].
 //!
-//! - [`flush_rows`]: sends a band of rows of a big-endian RGB565 frame.
+//! - [`flush_rows`]: sends a band of rows of a panel's framebuffer.
 //! - [`flush_bands`]: sends every band of a [`DirtyRows`].
 //! - [`FlushError`]: why a flush was refused or failed.
 //!
@@ -56,11 +56,11 @@ impl<E: Transient> Transient for FlushError<E> {
     }
 }
 
-/// Sends `rows` of `frame`, a full panel of big-endian RGB565 pixels.
+/// Sends `rows` of the panel's framebuffer.
 ///
 /// Empty `rows` send nothing. Otherwise the rows are widened to even
 /// boundaries (clamped to the panel) and sent full width as one area, with a
-/// single `write_pixels` call starting at an even row.
+/// single `write_frame` call starting at an even row.
 ///
 /// # Errors
 ///
@@ -75,17 +75,14 @@ impl<E: Transient> Transient for FlushError<E> {
 /// again.
 pub async fn flush_rows<P: Panel>(
     panel: &mut P,
-    frame: &[u8],
     rows: Range<u16>,
 ) -> Result<(), FlushError<P::Error>> {
     let (width, height) = panel.size();
     let row_bytes = usize::from(width) * 2;
     let expected = row_bytes * usize::from(height);
-    if frame.len() != expected {
-        return Err(FlushError::FrameSizeMismatch {
-            expected,
-            actual: frame.len(),
-        });
+    let actual = panel.frame().len();
+    if actual != expected {
+        return Err(FlushError::FrameSizeMismatch { expected, actual });
     }
     if rows.start > rows.end || rows.end > height {
         return Err(FlushError::RowsOutOfRange { rows });
@@ -99,8 +96,8 @@ pub async fn flush_rows<P: Panel>(
         .begin_area(0..width, start..end)
         .await
         .map_err(FlushError::Panel)?;
-    let band = &frame[usize::from(start) * row_bytes..usize::from(end) * row_bytes];
-    panel.write_pixels(band).await.map_err(FlushError::Panel)
+    let band = usize::from(start) * row_bytes..usize::from(end) * row_bytes;
+    panel.write_frame(band).await.map_err(FlushError::Panel)
 }
 
 /// Sends each band of `rows` with [`flush_rows`], in order.
@@ -114,11 +111,10 @@ pub async fn flush_rows<P: Panel>(
 /// As [`flush_rows`]: send the rows again after a cancellation.
 pub async fn flush_bands<P: Panel, const N: usize>(
     panel: &mut P,
-    frame: &[u8],
     rows: &DirtyRows<N>,
 ) -> Result<(), FlushError<P::Error>> {
     for band in rows.bands() {
-        flush_rows(panel, frame, band.clone()).await?;
+        flush_rows(panel, band.clone()).await?;
     }
     Ok(())
 }

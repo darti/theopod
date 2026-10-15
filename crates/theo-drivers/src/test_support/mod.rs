@@ -1,7 +1,8 @@
 //! Host-side fakes for driver tests.
 //!
 //! - [`RecordingBus`]: [`QspiBus`] that records every transfer.
-//! - [`AddressBus`]: [`QspiBus`] that records where pixel payloads start.
+//! - [`AddressBus`]: [`QspiBus`] that records where frame transfers start.
+//! - [`counting_frame`]: a frame whose bytes count up, wrapping.
 //! - [`RecordingPanel`]: [`Panel`] that records every call.
 //! - [`FakeTca9554`]: async I2C bus modelling a TCA9554's registers; can
 //!   fail reads or writes and suspend once per transaction.
@@ -82,15 +83,58 @@ impl Transient for BusFault {
 /// or stay pending once, to cancel a transfer mid-way.
 ///
 /// It accepts at most 16 bytes per transfer and panics on longer payloads,
-/// so every test checks that drivers respect `MAX_TRANSFER_LEN`.
-#[derive(Debug, Default)]
+/// so every test checks that drivers respect `MAX_TRANSFER_LEN`. Its frame
+/// is [`counting_frame`]`(64)` unless set with [`RecordingBus::with_frame`].
+#[derive(Debug)]
 pub struct RecordingBus {
     pub transfers: Vec<Transfer>,
+    pub frame: Vec<u8>,
     fail_at: Option<usize>,
     pend_at: Option<usize>,
 }
 
+impl Default for RecordingBus {
+    fn default() -> Self {
+        Self {
+            transfers: Vec::new(),
+            frame: counting_frame(64),
+            fail_at: None,
+            pend_at: None,
+        }
+    }
+}
+
+/// `len` bytes counting up from 0, wrapping at 256.
+pub fn counting_frame(len: usize) -> Vec<u8> {
+    (0..len).map(|byte| byte as u8).collect()
+}
+
 impl RecordingBus {
+    /// Replaces the frame.
+    pub fn with_frame(mut self, frame: Vec<u8>) -> Self {
+        self.frame = frame;
+        self
+    }
+
+    /// Records a transfer, failing or suspending it as configured.
+    async fn record(&mut self, transfer: Transfer) -> Result<(), BusFault> {
+        assert!(
+            transfer.data.len() <= Self::MAX_TRANSFER_LEN,
+            "{} bytes exceed MAX_TRANSFER_LEN",
+            transfer.data.len()
+        );
+        if self.fail_at == Some(self.transfers.len()) {
+            self.fail_at = None;
+            return Err(BusFault);
+        }
+        if self.pend_at == Some(self.transfers.len()) {
+            self.pend_at = None;
+            YieldOnce(false).await;
+        }
+        self.transfers.push(transfer);
+        Ok(())
+    }
+
     /// Creates a bus whose transfer attempt when `fail_at` transfers are
     /// recorded fails once; later attempts succeed.
     pub fn failing(fail_at: usize) -> Self {
@@ -122,37 +166,60 @@ impl QspiBus for RecordingBus {
         lanes: Lanes,
         data: &[u8],
     ) -> Result<(), Self::Error> {
-        assert!(
-            data.len() <= Self::MAX_TRANSFER_LEN,
-            "{} bytes exceed MAX_TRANSFER_LEN",
-            data.len()
-        );
-        if self.fail_at == Some(self.transfers.len()) {
-            self.fail_at = None;
-            return Err(BusFault);
-        }
-        if self.pend_at == Some(self.transfers.len()) {
-            self.pend_at = None;
-            YieldOnce(false).await;
-        }
-        self.transfers.push(Transfer {
+        self.record(Transfer {
             opcode,
             address,
             lanes,
             data: data.to_vec(),
-        });
-        Ok(())
+        })
+        .await
+    }
+
+    fn frame(&self) -> &[u8] {
+        &self.frame
+    }
+
+    fn frame_mut(&mut self) -> &mut [u8] {
+        &mut self.frame
+    }
+
+    async fn write_frame(
+        &mut self,
+        opcode: u8,
+        address: u32,
+        lanes: Lanes,
+        bytes: Range<usize>,
+    ) -> Result<(), Self::Error> {
+        let data = self.frame[bytes].to_vec();
+        self.record(Transfer {
+            opcode,
+            address,
+            lanes,
+            data,
+        })
+        .await
     }
 }
 
-/// QSPI bus that records the address of every pixel payload.
+/// QSPI bus that records where every frame transfer starts.
 ///
 /// `MAX` sets `MAX_TRANSFER_LEN`, so tests can use a real transfer size
 /// without copying the payloads.
 #[derive(Debug, Default)]
 pub struct AddressBus<const MAX: usize> {
-    /// Start address and length of each pixel payload, in order.
+    /// Start offset in the frame and length of each frame transfer, in order.
     pub pixels: Vec<(usize, usize)>,
+    pub frame: Vec<u8>,
+}
+
+impl<const MAX: usize> AddressBus<MAX> {
+    /// Creates a bus with a zeroed frame of `len` bytes.
+    pub fn with_frame_len(len: usize) -> Self {
+        Self {
+            pixels: Vec::new(),
+            frame: vec![0; len],
+        }
+    }
 }
 
 impl<const MAX: usize> QspiBus for AddressBus<MAX> {
@@ -172,9 +239,33 @@ impl<const MAX: usize> QspiBus for AddressBus<MAX> {
             "{} bytes exceed MAX_TRANSFER_LEN",
             data.len()
         );
-        if opcode == OPCODE_WRITE_PIXELS {
-            self.pixels.push((data.as_ptr() as usize, data.len()));
-        }
+        assert_ne!(
+            opcode, OPCODE_WRITE_PIXELS,
+            "pixels must come from the frame"
+        );
+        Ok(())
+    }
+
+    fn frame(&self) -> &[u8] {
+        &self.frame
+    }
+
+    fn frame_mut(&mut self) -> &mut [u8] {
+        &mut self.frame
+    }
+
+    async fn write_frame(
+        &mut self,
+        _opcode: u8,
+        _address: u32,
+        _lanes: Lanes,
+        bytes: Range<usize>,
+    ) -> Result<(), Self::Error> {
+        assert!(
+            bytes.len() <= MAX && bytes.end <= self.frame.len(),
+            "bad frame transfer {bytes:?}"
+        );
+        self.pixels.push((bytes.start, bytes.len()));
         Ok(())
     }
 }
@@ -187,9 +278,13 @@ pub enum PanelCall {
 }
 
 /// Panel that records calls and fails every call from a given index on.
+///
+/// Its frame is a full panel of [`counting_frame`] unless set with
+/// [`RecordingPanel::with_frame`].
 #[derive(Debug)]
 pub struct RecordingPanel {
     pub calls: Vec<PanelCall>,
+    pub frame: Vec<u8>,
     /// Calls made, failed ones included.
     pub attempts: usize,
     width: u16,
@@ -202,11 +297,18 @@ impl RecordingPanel {
     pub fn new(width: u16, height: u16) -> Self {
         Self {
             calls: Vec::new(),
+            frame: counting_frame(usize::from(width) * usize::from(height) * 2),
             attempts: 0,
             width,
             height,
             fail_at: None,
         }
+    }
+
+    /// Replaces the frame.
+    pub fn with_frame(mut self, frame: Vec<u8>) -> Self {
+        self.frame = frame;
+        self
     }
 
     /// Makes every call fail once `fail_at` calls are recorded.
@@ -236,8 +338,17 @@ impl Panel for RecordingPanel {
         self.record(PanelCall::Begin { x, y })
     }
 
-    async fn write_pixels(&mut self, pixels: &[u8]) -> Result<(), Self::Error> {
-        self.record(PanelCall::Pixels(pixels.to_vec()))
+    fn frame(&self) -> &[u8] {
+        &self.frame
+    }
+
+    fn frame_mut(&mut self) -> &mut [u8] {
+        &mut self.frame
+    }
+
+    async fn write_frame(&mut self, bytes: Range<usize>) -> Result<(), Self::Error> {
+        let pixels = self.frame[bytes].to_vec();
+        self.record(PanelCall::Pixels(pixels))
     }
 }
 

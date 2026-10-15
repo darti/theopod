@@ -52,3 +52,14 @@ no current device needs.
 - Emulate quad writes with `embedded-hal` `SpiBus`: rejected, the data
   phase lane count cannot be expressed.
 - Wait for a standard Quad-SPI trait: rejected, none exists today.
+
+## Update (t-46): the bus owns the framebuffer
+
+`QspiBus` also holds the panel's framebuffer: `frame()`, `frame_mut()`,
+and `write_frame(opcode, address, lanes, bytes: Range<usize>)`, which sends
+a byte range of it. A DMA implementation reads the framebuffer in place
+(ADR-0004), so it must know which bytes are the frame: an explicit range
+replaces the address-range test `EspQspi` used on `write`'s slices, and its
+`unsafe` constructor. `Panel` follows (`frame`, `frame_mut`, `write_frame`
+instead of `write_pixels`), and `flush_rows`/`flush_bands` no longer take
+the frame as an argument.

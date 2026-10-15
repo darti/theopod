@@ -1,8 +1,9 @@
 //! HAL-independent CO5300 AMOLED controller driver.
 //!
-//! - [`Co5300`]: initializes the panel and streams RGB565 pixels over any
-//!   [`QspiBus`], with delays from any `embedded-hal-async` [`DelayNs`].
-//!   Pixel payloads longer than [`QspiBus::MAX_TRANSFER_LEN`] are split.
+//! - [`Co5300`]: initializes the panel and streams the bus's RGB565
+//!   framebuffer over any [`QspiBus`], with delays from any
+//!   `embedded-hal-async` [`DelayNs`]. Framebuffer ranges longer than
+//!   [`QspiBus::MAX_TRANSFER_LEN`] are split.
 //! - [`PanelGeometry`]: visible size and RAM offset of the attached panel.
 //! - [`Error`]: bus failures and rejected geometry, areas or pixel counts.
 //!
@@ -261,10 +262,18 @@ impl<B: QspiBus> Panel for Co5300<B> {
         Ok(())
     }
 
-    /// Sends `pixels` in transfers of at most [`QspiBus::MAX_TRANSFER_LEN`]
-    /// bytes.
+    fn frame(&self) -> &[u8] {
+        self.bus.frame()
+    }
+
+    fn frame_mut(&mut self) -> &mut [u8] {
+        self.bus.frame_mut()
+    }
+
+    /// Sends the framebuffer `bytes` in transfers of at most
+    /// [`QspiBus::MAX_TRANSFER_LEN`] bytes.
     ///
-    /// Transfers are taken in order from the start of `pixels`, and all but
+    /// Transfers are taken in order from the start of `bytes`, and all but
     /// the last are exactly `MAX_TRANSFER_LEN` rounded down to whole pixels:
     /// buses may rely on that fixed stride.
     ///
@@ -273,7 +282,7 @@ impl<B: QspiBus> Panel for Co5300<B> {
     /// once every byte is out): the area's progress is unknown, so later
     /// writes fail with [`Error::PixelOverflow`] until
     /// [`Panel::begin_area`] opens a new one.
-    async fn write_pixels(&mut self, pixels: &[u8]) -> Result<(), Self::Error> {
+    async fn write_frame(&mut self, bytes: Range<usize>) -> Result<(), Self::Error> {
         // Whole pixels per transfer.
         let chunk_len = const {
             assert!(
@@ -282,22 +291,25 @@ impl<B: QspiBus> Panel for Co5300<B> {
             );
             B::MAX_TRANSFER_LEN & !1
         };
-        if pixels.len() > self.remaining || !pixels.len().is_multiple_of(2) {
+        if bytes.len() > self.remaining || !bytes.len().is_multiple_of(2) {
             return Err(Error::PixelOverflow {
                 remaining: self.remaining,
-                submitted: pixels.len(),
+                submitted: bytes.len(),
             });
         }
-        for chunk in pixels.chunks(chunk_len) {
+        for start in bytes.clone().step_by(chunk_len) {
+            let chunk = start..(start + chunk_len).min(bytes.end);
             // Closed while the transfer runs, and left so unless it succeeds.
             let remaining = core::mem::take(&mut self.remaining);
-            self.transfer(
-                OPCODE_WRITE_PIXELS,
-                CMD_MEMORY_WRITE_CONTINUE,
-                Lanes::Quad,
-                chunk,
-            )
-            .await?;
+            self.bus
+                .write_frame(
+                    OPCODE_WRITE_PIXELS,
+                    u32::from(CMD_MEMORY_WRITE_CONTINUE) << 8,
+                    Lanes::Quad,
+                    chunk.clone(),
+                )
+                .await
+                .map_err(Error::Bus)?;
             self.remaining = remaining - chunk.len();
         }
         Ok(())

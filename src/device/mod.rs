@@ -2,8 +2,8 @@
 //!
 //! - [`entry`]: firmware entry point attribute.
 //! - [`Board`]: chip runtime and board peripherals, ready to use.
-//! - [`Display`]: concrete display type of this board; implements
-//!   [`theo_drivers::Panel`].
+//! - [`Display`]: concrete display type of this board, owning the PSRAM
+//!   framebuffer; implements [`theo_drivers::Panel`].
 //! - [`Button`]: the BOOT push button, debounced.
 //! - [`Touch`]: the CST820 touch controller, with the expander that resets
 //!   it.
@@ -220,10 +220,6 @@ pub struct Board {
     pub touch: Touch,
     /// Accelerometer, started; `None` if no QMI8658 answered (logged).
     pub imu: Option<Imu>,
-    /// Zeroed framebuffer in PSRAM: one pixel per display pixel, row-major,
-    /// sized from [`Display`]'s geometry. Each `u16` slot holds big-endian
-    /// RGB565 bytes (the panel's order), not a native-endian value.
-    pub frame: &'static mut [u16],
 }
 
 impl fmt::Debug for Board {
@@ -233,7 +229,6 @@ impl fmt::Debug for Board {
             .field("button", &self.button)
             .field("touch", &self.touch)
             .field("imu", &self.imu.is_some())
-            .field("frame_pixels", &self.frame.len())
             .finish()
     }
 }
@@ -358,19 +353,13 @@ impl Board {
         .with_sio3(peripherals.GPIO7)
         .with_dma(peripherals.DMA_CH0)
         .into_async();
-        let frame_bytes: &[u8] = bytemuck::cast_slice(frame);
-        // SAFETY: `frame` is leaked above, so it stays allocated for good.
-        let bus = unsafe {
-            EspQspi::new(
-                spi,
-                cs,
-                PsramTxBuf::new(descriptors),
-                core::ptr::from_ref(frame_bytes),
-            )
-        };
+        // The display owns the framebuffer from here on: the renderer
+        // borrows it through `Panel::frame_mut` (t-46).
+        let frame: &'static mut [u8] = bytemuck::cast_slice_mut(frame);
+        let bus = EspQspi::new(spi, cs, PsramTxBuf::new(descriptors), frame);
         let mut display = Co5300::new(bus, DISPLAY_GEOMETRY).unwrap();
         display.init(&mut Delay).await.unwrap();
-        check_display(&mut display, frame).await;
+        check_display(&mut display).await;
 
         let boot = Input::new(
             peripherals.GPIO0,
@@ -384,14 +373,13 @@ impl Board {
             button,
             touch,
             imu,
-            frame,
         }
     }
 }
 
 /// Clears the panel and checks a full-length transfer goes through.
 ///
-/// Sends the zeroed `frame`, whose first transfer is
+/// Sends the display's zeroed framebuffer, whose first transfer is
 /// [`esp_qspi::MAX_TRANSFER_LEN`] long.
 /// `MAX_TRANSFER_LEN` mirrors a private esp-hal limit (ADR-0003): if an
 /// upgrade lowers it, every framebuffer flush would fail for good, so this
@@ -401,14 +389,14 @@ impl Board {
 ///
 /// Panics on an error that cannot clear on retry; transient ones are
 /// logged, and the first frame resends every row anyway.
-async fn check_display(display: &mut Display, frame: &[u16]) {
+async fn check_display(display: &mut Display) {
     const _: () = assert!(
         DISPLAY_GEOMETRY.width as usize * DISPLAY_GEOMETRY.height as usize * size_of::<u16>()
             >= esp_qspi::MAX_TRANSFER_LEN,
         "a full frame must include a MAX_TRANSFER_LEN transfer"
     );
     let rows = 0..DISPLAY_GEOMETRY.height;
-    if let Err(error) = flush_rows(display, bytemuck::cast_slice(frame), rows).await {
+    if let Err(error) = flush_rows(display, rows).await {
         if error.is_transient() {
             log::warn!("display check failed, will retry: {error}");
         } else {

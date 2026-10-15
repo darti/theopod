@@ -49,7 +49,7 @@ use theo_drivers::{
 
 use crate::{
     device::Board,
-    slint_backend::{FrameBuffer, FrameRows, TheoPlatform},
+    slint_backend::{FrameRenderer, FrameRows, TheoPlatform},
 };
 
 slint::include_modules!();
@@ -111,7 +111,6 @@ async fn main(spawner: Spawner) {
         button,
         touch,
         imu,
-        frame,
     } = Board::init().await;
     spawner.spawn(watch_button(button).unwrap());
     spawner.spawn(watch_touch(touch).unwrap());
@@ -123,7 +122,7 @@ async fn main(spawner: Spawner) {
         width: size.0,
         height: size.1,
     };
-    let mut frame = FrameBuffer::new(frame, size);
+    let frame = FrameRenderer::new(size);
 
     // The framebuffer persists, so Slint only redraws what changed.
     let window = MinimalSoftwareWindow::new(RepaintBufferType::ReusedBuffer);
@@ -163,7 +162,7 @@ async fn main(spawner: Spawner) {
                 renderer.set_repaint_buffer_type(RepaintBufferType::NewBuffer);
                 renderer.set_repaint_buffer_type(RepaintBufferType::ReusedBuffer);
             }
-            dirty = frame.render(renderer);
+            dirty = frame.render(renderer, display.frame_mut());
         });
         if drawn {
             rotate_pending = false;
@@ -185,7 +184,7 @@ async fn main(spawner: Spawner) {
         if !dirty.is_empty() {
             // Cancel-safe, but awaited outside `select`: a cancelled flush
             // would leave its rows stale on the panel (t-3).
-            match flush_bands(&mut display, frame.as_bytes(), &dirty).await {
+            match flush_bands(&mut display, &dirty).await {
                 Ok(()) => {
                     resend_at = None;
                     if let Some(failures) = flush_retry.succeeded() {
@@ -199,7 +198,7 @@ async fn main(spawner: Spawner) {
                     #[cfg(feature = "frame-dump")]
                     if dump_pending {
                         dump_pending = false;
-                        device::dump_frame(size, frame.as_bytes());
+                        device::dump_frame(size, display.frame());
                     }
                 }
                 Err(error) => {

@@ -6,6 +6,7 @@ use crate::{
     framebuffer::{FlushError, flush_bands, flush_rows},
     test_support::{
         AddressBus, BusFault, PanelCall, RecordingBus, RecordingPanel, Transfer, block_on,
+        counting_frame,
     },
 };
 
@@ -13,11 +14,10 @@ const WIDTH: u16 = 2;
 const HEIGHT: u16 = 6;
 const ROW_BYTES: usize = WIDTH as usize * 2;
 
-/// Frame whose bytes count up, so every row is distinguishable.
+/// The recording panel's frame: its bytes count up, so every row is
+/// distinguishable.
 fn frame() -> Vec<u8> {
-    (0..ROW_BYTES * usize::from(HEIGHT))
-        .map(|byte| u8::try_from(byte).unwrap())
-        .collect()
+    counting_frame(ROW_BYTES * usize::from(HEIGHT))
 }
 
 fn rows_bytes(frame: &[u8], rows: core::ops::Range<usize>) -> Vec<u8> {
@@ -29,7 +29,7 @@ fn flush_rows_full_frame_opens_whole_panel_and_sends_frame() {
     let mut panel = RecordingPanel::new(WIDTH, HEIGHT);
     let frame = frame();
 
-    let result = block_on(flush_rows(&mut panel, &frame, 0..HEIGHT));
+    let result = block_on(flush_rows(&mut panel, 0..HEIGHT));
 
     assert_that!(result).is_ok();
     assert_that!(panel.calls).is_equal_to(vec![
@@ -48,7 +48,7 @@ fn flush_rows_odd_bounds_widen_to_even_rows() {
     let mut panel = RecordingPanel::new(WIDTH, HEIGHT);
     let frame = frame();
 
-    block_on(flush_rows(&mut panel, &frame, 1..3)).unwrap();
+    block_on(flush_rows(&mut panel, 1..3)).unwrap();
 
     assert_that!(panel.calls).is_equal_to(vec![
         PanelCall::Begin {
@@ -64,7 +64,7 @@ fn flush_rows_odd_panel_height_clamps_widened_end() {
     let mut panel = RecordingPanel::new(WIDTH, 5);
     let frame = frame()[..ROW_BYTES * 5].to_vec();
 
-    block_on(flush_rows(&mut panel, &frame, 4..5)).unwrap();
+    block_on(flush_rows(&mut panel, 4..5)).unwrap();
 
     assert_that!(panel.calls).is_equal_to(vec![
         PanelCall::Begin {
@@ -84,10 +84,11 @@ fn flush_rows_odd_dirty_rows_into_co5300_opens_aligned_area() {
         height: HEIGHT,
         column_offset: 0,
     };
-    let mut panel = Co5300::new(RecordingBus::default(), geometry).unwrap();
     let frame = frame();
+    let mut panel =
+        Co5300::new(RecordingBus::default().with_frame(frame.clone()), geometry).unwrap();
 
-    let result = block_on(flush_rows(&mut panel, &frame, 1..3));
+    let result = block_on(flush_rows(&mut panel, 1..3));
 
     assert_that!(result).is_ok();
     assert_that!(panel.release().transfers).is_equal_to(vec![
@@ -102,7 +103,7 @@ fn flush_rows_odd_dirty_rows_into_co5300_opens_aligned_area() {
 fn flush_rows_begin_area_failure_returns_panel_error_without_pixels() {
     let mut panel = RecordingPanel::new(WIDTH, HEIGHT).failing(0);
 
-    let result = block_on(flush_rows(&mut panel, &frame(), 0..2));
+    let result = block_on(flush_rows(&mut panel, 0..2));
 
     assert_that!(result.err()).is_equal_to(Some(FlushError::Panel(BusFault)));
     assert_that!(panel.calls.is_empty()).is_true();
@@ -112,7 +113,7 @@ fn flush_rows_begin_area_failure_returns_panel_error_without_pixels() {
 fn flush_rows_empty_range_sends_nothing() {
     let mut panel = RecordingPanel::new(WIDTH, HEIGHT);
 
-    let result = block_on(flush_rows(&mut panel, &frame(), 3..3));
+    let result = block_on(flush_rows(&mut panel, 3..3));
 
     assert_that!(result).is_ok();
     assert_that!(panel.calls.is_empty()).is_true();
@@ -122,7 +123,7 @@ fn flush_rows_empty_range_sends_nothing() {
 fn flush_rows_beyond_panel_returns_rows_out_of_range() {
     let mut panel = RecordingPanel::new(WIDTH, HEIGHT);
 
-    let result = block_on(flush_rows(&mut panel, &frame(), 4..7));
+    let result = block_on(flush_rows(&mut panel, 4..7));
 
     assert_that!(result.err()).is_equal_to(Some(FlushError::RowsOutOfRange { rows: 4..7 }));
     assert_that!(panel.calls.is_empty()).is_true();
@@ -133,16 +134,16 @@ fn flush_rows_beyond_panel_returns_rows_out_of_range() {
 fn flush_rows_reversed_range_returns_rows_out_of_range() {
     let mut panel = RecordingPanel::new(WIDTH, HEIGHT);
 
-    let result = block_on(flush_rows(&mut panel, &frame(), 4..2));
+    let result = block_on(flush_rows(&mut panel, 4..2));
 
     assert_that!(result.err()).is_equal_to(Some(FlushError::RowsOutOfRange { rows: 4..2 }));
 }
 
 #[test]
 fn flush_rows_wrong_frame_size_returns_frame_size_mismatch() {
-    let mut panel = RecordingPanel::new(WIDTH, HEIGHT);
+    let mut panel = RecordingPanel::new(WIDTH, HEIGHT).with_frame(vec![0; 8]);
 
-    let result = block_on(flush_rows(&mut panel, &[0; 8], 0..2));
+    let result = block_on(flush_rows(&mut panel, 0..2));
 
     assert_that!(result.err()).is_equal_to(Some(FlushError::FrameSizeMismatch {
         expected: 24,
@@ -155,7 +156,7 @@ fn flush_rows_wrong_frame_size_returns_frame_size_mismatch() {
 fn flush_rows_panel_failure_returns_panel_error() {
     let mut panel = RecordingPanel::new(WIDTH, HEIGHT).failing(1);
 
-    let result = block_on(flush_rows(&mut panel, &frame(), 0..2));
+    let result = block_on(flush_rows(&mut panel, 0..2));
 
     assert_that!(result.err()).is_equal_to(Some(FlushError::Panel(BusFault)));
 }
@@ -185,20 +186,16 @@ const PANEL_TRANSFER: usize = 32_704;
 #[test]
 fn flush_rows_pixel_transfers_start_at_even_row_plus_whole_chunks() {
     let row_bytes = usize::from(PANEL.width) * 2;
-    let frame = vec![0u8; row_bytes * usize::from(PANEL.height)];
+    let frame_len = row_bytes * usize::from(PANEL.height);
     for rows in [0..448, 1..2, 43..47, 301..448, 447..448] {
-        let mut panel = Co5300::new(AddressBus::<PANEL_TRANSFER>::default(), PANEL).unwrap();
+        let bus = AddressBus::<PANEL_TRANSFER>::with_frame_len(frame_len);
+        let mut panel = Co5300::new(bus, PANEL).unwrap();
 
-        block_on(flush_rows(&mut panel, &frame, rows.clone())).unwrap();
+        block_on(flush_rows(&mut panel, rows.clone())).unwrap();
 
         let band_start = usize::from(rows.start & !1) * row_bytes;
         let band_end = usize::from(rows.end.next_multiple_of(2)) * row_bytes;
-        let transfers: Vec<(usize, usize)> = panel
-            .release()
-            .pixels
-            .iter()
-            .map(|&(address, len)| (address - frame.as_ptr() as usize, len))
-            .collect();
+        let transfers = panel.release().pixels;
         let expected: Vec<(usize, usize)> = (band_start..band_end)
             .step_by(PANEL_TRANSFER)
             .map(|offset| (offset, (band_end - offset).min(PANEL_TRANSFER)))
@@ -217,7 +214,7 @@ fn flush_bands_sends_each_band_as_its_own_area() {
     rows.add(4..6);
     rows.add(0..2);
 
-    let result = block_on(flush_bands(&mut panel, &frame, &rows));
+    let result = block_on(flush_bands(&mut panel, &rows));
 
     assert_that!(result).is_ok();
     assert_that!(panel.calls).is_equal_to(vec![
@@ -238,11 +235,7 @@ fn flush_bands_sends_each_band_as_its_own_area() {
 fn flush_bands_without_bands_sends_nothing() {
     let mut panel = RecordingPanel::new(WIDTH, HEIGHT);
 
-    let result = block_on(flush_bands(
-        &mut panel,
-        &frame(),
-        &DirtyRows::<3>::new(HEIGHT),
-    ));
+    let result = block_on(flush_bands(&mut panel, &DirtyRows::<3>::new(HEIGHT)));
 
     assert_that!(result).is_ok();
     assert_that!(panel.calls).is_empty();
@@ -252,13 +245,12 @@ fn flush_bands_without_bands_sends_nothing() {
 fn flush_bands_failure_stops_at_the_failing_band() {
     const ROWS: u16 = 10;
     let mut panel = RecordingPanel::new(WIDTH, ROWS).failing(2);
-    let frame = vec![0; ROW_BYTES * usize::from(ROWS)];
     let mut rows = DirtyRows::<3>::new(ROWS);
     rows.add(0..2);
     rows.add(4..6);
     rows.add(8..10);
 
-    let result = block_on(flush_bands(&mut panel, &frame, &rows));
+    let result = block_on(flush_bands(&mut panel, &rows));
 
     assert_that!(result).is_equal_to(Err(FlushError::Panel(BusFault)));
     // First band, then the failed begin of the second; the third is skipped.

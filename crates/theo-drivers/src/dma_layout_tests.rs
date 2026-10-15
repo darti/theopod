@@ -9,8 +9,8 @@ const CHUNK: usize = 4032;
 /// const assert in `src/device/esp_qspi.rs`.
 const MAX_TRANSFER_LEN: usize = 32_704;
 const BURST: usize = 64;
-/// A burst-aligned 1 KB frame.
-const FRAME: core::ops::Range<usize> = 0x1000..0x1400;
+/// A 1 KB frame.
+const FRAME_LEN: usize = 0x400;
 
 fn chunks(len: usize) -> Vec<DmaChunk> {
     descriptor_chunks(len, CHUNK).collect()
@@ -71,64 +71,6 @@ fn descriptor_chunks_zero_chunk_size_panics() {
 }
 
 #[test]
-fn frame_payload_whole_aligned_payload_is_sent_in_place() {
-    let payload = FRAME.start..FRAME.start + 256;
-
-    assert_that!(frame_payload(FRAME, payload, MAX_TRANSFER_LEN, BURST)).is_equal_to(Ok(true));
-}
-
-#[test]
-fn frame_payload_ending_at_the_frame_end_is_sent_in_place() {
-    let payload = FRAME.end - 128..FRAME.end;
-
-    assert_that!(frame_payload(FRAME, payload, MAX_TRANSFER_LEN, BURST)).is_equal_to(Ok(true));
-}
-
-#[test]
-fn frame_payload_misaligned_start_returns_its_offset() {
-    let payload = FRAME.start + 32..FRAME.start + 96;
-
-    assert_that!(frame_payload(FRAME, payload, MAX_TRANSFER_LEN, BURST))
-        .is_equal_to(Err(FramePayloadError::Misaligned { offset: 32 }));
-}
-
-#[test]
-fn frame_payload_longer_than_a_transfer_returns_too_long() {
-    let payload = FRAME.start..FRAME.start + 512;
-
-    assert_that!(frame_payload(FRAME, payload, 256, BURST))
-        .is_equal_to(Err(FramePayloadError::TooLong { len: 512 }));
-}
-
-#[test]
-fn frame_payload_at_the_transfer_limit_is_sent_in_place() {
-    let payload = FRAME.start..FRAME.start + 256;
-
-    assert_that!(frame_payload(FRAME, payload, 256, BURST)).is_equal_to(Ok(true));
-}
-
-#[test]
-fn frame_payload_outside_the_frame_is_not_a_frame_payload() {
-    let payload = 0x2000..0x2010;
-
-    assert_that!(frame_payload(FRAME, payload, MAX_TRANSFER_LEN, BURST)).is_equal_to(Ok(false));
-}
-
-#[test]
-fn frame_payload_straddling_the_frame_end_is_not_a_frame_payload() {
-    let payload = FRAME.end - 64..FRAME.end + 64;
-
-    assert_that!(frame_payload(FRAME, payload, MAX_TRANSFER_LEN, BURST)).is_equal_to(Ok(false));
-}
-
-#[test]
-fn frame_payload_empty_is_not_a_frame_payload() {
-    let payload = FRAME.start + 32..FRAME.start + 32;
-
-    assert_that!(frame_payload(FRAME, payload, MAX_TRANSFER_LEN, BURST)).is_equal_to(Ok(false));
-}
-
-#[test]
 fn descriptor_chunks_whole_descriptors_fill_exactly_that_many() {
     // `PsramTxBuf::prepare` indexes descriptors by chunk: a source of its
     // full capacity must need exactly all of them.
@@ -139,24 +81,62 @@ fn descriptor_chunks_whole_descriptors_fill_exactly_that_many() {
 }
 
 #[test]
-fn frame_payload_one_past_the_transfer_limit_returns_too_long() {
-    let payload = FRAME.start..FRAME.start + 257;
+fn frame_payload_aligned_range_is_sent_in_place() {
+    assert_that!(frame_payload(FRAME_LEN, 0..256, MAX_TRANSFER_LEN, BURST)).is_ok();
+}
 
-    assert_that!(frame_payload(FRAME, payload, 256, BURST))
+#[test]
+fn frame_payload_ending_at_the_frame_end_is_sent_in_place() {
+    let bytes = FRAME_LEN - 128..FRAME_LEN;
+
+    assert_that!(frame_payload(FRAME_LEN, bytes, MAX_TRANSFER_LEN, BURST)).is_ok();
+}
+
+#[test]
+fn frame_payload_at_the_transfer_limit_is_sent_in_place() {
+    assert_that!(frame_payload(FRAME_LEN, 0..256, 256, BURST)).is_ok();
+}
+
+#[test]
+fn frame_payload_misaligned_start_returns_its_offset() {
+    assert_that!(frame_payload(FRAME_LEN, 32..96, MAX_TRANSFER_LEN, BURST))
+        .is_equal_to(Err(FramePayloadError::Misaligned { offset: 32 }));
+}
+
+#[test]
+fn frame_payload_one_past_the_transfer_limit_returns_too_long() {
+    assert_that!(frame_payload(FRAME_LEN, 0..257, 256, BURST))
         .is_equal_to(Err(FramePayloadError::TooLong { len: 257 }));
 }
 
 #[test]
 fn frame_payload_too_long_and_misaligned_reports_too_long() {
-    let payload = FRAME.start + 32..FRAME.start + 512;
-
-    assert_that!(frame_payload(FRAME, payload, 256, BURST))
+    assert_that!(frame_payload(FRAME_LEN, 32..512, 256, BURST))
         .is_equal_to(Err(FramePayloadError::TooLong { len: 480 }));
 }
 
 #[test]
-fn frame_payload_straddling_the_frame_start_is_not_a_frame_payload() {
-    let payload = FRAME.start - 64..FRAME.start + 64;
+fn frame_payload_past_the_frame_end_returns_out_of_frame() {
+    let bytes = FRAME_LEN - 64..FRAME_LEN + 64;
 
-    assert_that!(frame_payload(FRAME, payload, MAX_TRANSFER_LEN, BURST)).is_equal_to(Ok(false));
+    assert_that!(frame_payload(
+        FRAME_LEN,
+        bytes.clone(),
+        MAX_TRANSFER_LEN,
+        BURST
+    ))
+    .is_equal_to(Err(FramePayloadError::OutOfFrame { bytes }));
+}
+
+#[test]
+fn frame_payload_empty_returns_out_of_frame() {
+    assert_that!(frame_payload(FRAME_LEN, 64..64, MAX_TRANSFER_LEN, BURST))
+        .is_equal_to(Err(FramePayloadError::OutOfFrame { bytes: 64..64 }));
+}
+
+#[test]
+#[expect(clippy::reversed_empty_ranges, reason = "the invalid input under test")]
+fn frame_payload_reversed_returns_out_of_frame() {
+    assert_that!(frame_payload(FRAME_LEN, 128..64, MAX_TRANSFER_LEN, BURST))
+        .is_equal_to(Err(FramePayloadError::OutOfFrame { bytes: 128..64 }));
 }

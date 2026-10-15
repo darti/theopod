@@ -215,7 +215,7 @@ fn begin_area_bus_failure_closes_previous_area() {
     block_on(panel.begin_area(0..2, 0..2)).unwrap();
 
     let reopened = block_on(panel.begin_area(0..2, 0..2));
-    let result = block_on(panel.write_pixels(&[0; 2]));
+    let result = block_on(panel.write_frame(0..2));
 
     assert_that!(reopened.err()).is_equal_to(Some(Error::Bus(BusFault)));
     assert_that!(result.err()).is_equal_to(Some(Error::PixelOverflow {
@@ -228,11 +228,12 @@ fn begin_area_bus_failure_closes_previous_area() {
 // memory-write-continue and quad-lane data; see the register test above for
 // the command/address phases.
 #[test]
-fn write_pixels_sends_quad_data_with_memory_write_continue() {
-    let mut panel = panel();
+fn write_frame_sends_quad_data_with_memory_write_continue() {
+    let bus = RecordingBus::default().with_frame(vec![0xF8, 0x00, 0x07, 0xE0]);
+    let mut panel = Co5300::new(bus, GEOMETRY).unwrap();
     block_on(panel.begin_area(0..2, 0..2)).unwrap();
 
-    block_on(panel.write_pixels(&[0xF8, 0x00, 0x07, 0xE0])).unwrap();
+    block_on(panel.write_frame(0..4)).unwrap();
 
     let transfers = panel.release().transfers;
     assert_that!(transfers.last().cloned())
@@ -240,14 +241,14 @@ fn write_pixels_sends_quad_data_with_memory_write_continue() {
         .is_equal_to(Transfer::pixels(&[0xF8, 0x00, 0x07, 0xE0]));
 }
 
-// `RecordingBus` accepts at most 16 bytes per transfer.
+// `RecordingBus` accepts at most 16 bytes per transfer; its frame counts up.
 #[test]
-fn write_pixels_longer_than_bus_limit_splits_into_transfers() {
+fn write_frame_longer_than_bus_limit_splits_into_transfers() {
     let mut panel = panel();
     block_on(panel.begin_area(0..4, 0..4)).unwrap();
     let pixels: Vec<u8> = (0..32).collect();
 
-    block_on(panel.write_pixels(&pixels)).unwrap();
+    block_on(panel.write_frame(0..pixels.len())).unwrap();
 
     let transfers = panel.release().transfers;
     assert_that!(transfers[3..].to_vec()).is_equal_to(vec![
@@ -257,12 +258,12 @@ fn write_pixels_longer_than_bus_limit_splits_into_transfers() {
 }
 
 #[test]
-fn write_pixels_non_multiple_of_bus_limit_sends_remainder_last() {
+fn write_frame_non_multiple_of_bus_limit_sends_remainder_last() {
     let mut panel = panel();
     block_on(panel.begin_area(0..4, 0..4)).unwrap();
     let pixels: Vec<u8> = (0..18).collect();
 
-    block_on(panel.write_pixels(&pixels)).unwrap();
+    block_on(panel.write_frame(0..pixels.len())).unwrap();
 
     let transfers = panel.release().transfers;
     assert_that!(transfers[3..].to_vec()).is_equal_to(vec![
@@ -275,12 +276,12 @@ fn write_pixels_non_multiple_of_bus_limit_sends_remainder_last() {
 // DMA underrun is only seen once every byte is out), so the area's budget
 // is unknown, as after a cancellation.
 #[test]
-fn write_pixels_failure_after_first_chunk_closes_the_area() {
+fn write_frame_failure_after_first_chunk_closes_the_area() {
     let mut panel = Co5300::new(RecordingBus::failing(4), GEOMETRY).unwrap();
     block_on(panel.begin_area(0..4, 0..4)).unwrap();
 
-    let failed = block_on(panel.write_pixels(&[0; 32]));
-    let result = block_on(panel.write_pixels(&[0; 2]));
+    let failed = block_on(panel.write_frame(0..32));
+    let result = block_on(panel.write_frame(0..2));
 
     assert_that!(failed.err()).is_equal_to(Some(Error::Bus(BusFault)));
     assert_that!(result.err()).is_equal_to(Some(Error::PixelOverflow {
@@ -290,13 +291,13 @@ fn write_pixels_failure_after_first_chunk_closes_the_area() {
 }
 
 #[test]
-fn write_pixels_after_area_filled_returns_pixel_overflow() {
+fn write_frame_after_area_filled_returns_pixel_overflow() {
     let mut panel = panel();
     block_on(panel.begin_area(0..2, 0..2)).unwrap();
-    block_on(panel.write_pixels(&[0; 4])).unwrap();
-    block_on(panel.write_pixels(&[0; 4])).unwrap();
+    block_on(panel.write_frame(0..4)).unwrap();
+    block_on(panel.write_frame(4..8)).unwrap();
 
-    let result = block_on(panel.write_pixels(&[0; 2]));
+    let result = block_on(panel.write_frame(0..2));
 
     assert_that!(result.err()).is_equal_to(Some(Error::PixelOverflow {
         remaining: 0,
@@ -305,13 +306,13 @@ fn write_pixels_after_area_filled_returns_pixel_overflow() {
 }
 
 #[test]
-fn write_pixels_bus_failure_requires_new_area() {
+fn write_frame_bus_failure_requires_new_area() {
     let mut panel = Co5300::new(RecordingBus::failing(3), GEOMETRY).unwrap();
     block_on(panel.begin_area(0..2, 0..2)).unwrap();
 
-    let failed = block_on(panel.write_pixels(&[0; 8]));
+    let failed = block_on(panel.write_frame(0..8));
     block_on(panel.begin_area(0..2, 0..2)).unwrap();
-    let retried = block_on(panel.write_pixels(&[0; 8]));
+    let retried = block_on(panel.write_frame(0..8));
 
     assert_that!(failed.err()).is_equal_to(Some(Error::Bus(BusFault)));
     assert_that!(retried).is_ok();
@@ -320,14 +321,14 @@ fn write_pixels_bus_failure_requires_new_area() {
 // Regression (t-3): a cancelled pixel write may have sent part of its
 // transfer, so the area's remaining budget is unknown.
 #[test]
-fn write_pixels_cancelled_mid_transfer_requires_new_area() {
+fn write_frame_cancelled_mid_transfer_requires_new_area() {
     let mut panel = Co5300::new(RecordingBus::pending(3), GEOMETRY).unwrap();
     block_on(panel.begin_area(0..2, 0..2)).unwrap();
 
-    let completed = poll_once(panel.write_pixels(&[0; 8]));
-    let continued = block_on(panel.write_pixels(&[0; 8]));
+    let completed = poll_once(panel.write_frame(0..8));
+    let continued = block_on(panel.write_frame(0..8));
     block_on(panel.begin_area(0..2, 0..2)).unwrap();
-    let reopened = block_on(panel.write_pixels(&[0; 8]));
+    let reopened = block_on(panel.write_frame(0..8));
 
     assert_that!(completed).is_false();
     assert_that!(continued.err()).is_equal_to(Some(Error::PixelOverflow {
@@ -341,11 +342,11 @@ fn write_pixels_cancelled_mid_transfer_requires_new_area() {
 }
 
 #[test]
-fn write_pixels_past_area_end_returns_pixel_overflow() {
+fn write_frame_past_area_end_returns_pixel_overflow() {
     let mut panel = panel();
     block_on(panel.begin_area(0..2, 0..2)).unwrap();
 
-    let result = block_on(panel.write_pixels(&[0; 10]));
+    let result = block_on(panel.write_frame(0..10));
 
     assert_that!(result.err()).is_equal_to(Some(Error::PixelOverflow {
         remaining: 8,
@@ -354,10 +355,10 @@ fn write_pixels_past_area_end_returns_pixel_overflow() {
 }
 
 #[test]
-fn write_pixels_without_open_area_returns_pixel_overflow() {
+fn write_frame_without_open_area_returns_pixel_overflow() {
     let mut panel = panel();
 
-    let result = block_on(panel.write_pixels(&[0; 2]));
+    let result = block_on(panel.write_frame(0..2));
 
     assert_that!(result.err()).is_equal_to(Some(Error::PixelOverflow {
         remaining: 0,
@@ -366,11 +367,11 @@ fn write_pixels_without_open_area_returns_pixel_overflow() {
 }
 
 #[test]
-fn write_pixels_odd_byte_count_returns_pixel_overflow() {
+fn write_frame_odd_byte_count_returns_pixel_overflow() {
     let mut panel = panel();
     block_on(panel.begin_area(0..2, 0..2)).unwrap();
 
-    let result = block_on(panel.write_pixels(&[0; 3]));
+    let result = block_on(panel.write_frame(0..3));
 
     assert_that!(result.err()).is_equal_to(Some(Error::PixelOverflow {
         remaining: 8,

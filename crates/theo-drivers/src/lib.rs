@@ -4,13 +4,14 @@
 //! builds for any target and is unit-tested on the host.
 //!
 //! - [`DebouncedButton`], [`ButtonEvent`]: debounced push button on any input pin.
-//! - [`Panel`]: pixel-stream abstraction consumed by renderers.
+//! - [`Panel`]: panel owning its framebuffer, sent to it by byte ranges.
 //! - [`flush_rows`], [`flush_bands`], [`DirtyRows`], [`FlushError`]: sends
 //!   dirty bands of framebuffer rows to a [`Panel`].
 //! - [`FlushRetry`], [`Retry`], [`Transient`]: when to resend the frame
 //!   after failed flushes; [`reset_due`], [`display_reset_due`]: when to
 //!   reset a failing device.
-//! - [`QspiBus`], [`Lanes`]: Quad-SPI transport for display controllers.
+//! - [`QspiBus`], [`Lanes`]: Quad-SPI transport for display controllers,
+//!   holding the framebuffer it sends in place.
 //! - [`ChipSelect`]: chip select released even when a transfer is cancelled.
 //! - [`dma_layout`]: descriptor and payload arithmetic of in-place DMA
 //!   transfers ([`descriptor_chunks`], [`DmaChunk`], [`frame_payload`],

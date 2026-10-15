@@ -88,6 +88,7 @@ impl Transient for BusFault {
 #[derive(Debug)]
 pub struct RecordingBus {
     pub transfers: Vec<Transfer>,
+    /// The framebuffer `write_frame` sends from.
     pub frame: Vec<u8>,
     fail_at: Option<usize>,
     pend_at: Option<usize>,
@@ -106,7 +107,7 @@ impl Default for RecordingBus {
 
 /// `len` bytes counting up from 0, wrapping at 256.
 pub fn counting_frame(len: usize) -> Vec<u8> {
-    (0..len).map(|byte| byte as u8).collect()
+    (0..len).map(|byte| (byte % 256) as u8).collect()
 }
 
 impl RecordingBus {
@@ -208,7 +209,8 @@ impl QspiBus for RecordingBus {
 #[derive(Debug, Default)]
 pub struct AddressBus<const MAX: usize> {
     /// Start offset in the frame and length of each frame transfer, in order.
-    pub pixels: Vec<(usize, usize)>,
+    pub transfers: Vec<(usize, usize)>,
+    /// The framebuffer, zeroed.
     pub frame: Vec<u8>,
 }
 
@@ -216,7 +218,7 @@ impl<const MAX: usize> AddressBus<MAX> {
     /// Creates a bus with a zeroed frame of `len` bytes.
     pub fn with_frame_len(len: usize) -> Self {
         Self {
-            pixels: Vec::new(),
+            transfers: Vec::new(),
             frame: vec![0; len],
         }
     }
@@ -265,7 +267,7 @@ impl<const MAX: usize> QspiBus for AddressBus<MAX> {
             bytes.len() <= MAX && bytes.end <= self.frame.len(),
             "bad frame transfer {bytes:?}"
         );
-        self.pixels.push((bytes.start, bytes.len()));
+        self.transfers.push((bytes.start, bytes.len()));
         Ok(())
     }
 }
@@ -284,6 +286,7 @@ pub enum PanelCall {
 #[derive(Debug)]
 pub struct RecordingPanel {
     pub calls: Vec<PanelCall>,
+    /// The framebuffer `write_frame` sends from.
     pub frame: Vec<u8>,
     /// Calls made, failed ones included.
     pub attempts: usize,

@@ -56,7 +56,9 @@ pub trait QspiBus {
         data: &[u8],
     ) -> Result<(), Self::Error>;
 
-    /// The framebuffer: one full panel of big-endian RGB565 pixels.
+    /// The framebuffer the bus sends from, as raw bytes.
+    ///
+    /// Its size and pixel format are the panel driver's contract.
     fn frame(&self) -> &[u8];
 
     /// The framebuffer, to draw into between transfers.

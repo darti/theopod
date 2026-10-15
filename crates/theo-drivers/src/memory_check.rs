@@ -27,7 +27,8 @@ pub struct PatternMismatch {
 ///
 /// On success every word is zero. Data a CPU cache still holds is read
 /// from the cache, so on a cached region the last cache-sized part may
-/// not reach the memory itself: check regions much larger than the cache.
+/// not reach the memory itself: use [`check_pattern_with`] to push each
+/// pattern past the cache.
 ///
 /// # Errors
 ///

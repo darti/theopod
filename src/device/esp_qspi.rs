@@ -11,12 +11,14 @@
 //! they must start burst-aligned, and the hardware underrun flag is checked
 //! after each. Other payloads (`write`, register writes) go through
 //! esp-hal's slice API: the SPI FIFO below 64 bytes, else DMA in place from
-//! internal RAM, or a copy for flash. See `docs/adr/0004`.
+//! RAM (16-byte bursts from PSRAM, with no underrun check: keep long
+//! payloads in the framebuffer), or a copy for flash. See `docs/adr/0004`.
 //!
 //! Writes are cancel-safe: dropping one mid-transfer stops the transfer,
 //! waits for the SPI to go idle, then releases chip select; a framebuffer
-//! transfer also keeps the SPI master. Leaking one (`mem::forget`) loses
-//! the SPI master ([`EspQspiError::Unavailable`]).
+//! transfer also keeps the SPI master. Leaking a pinned framebuffer
+//! transfer future (`Box::leak`, `mem::forget` of a pinned box) loses the
+//! SPI master ([`EspQspiError::Unavailable`]) and leaves chip select low.
 
 use core::{fmt, ops::Range};
 
@@ -119,6 +121,11 @@ impl<P> From<FramePayloadError> for EspQspiError<P> {
     }
 }
 
+/// ESP32-S3 data-bus window of external RAM (PSRAM): the framebuffer must
+/// lie there, as its descriptors claim PSRAM accesses and write back the
+/// PSRAM cache.
+const PSRAM_DATA_BUS: Range<usize> = 0x3C00_0000..0x3E00_0000;
+
 /// SPI master and framebuffer descriptor chain, while no transfer runs.
 type Idle<'d> = (SpiDma<'d, Async>, PsramTxBuf);
 
@@ -146,8 +153,9 @@ pub const MAX_TRANSFER_LEN: usize =
 // in sync.
 const _: () = assert!(MAX_TRANSFER_LEN == 32_704);
 
-/// Async esp-hal DMA SPI master in half-duplex mode with a software chip
-/// select, owning the framebuffer it sends in place.
+/// Async esp-hal DMA SPI master with a software chip select.
+///
+/// Half-duplex; it owns the framebuffer it sends in place.
 pub struct EspQspi<'d, CS> {
     /// SPI master and framebuffer descriptor chain; `None` while a
     /// framebuffer transfer runs, and forever after one is leaked.
@@ -179,8 +187,8 @@ impl<'d, CS: OutputPin> EspQspi<'d, CS> {
     ///
     /// # Panics
     ///
-    /// Panics if `psram_tx` cannot chain [`MAX_TRANSFER_LEN`] bytes or if
-    /// `frame` is not burst-aligned.
+    /// Panics if `psram_tx` cannot chain [`MAX_TRANSFER_LEN`] bytes, or if
+    /// `frame` is not burst-aligned or not in PSRAM.
     pub fn new(
         spi: SpiDma<'d, Async>,
         cs: CS,
@@ -194,6 +202,12 @@ impl<'d, CS: OutputPin> EspQspi<'d, CS> {
         assert!(
             (frame.as_ptr() as usize).is_multiple_of(psram_tx_buf::BURST),
             "framebuffer not burst-aligned"
+        );
+        let span = frame.as_ptr_range();
+        assert!(
+            PSRAM_DATA_BUS.contains(&(span.start as usize))
+                && (span.end as usize) <= PSRAM_DATA_BUS.end,
+            "framebuffer not in PSRAM"
         );
         Self {
             bus: Some((spi, psram_tx)),
@@ -219,25 +233,36 @@ impl<'d, CS: OutputPin> EspQspi<'d, CS> {
         let command = Command::_8Bit(u16::from(opcode), DataMode::Single);
         let address = Address::_24Bit(address, DataMode::Single);
         let in_frame = matches!(source, Source::Frame(_));
-        if in_frame {
+        if let Source::Frame(bytes) = &source {
+            frame_payload(
+                self.frame.len(),
+                bytes.clone(),
+                MAX_TRANSFER_LEN,
+                psram_tx_buf::BURST,
+            )?;
             // esp-hal also clears it when the transfer starts; this keeps the
             // check correct without relying on that.
             underrun::clear();
         }
+        if self.bus.is_none() {
+            return Err(EspQspiError::Unavailable);
+        }
         let selected = ChipSelect::select(&mut self.cs).map_err(EspQspiError::ChipSelect)?;
         // Dropped in reverse order on cancellation: the transfer future
-        // (stops the DMA), then `_idle` (waits for the SPI to finish its
+        // (stops the DMA), then `idle` (waits for the SPI to finish its
         // last byte), then `selected` (raises chip select).
-        let _idle = IdleOnDrop;
+        let idle = IdleOnDrop;
         let transferred = match source {
             Source::Slice(data) => Self::send(&mut self.bus, mode, command, address, data).await,
             Source::Frame(bytes) => {
+                // Checked by `frame_payload` above.
                 let data = &self.frame[bytes];
                 Self::send_frame(&mut self.bus, mode, command, address, data).await
             }
         };
-        // Always release chip select. Errors are reported in this order:
-        // SPI, then underrun, then chip select.
+        // Chip select rises only once the SPI is idle, on every path. Errors
+        // are reported in this order: SPI, then underrun, then chip select.
+        drop(idle);
         let released = selected.release();
         transferred?;
         if in_frame && underrun::happened() {
@@ -249,8 +274,8 @@ impl<'d, CS: OutputPin> EspQspi<'d, CS> {
     /// Sends `source` with esp-hal's slice API (FIFO, DMA in place, or copy).
     ///
     /// Cancel-safe: esp-hal stops the DMA when the future is dropped, but
-    /// does not wait for the SPI to go idle; `write`'s [`IdleOnDrop`] does,
-    /// before chip select rises.
+    /// does not wait for the SPI to go idle; `transfer`'s [`IdleOnDrop`]
+    /// does, before chip select rises.
     async fn send(
         bus: &mut Option<Idle<'d>>,
         mode: DataMode,
@@ -371,12 +396,6 @@ impl<CS: OutputPin> QspiBus for EspQspi<'_, CS> {
         lanes: Lanes,
         bytes: Range<usize>,
     ) -> Result<(), Self::Error> {
-        frame_payload(
-            self.frame.len(),
-            bytes.clone(),
-            MAX_TRANSFER_LEN,
-            psram_tx_buf::BURST,
-        )?;
         self.transfer(opcode, address, lanes, Source::Frame(bytes))
             .await
     }
@@ -388,16 +407,21 @@ impl<CS: OutputPin> QspiBus for EspQspi<'_, CS> {
 /// it: chip select must not rise while the last byte is still clocked out.
 struct IdleOnDrop;
 
+/// Polls of SPI2's busy bit before [`IdleOnDrop`] gives up (about 1 ms).
+///
+/// One aborted byte takes well under a microsecond at 40 MHz; the bound
+/// only keeps a stuck peripheral from hanging the executor.
+const IDLE_SPIN_LIMIT: u32 = 10_000;
+
 impl Drop for IdleOnDrop {
     fn drop(&mut self) {
-        // One aborted byte takes well under a microsecond at 40 MHz; the
-        // bound only keeps a stuck peripheral from hanging the executor.
-        for _ in 0..10_000 {
+        for _ in 0..IDLE_SPIN_LIMIT {
             if !spi_busy() {
                 return;
             }
             core::hint::spin_loop();
         }
+        log::warn!("display SPI still busy; releasing chip select anyway");
     }
 }
 

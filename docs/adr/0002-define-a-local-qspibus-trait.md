@@ -63,3 +63,8 @@ replaces the address-range test `EspQspi` used on `write`'s slices, and its
 `unsafe` constructor. `Panel` follows (`frame`, `frame_mut`, `write_frame`
 instead of `write_pixels`), and `flush_rows`/`flush_bands` no longer take
 the frame as an argument.
+
+Consequence: rendering and sending share the one framebuffer the bus
+holds (`frame_mut` and `write_frame` both borrow it), so double buffering
+(drawing the next frame during the DMA of the previous one) needs a trait
+change; ADR-0004 already keeps it out of scope.

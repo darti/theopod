@@ -55,7 +55,7 @@ just check
 just test                          # host unit tests (drivers, frame dump, frame-png)
 just lint                          # clippy on the firmware and host crates
 just miri                          # driver tests under Miri (nightly + miri component)
-just audit                         # advisories and licenses (cargo-deny, deny.toml)
+just audit                         # advisories, licenses, sources (cargo install cargo-deny)
 just build
 just flash                         # automatically detect the port
 just flash /dev/cu.usbmodemXXXX   # specify the port

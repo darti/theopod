@@ -26,22 +26,22 @@ of PSRAM that the GDMA can read.
   `&'static mut [u8]`, `QspiBus`/`Panel` expose it (`frame`, `frame_mut`)
   and send byte ranges of it (`write_frame`), so framebuffer transfers are
   an explicit API rather than inferred from payload addresses.
-- Slint renders into it (borrowed through `Panel::frame_mut`) with `RepaintBufferType::ReusedBuffer` and
-  `Rgb565BigEndianPixel`, so pixels are already in panel byte order and
-  only dirty regions are redrawn.
+- Slint renders into it (borrowed through `Panel::frame_mut`) with
+  `RepaintBufferType::ReusedBuffer` and `Rgb565BigEndianPixel`, so pixels
+  are already in panel byte order and only dirty regions are redrawn.
 - `theo_drivers::flush_bands` sends the dirty rows as up to three bands
   (`DirtyRows`, one per row span of Slint's at most three dirty
   rectangles; bands touching once widened are merged, and past three the
   closest two). Each band goes through `flush_rows`, widened to even rows
-  and full width, as one contiguous area; `Co5300` splits it into transfers of
-  `QspiBus::MAX_TRANSFER_LEN` (32,704 bytes: the largest multiple of 64
-  within esp-hal's 32,736-byte SPI DMA limit). Every transfer then starts
-  64-byte aligned (even rows are 1,472 bytes, 23 x 64). A compile-time
-  assert in `src/device/mod.rs` keeps two panel rows a multiple of 64
-  bytes, and a host test pins the transfer starts; `EspQspi` refuses a
-  framebuffer range that is misaligned, too long or outside the frame
-  (`EspQspiError::Misaligned`, `TooLong`, `OutOfFrame`) rather than send
-  it slowly.
+  and full width, as one contiguous area; `Co5300` splits it into
+  transfers of `QspiBus::MAX_TRANSFER_LEN` (32,704 bytes: the largest
+  multiple of 64 within esp-hal's 32,736-byte SPI DMA limit). Every
+  transfer then starts 64-byte aligned (even rows are 1,472 bytes,
+  23 x 64). A compile-time assert in `src/device/mod.rs` keeps two panel
+  rows a multiple of 64 bytes, and a host test pins the transfer starts;
+  `EspQspi` refuses a framebuffer range that is misaligned, too long or
+  outside the frame (`EspQspiError::Misaligned`, `TooLong`, `OutOfFrame`)
+  rather than send it slowly.
 - `QspiBus` and `Panel` are async; `EspQspi` uses
   `SpiDma::half_duplex_write_buffer` for framebuffer transfers and
   `half_duplex_write_async` for the rest. Transfers under 64 bytes
@@ -79,13 +79,21 @@ of PSRAM that the GDMA can read.
   closes the `Co5300` area: its progress on the panel is unknown (an
   underrun is only seen once every byte is out).
 - A panel stale for 10 s (a lost SPI master, an error no flush can clear)
-  reboots the device (`DisplayWatch` in `src/main.rs`, t-44), as a boot
-  recovers it. The reboots are counted in RTC fast RAM, which a software
-  reset keeps (stored with its complement, so RAM never written reads as
-  zero); after 3 in a row the cause survives reboots, and the device keeps
-  running with the error logged rather than looping. A minute of uptime
-  with a healthy display clears the count. Checked on the board with an
-  injected permanent error: three reboots 10 s apart, then it gives up.
+  reboots the device, as a boot recovers it (t-44). The policy is
+  `theo_drivers::StaleWatch`, host-tested; `DisplayWatch` in `src/main.rs`
+  runs its actions. The reboots are counted in RTC fast RAM, which a
+  software reset keeps; stored with its complement (`encode_resets`), so
+  arbitrary contents after an early reset read as zero. After 3 in a row
+  the cause survives reboots, and the device keeps running with the error
+  logged rather than looping. A minute of uninterrupted health clears the
+  count, so a fault that returns after each boot still hits the cap.
+  Checked on the board with an injected permanent error: three reboots
+  10 s apart, then it gives up.
+- A flush that does not finish within 500 ms (a stuck DMA, a lost
+  interrupt) is cancelled and counts as a transient failure: the flush is
+  cancel-safe, so the bus stays usable, and a lasting hang becomes a stale
+  panel that the watch above reboots. Boot-time display failures panic
+  instead (`check_display`); esp-backtrace then halts.
 - At boot, `Board::init` clears the panel with one full-frame flush, whose
   first transfer is `MAX_TRANSFER_LEN` long; a permanent failure panics,
   so an esp-hal upgrade that lowers its private DMA limit fails at once

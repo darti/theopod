@@ -54,7 +54,7 @@ use embedded_hal::digital::PinState;
 use theo_drivers::{
     Axis, AxisMap, Co5300, Cst820, Cst820Error, Cst820InitError, DebouncedButton, ExpanderPin,
     PanelGeometry, PanelPower, PanelSize, Qmi8658, Tca9554, TouchEvent, Transient,
-    check_pattern_with, flush_rows,
+    check_pattern_with, decode_resets, encode_resets, flush_rows,
 };
 
 pub use esp_hal::main as entry;
@@ -146,10 +146,10 @@ pub struct Touch {
     expander: &'static Expander,
 }
 
-/// The TCA9554 expander (EXIO0/1 panel reset and power, EXIO2 touch reset),
-/// shared by its runtime users (ADR-0005).
+/// The TCA9554 expander, shared by its runtime users (ADR-0005).
 ///
-/// One `Tca9554` behind a mutex: a user locks it for a whole change, so
+/// EXIO0/1 hold the panel reset and power, EXIO2 the touch reset; today
+/// only [`Touch`] uses it at run time. One `Tca9554` behind a mutex: a user locks it for a whole change, so
 /// read-modify-writes cannot interleave, and the driver's register copy
 /// stays the single view of the chip. Hand out `&'static Expander`, never a
 /// second `Tca9554`.
@@ -423,23 +423,28 @@ async fn start_imu(i2c: &'static I2cBus) -> Option<Imu> {
 
 /// Reboots for a broken display in a row, kept across software resets.
 ///
-/// In RTC fast RAM, which a software reset keeps. Stored with its
-/// complement: RAM that was never written (after power-on) reads as zero.
+/// In RTC fast RAM, which a software reset keeps. Its contents are
+/// arbitrary after an early reset (esp-hal `persistent`); the complement
+/// ([`encode_resets`]) makes those read as zero.
 #[esp_hal::ram(unstable(rtc_fast, persistent))]
 static mut DISPLAY_RESETS: [u32; 2] = [0; 2];
 
 /// Reboots for a broken display since the display last stayed healthy.
+///
+/// Only the UI task may call this and the functions below: nothing else
+/// touches the counter.
+#[must_use]
 pub fn display_resets() -> u32 {
-    // SAFETY: plain read of a `static` of plain integers; only the UI task
-    // touches it, and every bit pattern is valid.
-    let [count, check] = unsafe { core::ptr::addr_of!(DISPLAY_RESETS).read_volatile() };
-    if check == !count { count } else { 0 }
+    // SAFETY: a volatile read through a raw pointer (no reference to the
+    // `static mut`); only the UI task touches it, and every bit pattern is
+    // a valid `[u32; 2]`.
+    decode_resets(unsafe { (&raw const DISPLAY_RESETS).read_volatile() })
 }
 
 fn set_display_resets(count: u32) {
     // SAFETY: as in `display_resets`; a reset during the write leaves a
     // pair that fails the check and reads as zero.
-    unsafe { core::ptr::addr_of_mut!(DISPLAY_RESETS).write_volatile([count, !count]) };
+    unsafe { (&raw mut DISPLAY_RESETS).write_volatile(encode_resets(count)) };
 }
 
 /// Forgets past display reboots, once the display has stayed healthy.

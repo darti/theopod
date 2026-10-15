@@ -5,7 +5,6 @@
 //! - [`FlushRetry`], [`Retry`]: tracks a failure streak and decides when
 //!   to resend every row and what to log.
 //! - [`reset_due`]: when a failure streak calls for a device reset.
-//! - [`display_reset_due`]: when a lasting stale panel calls for a reboot.
 //!
 //! The framebuffer stays the source of truth: after any failure the panel
 //! is stale, and the next flush sends every row. Transient failures (bus
@@ -138,20 +137,4 @@ pub const fn reset_due(failures: u32, first: u32, max_interval: u32) -> bool {
         } else {
             failures.is_multiple_of(max_interval)
         }
-}
-
-/// Tells whether a panel stale for `stale_ms` calls for a device reset.
-///
-/// A display that stays broken (a lost SPI master, an error no flush can
-/// clear) is only recovered by a reset, as at boot. After `max_resets`
-/// such resets in a row the cause survives reboots, so the device keeps
-/// running instead of looping.
-#[must_use]
-pub const fn display_reset_due(
-    stale_ms: u64,
-    limit_ms: u64,
-    resets_in_a_row: u32,
-    max_resets: u32,
-) -> bool {
-    stale_ms >= limit_ms && resets_in_a_row < max_resets
 }

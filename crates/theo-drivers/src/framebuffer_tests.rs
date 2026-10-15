@@ -195,7 +195,7 @@ fn flush_rows_pixel_transfers_start_at_even_row_plus_whole_chunks() {
 
         let band_start = usize::from(rows.start & !1) * row_bytes;
         let band_end = usize::from(rows.end.next_multiple_of(2)) * row_bytes;
-        let transfers = panel.release().pixels;
+        let transfers = panel.release().transfers;
         let expected: Vec<(usize, usize)> = (band_start..band_end)
             .step_by(PANEL_TRANSFER)
             .map(|offset| (offset, (band_end - offset).min(PANEL_TRANSFER)))

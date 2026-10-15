@@ -79,6 +79,11 @@ pub enum Error<E> {
         /// Requested rows.
         y: Range<u16>,
     },
+    /// The framebuffer range is reversed or extends past the frame.
+    InvalidRange {
+        /// Requested bytes.
+        bytes: Range<usize>,
+    },
     /// More pixel bytes than the open area holds, or an odd byte count.
     PixelOverflow {
         /// Bytes still expected by the open area.
@@ -94,6 +99,7 @@ impl<E: fmt::Debug> fmt::Display for Error<E> {
             Self::Bus(error) => write!(f, "bus transfer failed: {error:?}"),
             Self::InvalidGeometry { geometry } => write!(f, "invalid panel geometry {geometry:?}"),
             Self::InvalidArea { x, y } => write!(f, "invalid area columns {x:?} rows {y:?}"),
+            Self::InvalidRange { bytes } => write!(f, "invalid framebuffer range {bytes:?}"),
             Self::PixelOverflow {
                 remaining,
                 submitted,
@@ -113,9 +119,15 @@ impl<E: Transient> Transient for Error<E> {
             Self::Bus(error) => error.is_transient(),
             Self::InvalidGeometry { .. }
             | Self::InvalidArea { .. }
+            | Self::InvalidRange { .. }
             | Self::PixelOverflow { .. } => false,
         }
     }
+}
+
+/// The 24-bit address phase carrying `command`: in its middle byte.
+const fn command_address(command: u8) -> u32 {
+    (command as u32) << 8
 }
 
 /// Visible size of the panel and its position in controller RAM.
@@ -219,7 +231,7 @@ impl<B: QspiBus> Co5300<B> {
         data: &[u8],
     ) -> Result<(), Error<B::Error>> {
         self.bus
-            .write(opcode, u32::from(command) << 8, lanes, data)
+            .write(opcode, command_address(command), lanes, data)
             .await
             .map_err(Error::Bus)
     }
@@ -281,7 +293,8 @@ impl<B: QspiBus> Panel for Co5300<B> {
     /// reached the panel in part, or in full (a DMA underrun is only seen
     /// once every byte is out): the area's progress is unknown, so later
     /// writes fail with [`Error::PixelOverflow`] until
-    /// [`Panel::begin_area`] opens a new one.
+    /// [`Panel::begin_area`] opens a new one. A reversed range, or one past
+    /// the frame, fails with [`Error::InvalidRange`] before any transfer.
     async fn write_frame(&mut self, bytes: Range<usize>) -> Result<(), Self::Error> {
         // Whole pixels per transfer.
         let chunk_len = const {
@@ -291,6 +304,9 @@ impl<B: QspiBus> Panel for Co5300<B> {
             );
             B::MAX_TRANSFER_LEN & !1
         };
+        if bytes.start > bytes.end || bytes.end > self.bus.frame().len() {
+            return Err(Error::InvalidRange { bytes });
+        }
         if bytes.len() > self.remaining || !bytes.len().is_multiple_of(2) {
             return Err(Error::PixelOverflow {
                 remaining: self.remaining,
@@ -298,13 +314,13 @@ impl<B: QspiBus> Panel for Co5300<B> {
             });
         }
         for start in bytes.clone().step_by(chunk_len) {
-            let chunk = start..(start + chunk_len).min(bytes.end);
+            let chunk = start..start.saturating_add(chunk_len).min(bytes.end);
             // Closed while the transfer runs, and left so unless it succeeds.
             let remaining = core::mem::take(&mut self.remaining);
             self.bus
                 .write_frame(
                     OPCODE_WRITE_PIXELS,
-                    u32::from(CMD_MEMORY_WRITE_CONTINUE) << 8,
+                    command_address(CMD_MEMORY_WRITE_CONTINUE),
                     Lanes::Quad,
                     chunk.clone(),
                 )

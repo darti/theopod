@@ -108,7 +108,8 @@ Out of scope: the touch driver itself (t-19).
   therefore not needed.
 - The expander gets a single runtime owner: `device::Touch` holds the
   CST820 and the one `Tca9554` handle, handed over at the end of
-  `Board::init`. Another runtime user of the expander must go through it.
+  `Board::init`. Another runtime user of the expander must go through it
+  (superseded by the t-43 update: the shared `device::Expander`).
   `Tca9554` reads each register once and then works from its copy: a
   reset runs on a suspect bus, and I2C has no checksum, so a corrupted
   read written back could otherwise drop the panel power pins (EXIO0,
@@ -138,3 +139,7 @@ Out of scope: the touch driver itself (t-19).
   re-init) takes the same reference: changes cannot interleave, and the
   driver's register copy stays the single view of the chip. Never create a
   second `Tca9554`.
+- Not done from t-43's brief: typed per-pin handles for touch and panel.
+  With a single runtime user (touch) they would be unused; the panel's
+  first runtime user (sleep, power-off, re-init) should add them, or take
+  the shared reference as touch does.

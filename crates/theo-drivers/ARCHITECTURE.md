@@ -7,11 +7,12 @@ only on `embedded-hal` / `embedded-hal-async`, unit-tested on the host
 
 ## Contents
 
-- `panel.rs`: async `Panel` trait (owns the framebuffer, sends ranges).
+- `panel.rs`: async `Panel` trait (exposes its framebuffer, sends ranges).
 - `framebuffer.rs`, `dirty_rows.rs`: `flush_rows` sends a band of rows of a
   full-panel framebuffer as one full-width, even-row-aligned area;
   `flush_bands` sends each band of a `DirtyRows` (few disjoint bands).
-- `retry.rs`: `Transient` errors, `FlushRetry` and `reset_due` policies.
+- `retry.rs`, `stale_watch.rs`: `Transient` errors, the `FlushRetry` and
+  `reset_due` policies; `StaleWatch`, the reboot policy for a broken panel.
 - `qspi.rs`: async `QspiBus` trait (8-bit opcode, 24-bit address, single or
   quad data, `MAX_TRANSFER_LEN`; holds the framebuffer, `write_frame`).
 - `chip_select.rs`: `ChipSelect`, released on drop (cancel-safe buses).

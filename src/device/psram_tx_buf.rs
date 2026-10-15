@@ -3,6 +3,8 @@
 //! - [`PsramTxBuf`]: descriptor chain over a borrowed PSRAM region.
 //! - [`BURST`]: PSRAM burst length, and the alignment a region must have.
 //! - [`CHUNK`]: bytes per descriptor, for `dma_descriptors_chunk_size!`.
+//! - [`write_back_and_invalidate`]: pushes a region past the data cache, so
+//!   CPU reads come from PSRAM itself (boot self-test, t-45).
 //!
 //! esp-hal's `half_duplex_write_async(&[u8])` reads PSRAM in 16-byte bursts
 //! through 4095-byte descriptors, so every descriptor after the first starts
@@ -75,10 +77,13 @@ impl PsramTxBuf {
     ///
     /// # Safety
     ///
-    /// `source` must stay valid and unmodified until the transfer using this
-    /// buffer has completed, or has been dropped (which waits for the DMA to
-    /// stop). If the transfer can be leaked, `source` must stay allocated
-    /// for the rest of the program: the DMA keeps reading it.
+    /// `source` must stay allocated until the transfer using this buffer
+    /// has completed or been dropped (which waits for the DMA to stop), or
+    /// for the rest of the program if the transfer can be leaked: the DMA
+    /// keeps reading it. Rust never dereferences the stored pointer, so
+    /// writes to `source` meanwhile are not undefined behaviour: they only
+    /// change what the panel shows. Keep `source` unmodified for a correct
+    /// picture.
     pub unsafe fn set_source(&mut self, source: &[u8]) {
         assert!(
             !source.is_empty()
@@ -180,24 +185,8 @@ pub fn write_back_and_invalidate(region: &[u8]) {
         "cache sync needs whole, aligned bursts"
     );
     for chunk in descriptor_chunks(region.len(), CHUNK) {
-        invalidate(start + chunk.offset, chunk.len);
+        writeback_and_invalidate(start + chunk.offset, chunk.len);
     }
-}
-
-/// Writes back then invalidates `len` bytes from `start`, as [`writeback`].
-#[esp_hal::ram]
-fn invalidate(start: usize, len: usize) {
-    critical_section::with(|_| {
-        // SAFETY: ROM routines on a readable, line-aligned range: the write
-        // back keeps every byte, so invalidating loses nothing. Addresses
-        // fit u32 on the ESP32-S3.
-        unsafe {
-            let autoload = Cache_Suspend_DCache_Autoload();
-            rom_Cache_WriteBack_Addr(start as u32, len as u32);
-            Cache_Invalidate_Addr(start as u32, len as u32);
-            Cache_Resume_DCache_Autoload(autoload);
-        }
-    });
 }
 
 /// Writes `len` bytes from `start` back to PSRAM, interrupts and autoload off.
@@ -207,15 +196,31 @@ fn invalidate(start: usize, len: usize) {
 /// write-back can be lost (`esp_rom_cache_writeback_esp32s3.S`). Disabling
 /// interrupts stands in for ESP-IDF's cache freeze only while the app core
 /// stays off (ADR-0004).
-#[esp_hal::ram]
 fn writeback(start: usize, len: usize) {
+    sync_cache(start, len, false);
+}
+
+/// Writes back then drops `len` bytes from `start` from the data cache.
+fn writeback_and_invalidate(start: usize, len: usize) {
+    sync_cache(start, len, true);
+}
+
+/// Writes a range back to PSRAM and, with `invalidate`, drops its lines
+/// from the data cache; interrupts and autoload off (see [`writeback`]).
+#[esp_hal::ram]
+fn sync_cache(start: usize, len: usize, invalidate: bool) {
     critical_section::with(|_| {
-        // SAFETY: ROM routines; writing back a readable range only syncs PSRAM,
-        // and autoload is restored as it was. Addresses and lengths fit u32:
-        // usize is 32 bits on the ESP32-S3.
+        // SAFETY: ROM routines on a readable range; autoload is restored as
+        // it was. Writing back only syncs PSRAM, and the invalidate follows
+        // it, so it loses nothing as long as the range holds whole cache
+        // lines (callers keep it burst-aligned). Addresses and lengths fit
+        // u32: usize is 32 bits on the ESP32-S3.
         unsafe {
             let autoload = Cache_Suspend_DCache_Autoload();
             rom_Cache_WriteBack_Addr(start as u32, len as u32);
+            if invalidate {
+                Cache_Invalidate_Addr(start as u32, len as u32);
+            }
             Cache_Resume_DCache_Autoload(autoload);
         }
     });

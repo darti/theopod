@@ -5,12 +5,16 @@
 targets = ["xtensa-esp32s3-none-elf", "aarch64-apple-darwin", "x86_64-unknown-linux-gnu"]
 
 [advisories]
-# Unmaintained crates are reported but do not fail the audit: they come from
-# upstream dependencies (Slint's build tooling) we cannot replace.
-unmaintained = "none"
+# Known unmaintained crates, pulled in by the esp-hal ecosystem with no
+# replacement upstream; any other advisory still fails the audit.
+ignore = [
+    { id = "RUSTSEC-2024-0436", reason = "paste: proc-macro via esp-hal and riscv, no replacement upstream" },
+    { id = "RUSTSEC-2024-0449", reason = "unsafe-libyaml: build time only, via esp-config and serde_yaml" },
+]
 
 [licenses]
-# Permissive licenses compatible with MIT OR Apache-2.0.
+# The source is MIT OR Apache-2.0: dependencies must be permissive, except
+# Slint below, which makes the firmware image GPL-3.0 (README, License).
 allow = [
     "Apache-2.0",
     "BSD-2-Clause",

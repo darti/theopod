@@ -34,7 +34,7 @@ use embassy_futures::select::{Either4, select4};
 use embassy_sync::{
     blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel, signal::Signal,
 };
-use embassy_time::{Duration, Instant, Ticker, Timer};
+use embassy_time::{Duration, Instant, Ticker, TimeoutError, Timer, with_timeout};
 use slint::{
     ComponentHandle, LogicalPosition, PhysicalSize,
     platform::{
@@ -43,8 +43,8 @@ use slint::{
     },
 };
 use theo_drivers::{
-    ButtonEvent, FlushRetry, OrientationDetector, Panel, PanelSize, Rotation, TouchEvent,
-    TouchPoint, Transient, display_reset_due, flush_bands, reset_due,
+    ButtonEvent, FlushRetry, OrientationDetector, Panel, PanelSize, Rotation, StaleWatch,
+    TouchEvent, TouchPoint, Transient, WatchAction, flush_bands, reset_due,
 };
 
 use crate::{
@@ -67,11 +67,15 @@ const MAX_IDLE: Duration = Duration::from_millis(1000);
 const FLUSH_RETRY_FIRST_MS: u32 = 16;
 /// Longest resend delay after failed flushes.
 const FLUSH_RETRY_MAX_MS: u32 = 1000;
+/// Longest a flush may take before it is taken for hung (t-44 review).
+///
+/// A full frame takes about 17 ms on the bus.
+const FLUSH_TIMEOUT: Duration = Duration::from_millis(500);
 /// How long the panel may stay stale before the device reboots (t-44).
 const DISPLAY_RESET_AFTER: Duration = Duration::from_secs(10);
 /// Reboots in a row for a broken display before giving up on rebooting.
 const MAX_DISPLAY_RESETS: u32 = 3;
-/// Uptime with a healthy display after which past reboots are forgotten.
+/// Uninterrupted healthy display after which past reboots are forgotten.
 const DISPLAY_HEALTHY_AFTER: Duration = Duration::from_secs(60);
 /// Button changes queued while the loop renders or flushes.
 const BUTTON_QUEUE: usize = 4;
@@ -122,7 +126,7 @@ async fn main(spawner: Spawner) {
         width: size.0,
         height: size.1,
     };
-    let frame = FrameRenderer::new(size);
+    let frame_renderer = FrameRenderer::new(size);
 
     // The framebuffer persists, so Slint only redraws what changed.
     let window = MinimalSoftwareWindow::new(RepaintBufferType::ReusedBuffer);
@@ -162,7 +166,7 @@ async fn main(spawner: Spawner) {
                 renderer.set_repaint_buffer_type(RepaintBufferType::NewBuffer);
                 renderer.set_repaint_buffer_type(RepaintBufferType::ReusedBuffer);
             }
-            dirty = frame.render(renderer, display.frame_mut());
+            dirty = frame_renderer.render(renderer, display.frame_mut());
         });
         if drawn {
             rotate_pending = false;
@@ -176,16 +180,26 @@ async fn main(spawner: Spawner) {
             }
             let resend_due = resend_at.is_some_and(|at| Instant::now() >= at);
             dirty = if resend_due {
-                frame.all_rows()
+                frame_renderer.all_rows()
             } else {
                 FrameRows::new(size.1)
             };
         }
         if !dirty.is_empty() {
-            // Cancel-safe, but awaited outside `select`: a cancelled flush
-            // would leave its rows stale on the panel (t-3).
-            match flush_bands(&mut display, &dirty).await {
-                Ok(()) => {
+            // Not raced against inputs: a cancelled flush leaves its rows
+            // stale (t-3). Only a hung one is cancelled, after
+            // [`FLUSH_TIMEOUT`]; the flush is cancel-safe, so the bus stays
+            // usable, and the hang counts as a transient failure.
+            let flushed = with_timeout(FLUSH_TIMEOUT, flush_bands(&mut display, &dirty)).await;
+            match flushed {
+                Err(TimeoutError) => {
+                    let retry = flush_retry.failed(true);
+                    if retry.log {
+                        log::error!("frame flush timed out after {FLUSH_TIMEOUT:?}, retrying");
+                    }
+                    resend_at = retry.after_ms.map(|ms| Instant::now() + retry_delay(ms));
+                }
+                Ok(Ok(())) => {
                     resend_at = None;
                     if let Some(failures) = flush_retry.succeeded() {
                         log::info!("frame flush recovered after {failures} failed attempts");
@@ -201,7 +215,7 @@ async fn main(spawner: Spawner) {
                         device::dump_frame(size, display.frame());
                     }
                 }
-                Err(error) => {
+                Ok(Err(error)) => {
                     // The framebuffer is still right; only the panel is stale.
                     let retry = flush_retry.failed(error.is_transient());
                     if retry.log {
@@ -389,15 +403,10 @@ async fn watch_orientation(mut imu: device::Imu) {
 
 /// Reboots the device when the panel stays stale (t-44).
 ///
-/// A display no flush can repair (a lost SPI master, a permanent error)
-/// is recovered by a reboot, as at boot; after [`MAX_DISPLAY_RESETS`] in a
-/// row the cause survives reboots, so the device keeps running instead.
-/// The count is forgotten once the display stays healthy.
+/// Runs the device side of [`StaleWatch`]: rebooting, logging, and the
+/// reboot count kept across resets.
 struct DisplayWatch {
-    /// When the panel last became stale.
-    stale_since: Option<Instant>,
-    /// Whether giving up on reboots was logged.
-    gave_up: bool,
+    watch: StaleWatch,
 }
 
 impl DisplayWatch {
@@ -407,36 +416,30 @@ impl DisplayWatch {
             log::warn!("rebooted {resets} times in a row for a broken display");
         }
         Self {
-            stale_since: None,
-            gave_up: false,
+            watch: StaleWatch::new(
+                DISPLAY_RESET_AFTER.as_millis(),
+                DISPLAY_HEALTHY_AFTER.as_millis(),
+                MAX_DISPLAY_RESETS,
+            ),
         }
     }
 
     /// Checks the panel after a frame; reboots if it stayed stale too long.
     fn check(&mut self, stale: bool) {
-        let now = Instant::now();
-        if !stale {
-            self.stale_since = None;
-            let uptime = Duration::from_micros(now.as_micros());
-            if uptime >= DISPLAY_HEALTHY_AFTER && device::display_resets() > 0 {
+        let resets = device::display_resets();
+        match self.watch.check(Instant::now().as_millis(), stale, resets) {
+            WatchAction::None => {}
+            WatchAction::Reboot => {
+                log::error!("display stale for {DISPLAY_RESET_AFTER:?}, rebooting");
+                device::reset_for_display();
+            }
+            WatchAction::GiveUp => {
+                log::error!("display still broken after {resets} reboots; not rebooting again");
+            }
+            WatchAction::ClearResets => {
                 device::clear_display_resets();
                 log::info!("display healthy: reboot count cleared");
             }
-            return;
-        }
-        let stale_for = now - *self.stale_since.get_or_insert(now);
-        let resets = device::display_resets();
-        if display_reset_due(
-            stale_for.as_millis(),
-            DISPLAY_RESET_AFTER.as_millis(),
-            resets,
-            MAX_DISPLAY_RESETS,
-        ) {
-            log::error!("display stale for {} ms, rebooting", stale_for.as_millis());
-            device::reset_for_display();
-        }
-        if stale_for >= DISPLAY_RESET_AFTER && !core::mem::replace(&mut self.gave_up, true) {
-            log::error!("display still broken after {resets} reboots; not rebooting again");
         }
     }
 }

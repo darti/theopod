@@ -385,3 +385,50 @@ fn error_display_describes_invalid_area() {
 
     assert_that!(message.as_str()).is_equal_to("invalid area columns 1..3 rows 0..2");
 }
+
+// Regression (t-46 review): a reversed range read as empty, so the write
+// silently succeeded without sending anything.
+#[test]
+#[expect(clippy::reversed_empty_ranges, reason = "the invalid input under test")]
+fn write_frame_reversed_range_returns_invalid_range() {
+    let mut panel = panel();
+    block_on(panel.begin_area(0..2, 0..2)).unwrap();
+
+    let result = block_on(panel.write_frame(8..4));
+
+    assert_that!(result.err()).is_equal_to(Some(Error::InvalidRange { bytes: 8..4 }));
+}
+
+#[test]
+fn write_frame_past_the_frame_returns_invalid_range_before_sending() {
+    let mut panel = panel();
+    block_on(panel.begin_area(0..4, 0..4)).unwrap();
+
+    let result = block_on(panel.write_frame(48..80));
+
+    assert_that!(result.err()).is_equal_to(Some(Error::InvalidRange { bytes: 48..80 }));
+    // Only the three area registers: no partial pixel transfer.
+    assert_that!(panel.release().transfers).has_length(3);
+}
+
+#[test]
+fn write_frame_empty_range_sends_nothing() {
+    let mut panel = panel();
+    block_on(panel.begin_area(0..2, 0..2)).unwrap();
+
+    let result = block_on(panel.write_frame(4..4));
+
+    assert_that!(result).is_ok();
+    assert_that!(panel.release().transfers).has_length(3);
+}
+
+#[test]
+fn write_frame_sends_the_requested_bytes_of_the_frame() {
+    let mut panel = panel();
+    block_on(panel.begin_area(0..2, 0..2)).unwrap();
+
+    block_on(panel.write_frame(4..8)).unwrap();
+
+    let transfers = panel.release().transfers;
+    assert_that!(transfers.last().cloned()).is_equal_to(Some(Transfer::pixels(&[4, 5, 6, 7])));
+}

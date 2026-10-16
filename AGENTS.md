@@ -57,6 +57,18 @@ the ESP toolchain and target are defined in `rust-toolchain.toml`.
 - To see what the firmware renders: `just flash-dump` (records from boot,
   Ctrl-C after `theo-frame-end`), then `just frame-png` → `target/frame.png`.
   Capturing after boot misses the first rows.
+- In a worktree under `.claude/worktrees/`, Cargo also reads the main
+  checkout's `.cargo/config.toml` and links `-Tlinkall.x` twice
+  ("region 'vectors_seg' already defined"): prefix link/flash recipes with
+  `RUSTFLAGS="-C link-arg=-Tlinkall.x"`.
+- `just monitor`, `just run` and `just imu-calibrate` need a TTY; from an
+  agent use `just flash-dump` (logs from boot) or `just monitor-log`.
+- A flash stuck on "Connecting…": check `lsof /dev/cu.usbmodem*` for a
+  process holding the serial port.
+- `flash-dump` shows the framebuffer, not the panel: panel-side effects
+  (MADCTL, area addressing) need a human looking at the screen. CO5300
+  row/column exchange caps written lines at 368 px; don't retry hardware
+  landscape rotation (ADR-0006).
 
 ## Verification
 

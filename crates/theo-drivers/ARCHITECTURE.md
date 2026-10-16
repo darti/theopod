@@ -21,11 +21,10 @@ only on `embedded-hal` / `embedded-hal-async`, unit-tested on the host
 - `co5300.rs`: CO5300 AMOLED (init, sleep), a `Panel` on any `QspiBus`;
   checks geometry, 2x2 areas and pixel counts, splits long payloads.
 - `tca9554.rs`, `panel_power.rs`: TCA9554 expander (registers read once,
-  then cached; levels before direction); `PanelPower`, the rail pulse.
-- `cst820.rs`: `Cst820` touch controller; reset through a `Tca9554` pin,
-  interrupt-driven when idle (probed each second), polled while touched;
-  cancels a touch whose read fails or that a reset interrupts.
-- `qmi8658.rs`: `Qmi8658` IMU over async I2C, accelerometer only.
+  then cached; levels before direction); `PanelPower`, rail pulse/cut.
+- `cst820.rs`: `Cst820` touch, reset by a `Tca9554` pin; interrupt-driven
+  when idle, polled while touched; cancels a touch that a read, reset or
+  `hold_in_reset` interrupts. `qmi8658.rs`: `Qmi8658`, accelerometer only.
 - `geometry.rs`, `orientation.rs`: `PanelSize`/`TouchPoint`;
   `OrientationDetector` (gravity to `Rotation`), `AxisMap` (const-checked
   by `is_rotation`), the rotated view size and touch mapping.

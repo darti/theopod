@@ -13,9 +13,10 @@
 //! size and the touch coordinates together.
 //!
 //! Holding BOOT for [`LONG_PRESS_MS`] stops the pod: the loop puts the
-//! panel to sleep, then [`watch_button`] waits for the release and puts the
-//! chip in deep sleep. The next BOOT press wakes it, which restarts the
-//! firmware; that press never reaches Slint.
+//! panel to sleep, [`watch_button`] has the orientation then the touch task
+//! park their devices ([`IMU_PARK`], [`TOUCH_PARK`]), then waits for the
+//! release and puts the chip in deep sleep. The next BOOT press wakes it,
+//! which restarts the firmware; that press never reaches Slint.
 //!
 //! Each input runs in its own task ([`watch_button`], [`watch_touch`],
 //! [`watch_orientation`]) and reaches the loop through a channel
@@ -72,6 +73,8 @@ const MAX_IDLE: Duration = Duration::from_millis(1000);
 const FLUSH_RETRY_FIRST_MS: u32 = 16;
 /// Longest resend delay after failed flushes.
 const FLUSH_RETRY_MAX_MS: u32 = 1000;
+/// How long BOOT is held to stop the pod, from the debounced press.
+const LONG_PRESS_MS: u32 = 2000;
 /// Longest a flush may take before it is taken for hung (t-44 review).
 ///
 /// A full frame takes about 17 ms on the bus.
@@ -82,8 +85,6 @@ const DISPLAY_RESET_AFTER: Duration = Duration::from_secs(10);
 const MAX_DISPLAY_RESETS: u32 = 3;
 /// Uninterrupted healthy display after which past reboots are forgotten.
 const DISPLAY_HEALTHY_AFTER: Duration = Duration::from_secs(60);
-/// How long BOOT is held to stop the pod, from the debounced press.
-const LONG_PRESS_MS: u32 = 2000;
 /// Button changes queued while the loop renders or flushes.
 const BUTTON_QUEUE: usize = 4;
 /// Touch changes queued while the loop renders or flushes; a full queue
@@ -106,6 +107,10 @@ const TOUCH_RESET_RETRY_MAX: Duration = Duration::from_secs(1);
 const ORIENTATION_PERIOD: Duration = Duration::from_millis(100);
 /// View rotation at boot, until the accelerometer says otherwise.
 const INITIAL_ROTATION: Rotation = Rotation::Deg0;
+/// Longest wait for an input task to park its device before deep sleep: at
+/// most four I2C writes, each failing within the device module's bus
+/// timeout (about 13 ms).
+const PARK_TIMEOUT: Duration = Duration::from_millis(200);
 
 /// BOOT button changes and stop requests, from [`watch_button`] to the UI
 /// loop.
@@ -118,6 +123,65 @@ static PANEL_ASLEEP: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 static TOUCH_EVENTS: Channel<CriticalSectionRawMutex, TouchEvent, TOUCH_QUEUE> = Channel::new();
 /// Latest view rotation, from [`watch_orientation`] to the UI loop.
 static ROTATION: Signal<CriticalSectionRawMutex, Rotation> = Signal::new();
+/// Stop handshake between [`watch_button`] and [`watch_touch`].
+static TOUCH_PARK: Park = Park::new("touch controller and panel rails");
+/// Stop handshake between [`watch_button`] and [`watch_orientation`].
+static IMU_PARK: Park = Park::new("IMU");
+
+/// Stop handshake: [`watch_button`] asks an input task to park its device,
+/// which then stops using the I2C bus for good (t-50).
+///
+/// The task drops its loop wherever it is, even mid-transfer (esp-hal
+/// clears the bus when a transfer is dropped), parks its device and
+/// reports it, failed or not.
+struct Park {
+    /// What is parked, for the logs.
+    device: &'static str,
+    requested: Signal<CriticalSectionRawMutex, ()>,
+    parked: Signal<CriticalSectionRawMutex, ()>,
+}
+
+impl Park {
+    const fn new(device: &'static str) -> Self {
+        Self {
+            device,
+            requested: Signal::new(),
+            parked: Signal::new(),
+        }
+    }
+
+    /// Asks the task to park and waits for it, [`PARK_TIMEOUT`] at most.
+    ///
+    /// Best effort, like the panel's sleep-in: a task that does not answer
+    /// is logged, and the chip sleeps anyway.
+    async fn request(&self) {
+        self.requested.signal(());
+        if with_timeout(PARK_TIMEOUT, self.parked.wait())
+            .await
+            .is_err()
+        {
+            let device = self.device;
+            log::error!("{device} not parked within {PARK_TIMEOUT:?}, sleeping anyway");
+        }
+    }
+
+    /// Marks the device parked, for a task that never started: the stop
+    /// then does not wait for it.
+    fn not_needed(&self) {
+        self.parked.signal(());
+    }
+
+    /// Waits until [`watch_button`] asks for parking.
+    async fn requested(&self) {
+        self.requested.wait().await;
+    }
+
+    /// Reports the device parked (or given up on); the task then idles.
+    async fn done(&self) -> ! {
+        self.parked.signal(());
+        core::future::pending().await
+    }
+}
 
 /// What [`watch_button`] tells the UI loop.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -141,6 +205,8 @@ async fn main(spawner: Spawner) {
     spawner.spawn(watch_touch(touch).unwrap());
     if let Some(imu) = imu {
         spawner.spawn(watch_orientation(imu).unwrap());
+    } else {
+        IMU_PARK.not_needed();
     }
     let size = display.size();
     let panel = PanelSize {
@@ -324,9 +390,10 @@ async fn main(spawner: Spawner) {
 /// Debounces the BOOT button and queues its changes for the UI loop, until
 /// it is held for [`LONG_PRESS_MS`]; then stops the pod.
 ///
-/// A long press asks the UI loop to put the panel to sleep, waits for that
-/// and for the release, then puts the chip in deep sleep until the next
-/// press. Its release is not forwarded: it is not a click.
+/// A long press asks the UI loop to put the panel to sleep, waits for that,
+/// has the orientation then the touch task park their devices, then waits
+/// for the release and puts the chip in deep sleep until the next press.
+/// Its release is not forwarded: it is not a click.
 #[embassy_executor::task]
 async fn watch_button(mut button: device::Button, deep_sleep: device::DeepSleep) {
     let mut press = LongPress::new(LONG_PRESS_MS);
@@ -356,6 +423,11 @@ async fn watch_button(mut button: device::Button, deep_sleep: device::DeepSleep)
     log::info!("BOOT held for {LONG_PRESS_MS} ms, stopping");
     BUTTON_EVENTS.send(ButtonMessage::Stop).await;
     PANEL_ASLEEP.wait().await;
+    // The panel is asleep before its rails drop. Cutting them is the last
+    // bus access: the touch controller may hang off those rails, and an
+    // unpowered device can clamp the bus for the IMU.
+    IMU_PARK.request().await;
+    TOUCH_PARK.request().await;
     deep_sleep.until_pressed(button).await
 }
 
@@ -367,8 +439,23 @@ async fn watch_button(mut button: device::Button, deep_sleep: device::DeepSleep)
 /// controller ([`TOUCH_RESET_AFTER`]); a failed reset is retried until it
 /// succeeds, so the controller is never left held in reset. An idle
 /// controller is read once a second, so one that went silent fails too.
+///
+/// When the pod stops, holds the controller in reset and cuts the panel
+/// rails ([`TOUCH_PARK`]).
 #[embassy_executor::task]
 async fn watch_touch(mut touch: device::Touch) {
+    match select(report_touches(&mut touch), TOUCH_PARK.requested()).await {
+        Either::First(never) => never,
+        Either::Second(()) => {}
+    }
+    if let Err(error) = touch.park().await {
+        log::error!("touch controller and panel rails not parked: {error:?}");
+    }
+    TOUCH_PARK.done().await
+}
+
+/// The touch loop of [`watch_touch`], until it is dropped.
+async fn report_touches(touch: &mut device::Touch) -> ! {
     // Consecutive failed reads.
     let mut failures: u32 = 0;
     loop {
@@ -388,7 +475,7 @@ async fn watch_touch(mut touch: device::Touch) {
                 failures = failures.saturating_add(1);
                 if reset_due(failures, TOUCH_RESET_AFTER, TOUCH_RESET_EVERY) {
                     log::warn!("resetting the touch controller after {failures} failed reads");
-                    reset_touch(&mut touch).await;
+                    reset_touch(touch).await;
                 }
                 Timer::after(TOUCH_RETRY).await;
             }
@@ -419,9 +506,22 @@ async fn reset_touch(touch: &mut device::Touch) {
 /// Logs each change with the sample on the panel's axes. With the
 /// `imu-calibration` feature, keeps the view upright and logs the raw
 /// sensor axes once a second instead, to measure [`device::IMU_AXES`].
-/// Read failures are logged once per streak.
+/// Read failures are logged once per streak. When the pod stops, powers the
+/// sensor down ([`IMU_PARK`]).
 #[embassy_executor::task]
 async fn watch_orientation(mut imu: device::Imu) {
+    match select(report_orientation(&mut imu), IMU_PARK.requested()).await {
+        Either::First(never) => never,
+        Either::Second(()) => {}
+    }
+    if let Err(error) = imu.power_down().await {
+        log::error!("IMU not powered down: {error}");
+    }
+    IMU_PARK.done().await
+}
+
+/// The sampling loop of [`watch_orientation`], until it is dropped.
+async fn report_orientation(imu: &mut device::Imu) -> ! {
     /// Samples between two calibration logs: one second.
     const CALIBRATION_LOG_EVERY: u64 = 1000 / ORIENTATION_PERIOD.as_millis();
     let mut detector = OrientationDetector::new(INITIAL_ROTATION);

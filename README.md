@@ -13,8 +13,9 @@ This firmware targets the V2 hardware. The display is implemented: the
 CO5300 is driven over QSPI and its rails are cycled through the TCA9554 I/O
 expander. Slint renders into a framebuffer in PSRAM and only the dirty rows
 are sent to the panel by async DMA. The BOOT button (GPIO0) is forwarded to
-the UI as the Return key; holding it for 2 s stops the pod (panel asleep,
-ESP32-S3 in deep sleep) and the next press starts it again (ADR-0008).
+the UI as the Return key; holding it for 2 s stops the pod (panel asleep
+and unpowered, touch and IMU parked, ESP32-S3 in deep sleep) and the next
+press starts it again (ADR-0008).
 Touches on the CST820 (I²C 0x15, interrupt on GPIO21) reach the UI as
 pointer events. The QMI8658 accelerometer (I²C 0x6B or 0x6A)
 turns the view in four orientations (ADR-0006). The pin assignments live in
@@ -33,7 +34,7 @@ for the V2 pinout and hardware resources.
   controller, IMU and its measured axis map).
 - `src/slint_backend.rs`: Slint platform and framebuffer rendering.
 - `crates/theo-drivers/`: HAL-independent drivers (CO5300, TCA9554, CST820,
-  QMI8658, panel power-up, button and long press, `Panel`, `QspiBus`,
+  QMI8658, panel power-up/down, button and long press, `Panel`, `QspiBus`,
   framebuffer flushing) and the view-orientation logic, unit-tested on the
   host. See its `ARCHITECTURE.md`.
 - `crates/theo-frame-dump/`: `no_std` text format for dumping the framebuffer

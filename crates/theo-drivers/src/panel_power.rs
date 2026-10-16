@@ -1,8 +1,8 @@
-//! Panel power-up through a TCA9554 I/O expander.
+//! Panel power-up and power-down through a TCA9554 I/O expander.
 //!
-//! - [`PanelPower`]: which expander pins feed the panel rails/reset, and the
-//!   timing of the power-up pulse. Other pins on the expander, such as a
-//!   touch reset, are left untouched.
+//! - [`PanelPower`]: which expander pins feed the panel rails/reset, the
+//!   timing of the power-up pulse, and the power-down before deep sleep.
+//!   Other pins on the expander, such as a touch reset, are left untouched.
 
 use embedded_hal_async::{delay::DelayNs, i2c::I2c};
 
@@ -44,5 +44,19 @@ impl PanelPower {
         expander.write_levels(self.pins, self.pins).await?;
         delay.delay_ms(self.power_up_ms).await;
         Ok(())
+    }
+
+    /// Drives the panel pins low, cutting the rails and holding reset.
+    ///
+    /// Call it after the controller's sleep-in, before deep sleep: the
+    /// expander stays powered, so the pins stay low until the next
+    /// [`Self::power_up`]. Levels are latched before the pins become
+    /// outputs; other expander pins are kept.
+    ///
+    /// # Errors
+    ///
+    /// Returns the I2C error of the first failed access.
+    pub async fn power_down<I: I2c>(&self, expander: &mut Tca9554<I>) -> Result<(), I::Error> {
+        expander.configure_outputs(self.pins, 0x00).await
     }
 }

@@ -169,11 +169,7 @@ impl<I: I2c, P: Wait, D: DelayNs> Cst820<I, P, D> {
         expander: &mut Tca9554<J>,
         reset: Pin,
     ) -> Result<(), InitError<J::Error, I::Error>> {
-        // Whatever the reset does, the touch the caller has seen ends here,
-        // so it does not stay pressed.
-        if let Some(point) = self.touched.take() {
-            self.cancelled = Some(point);
-        }
+        self.cancel_touch();
         expander
             .configure_output(reset, PinState::Low)
             .await
@@ -191,6 +187,25 @@ impl<I: I2c, P: Wait, D: DelayNs> Cst820<I, P, D> {
             )
             .await
             .map_err(InitError::Bus)
+    }
+
+    /// Holds the controller in reset by driving `reset` low on `expander`.
+    ///
+    /// Parks the controller before deep sleep: it stops scanning until the
+    /// next [`Self::init`]. A touch in progress is reported by the next
+    /// [`Self::changed`] as [`TouchEvent::Cancelled`], even if driving the
+    /// pin fails. Other expander pins are kept.
+    ///
+    /// # Errors
+    ///
+    /// Returns the I2C error of the expander access.
+    pub async fn hold_in_reset<J: I2c>(
+        &mut self,
+        expander: &mut Tca9554<J>,
+        reset: Pin,
+    ) -> Result<(), J::Error> {
+        self.cancel_touch();
+        expander.configure_output(reset, PinState::Low).await
     }
 
     /// Waits for the next press, move, release or cancellation.
@@ -242,6 +257,14 @@ impl<I: I2c, P: Wait, D: DelayNs> Cst820<I, P, D> {
                 // An unmoved finger, or an interrupt without one.
                 (Some(_), Some(_)) | (None, None) => {}
             }
+        }
+    }
+
+    /// Ends the touch the caller has seen, so it does not stay pressed
+    /// across a reset; the next [`Self::changed`] reports it cancelled.
+    fn cancel_touch(&mut self) {
+        if let Some(point) = self.touched.take() {
+            self.cancelled = Some(point);
         }
     }
 

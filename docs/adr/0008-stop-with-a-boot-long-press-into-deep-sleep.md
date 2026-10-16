@@ -46,12 +46,26 @@ leaves deep sleep.
 ## Consequences
 
 - Stopping keeps no state: the UI starts afresh after each wake.
-- Only the panel controller is put to sleep. The TCA9554 keeps the panel
-  rails up, the CST820 keeps scanning and the QMI8658 keeps sampling, so
-  the sleep current is higher than it could be (t-50). The touch and IMU
-  tasks also run until the chip sleeps, so one may be cut mid-transfer on
-  the I2C bus; a device left holding SDA low would then fail its init
-  after the wake until power-cycled. Parking those tasks first (t-50)
-  removes both.
+- After the panel's sleep-in, the button task has the orientation task,
+  then the touch task, park their devices (t-50): the QMI8658's sensors
+  and oscillator stop, then the touch task holds the CST820 in reset
+  (EXIO2 low) and cuts the panel rails (EXIO0 reset and EXIO1
+  `DSI_PWR_EN` low), holding the shared expander's lock across both
+  (ADR-0005). The rail cut comes last, as an unpowered device may clamp the bus. The
+  expander stays powered in deep sleep, so its pins hold until the next
+  boot powers the panel up again; `Qmi8658::init` starts the oscillator
+  before its soft reset, as the sensor stays powered down across the
+  sleep. Only the GPIO0 wake path stays active.
+- Each task drops its loop to park, possibly mid-transfer. esp-hal 1.2
+  clears the bus when a transfer is dropped (`I2cFuture`'s `Drop` resets
+  the controller and clocks the bus free), whichever device held SDA;
+  recheck this when leaving the `~1.2` pin. A task that parks in time no
+  longer uses the bus, so the sleep cuts no transfer of its own.
+- Parking is best effort, like the sleep-in: a failure is logged, and a
+  task that does not answer within `PARK_TIMEOUT` (200 ms) is logged and
+  slept over. Such a task may still be mid-transfer when the chip
+  sleeps, as before t-50.
+- The sleep current and the stop-then-wake behaviour on the board are
+  not checked yet (t-55).
 - Plugging the board in still boots it directly; BOOT only matters once
   the firmware has stopped.

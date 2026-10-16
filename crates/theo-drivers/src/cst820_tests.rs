@@ -12,7 +12,7 @@ use crate::{
     cst820::{Cst820, Error, IDLE_PROBE_MS, InitError, POLL_MS, TouchEvent},
     geometry::{PanelSize, TouchPoint},
     tca9554::{Pin, Tca9554},
-    test_support::{FakeCst820, FakeTca9554, RecordingDelay, block_on},
+    test_support::{FakeCst820, FakeTca9554, RecordingDelay, TCA_CONFIG, block_on},
 };
 
 const ADDRESS: u8 = 0x15;
@@ -557,5 +557,63 @@ fn init_failed_reset_still_cancels_touch_in_progress() {
     block_on(touch.init(&mut failing, Pin::P2)).unwrap_err();
     let cancelled = block_on(touch.changed());
 
+    assert_that!(cancelled).is_equal_to(Ok(TouchEvent::Cancelled(point(1, 2))));
+}
+
+#[test]
+fn hold_in_reset_latches_low_then_makes_only_reset_pin_an_output() {
+    let mut touch = touch([]);
+    let fake = FakeTca9554::new(EXPANDER_ADDRESS);
+    let initial = fake.registers;
+    let mut expander = Tca9554::new(fake, EXPANDER_ADDRESS);
+
+    let result = block_on(touch.hold_in_reset(&mut expander, Pin::P2));
+
+    assert_that!(result).is_ok();
+    let fake = expander.release();
+    // The low level is latched while the pin is still an input, so no pin
+    // is driven low until the reset pin becomes an output.
+    assert_that!(fake.driven_low_history(initial)).is_equal_to(vec![0, Pin::P2.mask()]);
+    assert_that!(fake.registers[usize::from(TCA_CONFIG)]).is_equal_to(!Pin::P2.mask());
+    assert_that!(touch.release().0.transactions).is_equal_to(0);
+}
+
+#[test]
+fn hold_in_reset_after_press_reports_cancelled() {
+    let mut touch = touch([FakeCst820::touch(1, 2, 0)]);
+    block_on(touch.changed()).unwrap();
+
+    block_on(touch.hold_in_reset(&mut expander(), Pin::P2)).unwrap();
+    let cancelled = block_on(touch.changed());
+
+    assert_that!(cancelled).is_equal_to(Ok(TouchEvent::Cancelled(point(1, 2))));
+}
+
+#[test]
+fn hold_in_reset_expander_failure_returns_its_error() {
+    let mut touch = touch([]);
+    let mut expander = Tca9554::new(
+        FakeTca9554::new(EXPANDER_ADDRESS).failing(0),
+        EXPANDER_ADDRESS,
+    );
+
+    let result = block_on(touch.hold_in_reset(&mut expander, Pin::P2));
+
+    assert_that!(result).is_equal_to(Err(ErrorKind::Bus));
+}
+
+#[test]
+fn hold_in_reset_failed_expander_still_cancels_touch_in_progress() {
+    let mut touch = touch([FakeCst820::touch(1, 2, 0)]);
+    block_on(touch.changed()).unwrap();
+    let mut failing = Tca9554::new(
+        FakeTca9554::new(EXPANDER_ADDRESS).failing(0),
+        EXPANDER_ADDRESS,
+    );
+
+    let result = block_on(touch.hold_in_reset(&mut failing, Pin::P2));
+    let cancelled = block_on(touch.changed());
+
+    assert_that!(result).is_equal_to(Err(ErrorKind::Bus));
     assert_that!(cancelled).is_equal_to(Ok(TouchEvent::Cancelled(point(1, 2))));
 }

@@ -1,8 +1,8 @@
 //! HAL-independent QMI8658 inertial sensor driver, accelerometer only.
 //!
 //! - [`Qmi8658`]: identifies and resets the sensor, enables its
-//!   accelerometer and reads
-//!   raw accelerations over any `embedded-hal-async` [`I2c`] bus.
+//!   accelerometer, reads raw accelerations and powers the sensor down,
+//!   over any `embedded-hal-async` [`I2c`] bus.
 //! - [`Acceleration`]: one raw sample on the sensor's own axes.
 //! - [`Error`]: bus failures, an unexpected chip, or a stuck reset.
 //!
@@ -35,6 +35,11 @@ const CTRL1_AUTO_INCREMENT: u8 = 0x40;
 const CTRL2_ACCEL_2G_LOW_POWER_21HZ: u8 = 0x0D;
 /// Accelerometer enabled, gyroscope disabled.
 const CTRL7_ACCEL_ONLY: u8 = 0x01;
+/// Accelerometer and gyroscope disabled.
+const CTRL7_SENSORS_OFF: u8 = 0x00;
+/// CTRL1 `sensorDisable`: stops the internal 2 MHz oscillator. With both
+/// sensors off this is the power-down mode (SensorLib `powerDown`).
+const CTRL1_SENSOR_DISABLE: u8 = 0x01;
 
 /// Reset-result poll period and count: a 50 ms budget for a reset that
 /// takes at most 15 ms.
@@ -104,17 +109,22 @@ impl<I: I2c> Qmi8658<I> {
     /// Checks the sensor's identity, soft-resets it and starts the
     /// accelerometer.
     ///
+    /// The oscillator is started before the reset, so a sensor left powered
+    /// down by [`Self::power_down`] (across a deep sleep) resets too.
+    ///
     /// # Errors
     ///
     /// Returns [`Error::WrongChip`] before writing anything, so probing an
     /// address that holds another chip leaves it untouched;
-    /// [`Error::ResetTimeout`] before any configuration is written; or the
-    /// I2C error of a failed access.
+    /// [`Error::ResetTimeout`] before any configuration but the oscillator
+    /// is written; or the I2C error of a failed access.
     pub async fn init(&mut self, delay: &mut impl DelayNs) -> Result<(), Error<I::Error>> {
         let id = self.read(REGISTER_WHO_AM_I).await?;
         if id != WHO_AM_I {
             return Err(Error::WrongChip { id });
         }
+        // The reset may need the oscillator that `power_down` stopped.
+        self.write(REGISTER_CTRL1, CTRL1_AUTO_INCREMENT).await?;
         self.write(REGISTER_RESET, RESET_COMMAND).await?;
         self.wait_for_reset(delay).await?;
         self.write(REGISTER_CTRL1, CTRL1_AUTO_INCREMENT).await?;
@@ -140,6 +150,23 @@ impl<I: I2c> Qmi8658<I> {
             y: i16::from_le_bytes([y_low, y_high]),
             z: i16::from_le_bytes([z_low, z_high]),
         })
+    }
+
+    /// Turns the sensors and the oscillator off, for deep sleep.
+    ///
+    /// The sensor then draws only its power-down current until the next
+    /// [`Self::init`] restarts it. Both writes are tried even if the first
+    /// fails. Auto-increment stays on.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Bus`] for the first failed write.
+    pub async fn power_down(&mut self) -> Result<(), Error<I::Error>> {
+        let sensors = self.write(REGISTER_CTRL7, CTRL7_SENSORS_OFF).await;
+        let oscillator = self
+            .write(REGISTER_CTRL1, CTRL1_AUTO_INCREMENT | CTRL1_SENSOR_DISABLE)
+            .await;
+        sensors.and(oscillator)
     }
 
     /// Polls the reset result until the soft reset reports completion.

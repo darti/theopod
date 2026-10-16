@@ -31,7 +31,8 @@
 //!   [`PanelAcceleration`]: view rotation from gravity, and the matching
 //!   touch transform.
 //! - [`Tca9554`], [`ExpanderPin`]: TCA9554 async I2C I/O expander with per-pin access.
-//! - [`PanelPower`]: panel rail/reset power-up through the expander.
+//! - [`PanelPower`]: panel rail/reset power-up and power-down through the
+//!   expander.
 
 #![cfg_attr(not(test), no_std)]
 

@@ -110,3 +110,53 @@ fn power_up_waits_settle_then_reset_pulse_then_power_up() {
 
     assert_that!(delay.delays_ms).is_equal_to(vec![1, 2, 3]);
 }
+
+fn power_down(fake: FakeTca9554) -> (Result<(), ErrorKind>, FakeTca9554) {
+    let mut expander = Tca9554::new(fake, 0x20);
+    let result = block_on(POWER.power_down(&mut expander));
+    (result, expander.release())
+}
+
+// Regression guard (t-8): as at power-up, levels are latched before the
+// pins become outputs, so no pin drives a stale level.
+#[test]
+fn power_down_drives_panel_pins_low_as_outputs() {
+    let (result, fake) = power_down(FakeTca9554::new(0x20));
+
+    assert_that!(result).is_ok();
+    // Levels latched low before the pins become outputs.
+    assert_that!(fake.writes).is_equal_to(vec![(TCA_OUTPUT, 0xFC), (TCA_CONFIG, 0xFC)]);
+}
+
+#[test]
+fn power_down_after_power_up_cuts_rails_and_reset() {
+    let mut expander = Tca9554::new(FakeTca9554::new(0x20), 0x20);
+    block_on(POWER.power_up(&mut expander, &mut NoDelay)).unwrap();
+
+    block_on(POWER.power_down(&mut expander)).unwrap();
+
+    let fake = expander.release();
+    assert_that!(fake.registers[usize::from(TCA_OUTPUT)] & POWER.pins).is_equal_to(0);
+    assert_that!(fake.registers[usize::from(TCA_CONFIG)] & POWER.pins).is_equal_to(0);
+}
+
+// EXIO2 (touch reset) is parked by the touch driver, not by the panel.
+#[test]
+fn power_down_leaves_other_expander_pins_untouched() {
+    let mut fake = FakeTca9554::new(0x20);
+    fake.registers[usize::from(TCA_OUTPUT)] = 0x57;
+    fake.registers[usize::from(TCA_CONFIG)] = 0x7F;
+
+    let (result, fake) = power_down(fake);
+
+    assert_that!(result).is_ok();
+    assert_that!(fake.registers[usize::from(TCA_OUTPUT)]).is_equal_to(0x54);
+    assert_that!(fake.registers[usize::from(TCA_CONFIG)]).is_equal_to(0x7C);
+}
+
+#[test]
+fn power_down_bus_failure_returns_i2c_error() {
+    let (result, _) = power_down(FakeTca9554::new(0x20).failing(0));
+
+    assert_that!(result.err()).is_equal_to(Some(ErrorKind::Bus));
+}

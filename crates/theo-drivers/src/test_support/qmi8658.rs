@@ -7,13 +7,17 @@ const QMI_WHO_AM_I: u8 = 0x00;
 const QMI_CTRL1: u8 = 0x02;
 /// CTRL1 bit enabling register auto-increment.
 const QMI_CTRL1_AUTO_INCREMENT: u8 = 0x40;
+/// CTRL1 `sensorDisable` bit: the internal oscillator is off.
+const QMI_CTRL1_SENSOR_DISABLE: u8 = 0x01;
 const QMI_ACCEL_X_LOW: u8 = 0x35;
 const QMI_RESET_RESULT: u8 = 0x4D;
 
 /// Async I2C bus emulating one QMI8658: register file, reads that only
 /// auto-increment once CTRL1 enables it (as on the chip), and a soft reset
 /// that completes after `reset_polls` reads of the reset-result register
-/// (never, when `None`).
+/// (never, when `None`). While CTRL1 `sensorDisable` is set the reset never
+/// completes: whether the chip resets with its oscillator off is not
+/// documented, so the fake assumes the worst.
 ///
 /// `writes` records every register write as `(register, value)`. A bus at
 /// another address NACKs; with `failing` set every transaction fails, and
@@ -54,6 +58,9 @@ impl FakeQmi8658 {
 
     fn read(&mut self, register: u8) -> u8 {
         if register == QMI_RESET_RESULT {
+            if self.registers[usize::from(QMI_CTRL1)] & QMI_CTRL1_SENSOR_DISABLE != 0 {
+                return 0x00;
+            }
             return match &mut self.reset_polls {
                 Some(0) => 0x80,
                 Some(polls) => {

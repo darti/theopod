@@ -156,8 +156,8 @@ impl DeepSleep {
     ///
     /// Waking restarts the firmware. Sleeping with the button down would
     /// wake the chip at once, hence the wait. Peripherals outside the chip
-    /// (the panel, its expander, touch and IMU) keep their state; put them
-    /// to sleep first (only the panel is so far: t-50).
+    /// keep their state: put the panel to sleep, then park [`Touch`] (panel
+    /// rails, touch reset) and power the [`Imu`] down first.
     ///
     /// If GPIO0 cannot be armed as a wakeup source, which its RTC pad rules
     /// out, the chip restarts instead: the panel is already dark, and a
@@ -198,7 +198,8 @@ impl fmt::Debug for DeepSleep {
 /// CST820 touch controller; interrupt on GPIO21 (Waveshare BSP
 /// `BSP_LCD_TOUCH_INT`, active low), points in panel pixels.
 ///
-/// It reaches the shared [`Expander`] to reset the controller at run time.
+/// It reaches the shared [`Expander`] to reset the controller at run time,
+/// and to cut the panel rails before deep sleep ([`Touch::park`]).
 pub struct Touch {
     controller: Cst820<I2cDevice, Input<'static>, Delay>,
     expander: &'static Expander,
@@ -207,7 +208,8 @@ pub struct Touch {
 /// The TCA9554 expander, shared by its runtime users (ADR-0005).
 ///
 /// EXIO0/1 hold the panel reset and power, EXIO2 the touch reset; today
-/// only [`Touch`] uses it at run time. One `Tca9554` behind a mutex: a user locks it for a whole change, so
+/// only [`Touch`] uses it at run time (resets, and parking before deep
+/// sleep). One `Tca9554` behind a mutex: a user locks it for a whole change, so
 /// read-modify-writes cannot interleave, and the driver's register copy
 /// stays the single view of the chip. Hand out `&'static Expander`, never a
 /// second `Tca9554`.
@@ -242,6 +244,27 @@ impl Touch {
         let mut expander = self.expander.lock().await;
         self.controller.init(&mut expander, TOUCH_RESET).await
     }
+
+    /// Holds the controller in reset and cuts the panel rails, for deep
+    /// sleep.
+    ///
+    /// Call it after the panel's sleep-in. Both steps are tried even if the
+    /// first fails; the expander keeps its pins until the next boot powers
+    /// the panel and resets the controller again.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first expander error.
+    pub async fn park(&mut self) -> Result<(), I2cDeviceError<I2cError>> {
+        // Held across both steps, like a reset: no expander change slips in.
+        let mut expander = self.expander.lock().await;
+        let held = self
+            .controller
+            .hold_in_reset(&mut expander, TOUCH_RESET)
+            .await;
+        let cut = PANEL_POWER.power_down(&mut expander).await;
+        held.and(cut)
+    }
 }
 
 impl fmt::Debug for Touch {
@@ -253,6 +276,8 @@ impl fmt::Debug for Touch {
 }
 
 /// QMI8658 accelerometer, used for the screen orientation.
+///
+/// Power it down with [`Qmi8658::power_down`] before deep sleep.
 pub type Imu = Qmi8658<I2cDevice>;
 
 /// I2C0 on GPIO15 (SDA) / GPIO14 (SCL), locked per transaction.

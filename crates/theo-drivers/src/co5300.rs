@@ -1,7 +1,7 @@
 //! HAL-independent CO5300 AMOLED controller driver.
 //!
 //! - [`Co5300`]: initializes the panel, puts it to sleep, and streams the
-//!   bus's RGB565 framebuffer over any [`QspiBus`], with delays from any
+//!   bus's RGB565 framebuffer over any [`FrameBus`], with delays from any
 //!   `embedded-hal-async` [`DelayNs`]. Framebuffer ranges longer than
 //!   [`QspiBus::MAX_TRANSFER_LEN`] are split.
 //! - [`PanelGeometry`]: visible size and RAM offset of the attached panel.
@@ -19,7 +19,7 @@ use embedded_hal_async::delay::DelayNs;
 
 use crate::{
     panel::Panel,
-    qspi::{Lanes, QspiBus},
+    qspi::{FrameBus, Lanes, QspiBus},
     retry::Transient,
 };
 
@@ -76,6 +76,13 @@ pub enum Error<E> {
         /// The rejected geometry.
         geometry: PanelGeometry,
     },
+    /// The bus framebuffer is not exactly one RGB565 frame of the geometry.
+    FrameSizeMismatch {
+        /// Bytes of one RGB565 frame of the panel geometry.
+        expected: usize,
+        /// Bytes of the bus framebuffer.
+        actual: usize,
+    },
     /// The area is empty, not aligned on 2x2 pixel blocks, or exceeds the panel.
     InvalidArea {
         /// Requested columns.
@@ -102,6 +109,9 @@ impl<E: fmt::Debug> fmt::Display for Error<E> {
         match self {
             Self::Bus(error) => write!(f, "bus transfer failed: {error:?}"),
             Self::InvalidGeometry { geometry } => write!(f, "invalid panel geometry {geometry:?}"),
+            Self::FrameSizeMismatch { expected, actual } => {
+                write!(f, "frame holds {actual} bytes, panel needs {expected}")
+            }
             Self::InvalidArea { x, y } => write!(f, "invalid area columns {x:?} rows {y:?}"),
             Self::InvalidRange { bytes } => write!(f, "invalid framebuffer range {bytes:?}"),
             Self::PixelOverflow {
@@ -122,6 +132,7 @@ impl<E: Transient> Transient for Error<E> {
         match self {
             Self::Bus(error) => error.is_transient(),
             Self::InvalidGeometry { .. }
+            | Self::FrameSizeMismatch { .. }
             | Self::InvalidArea { .. }
             | Self::InvalidRange { .. }
             | Self::PixelOverflow { .. } => false,
@@ -146,6 +157,14 @@ pub struct PanelGeometry {
 }
 
 impl PanelGeometry {
+    /// Bytes of one RGB565 frame, if they fit in `u32` (and so in `usize`).
+    fn frame_len(&self) -> Option<usize> {
+        let bytes = u32::from(self.width)
+            .checked_mul(u32::from(self.height))?
+            .checked_mul(2)?;
+        usize::try_from(bytes).ok()
+    }
+
     fn is_valid(&self) -> bool {
         let even = |value: u16| value.is_multiple_of(2);
         even(self.width)
@@ -154,10 +173,7 @@ impl PanelGeometry {
             && self.width > 0
             && self.height > 0
             && self.column_offset.checked_add(self.width).is_some()
-            && u32::from(self.width)
-                .checked_mul(u32::from(self.height))
-                .and_then(|pixels| pixels.checked_mul(2))
-                .is_some()
+            && self.frame_len().is_some()
     }
 }
 
@@ -170,15 +186,22 @@ pub struct Co5300<B> {
     remaining: usize,
 }
 
-impl<B: QspiBus> Co5300<B> {
+impl<B: FrameBus> Co5300<B> {
     /// Wraps the bus connected to a panel with the given `geometry`.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidGeometry`] if `geometry` cannot be addressed.
+    /// Returns [`Error::InvalidGeometry`] if `geometry` cannot be addressed;
+    /// for a valid one, [`Error::FrameSizeMismatch`] if the bus framebuffer
+    /// is not exactly one RGB565 frame of it.
     pub fn new(bus: B, geometry: PanelGeometry) -> Result<Self, Error<B::Error>> {
-        if !geometry.is_valid() {
-            return Err(Error::InvalidGeometry { geometry });
+        let expected = match geometry.frame_len() {
+            Some(len) if geometry.is_valid() => len,
+            _ => return Err(Error::InvalidGeometry { geometry }),
+        };
+        let actual = bus.frame().len();
+        if actual != expected {
+            return Err(Error::FrameSizeMismatch { expected, actual });
         }
         Ok(Self {
             bus,
@@ -186,7 +209,9 @@ impl<B: QspiBus> Co5300<B> {
             remaining: 0,
         })
     }
+}
 
+impl<B: QspiBus> Co5300<B> {
     /// Releases the underlying bus.
     pub fn release(self) -> B {
         self.bus
@@ -255,7 +280,7 @@ impl<B: QspiBus> Co5300<B> {
     }
 }
 
-impl<B: QspiBus> Panel for Co5300<B> {
+impl<B: FrameBus> Panel for Co5300<B> {
     type Error = Error<B::Error>;
 
     fn size(&self) -> (u16, u16) {

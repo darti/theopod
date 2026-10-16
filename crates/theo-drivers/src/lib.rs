@@ -13,8 +13,8 @@
 //!   after failed flushes; [`reset_due`]: when to reset a failing device.
 //! - [`StaleWatch`], [`WatchAction`], [`encode_resets`], [`decode_resets`]:
 //!   when a display that stays broken calls for a reboot.
-//! - [`QspiBus`], [`Lanes`]: Quad-SPI transport for display controllers,
-//!   holding the framebuffer it sends in place.
+//! - [`QspiBus`], [`Lanes`]: Quad-SPI transport for display controllers;
+//!   [`FrameBus`]: one that holds the framebuffer it sends in place.
 //! - [`ChipSelect`]: chip select released even when a transfer is cancelled.
 //! - [`dma_layout`]: descriptor and payload arithmetic of in-place DMA
 //!   transfers ([`descriptor_chunks`], [`DmaChunk`], [`frame_payload`],
@@ -103,7 +103,7 @@ pub use orientation::{Axis, AxisMap, OrientationDetector, PanelAcceleration, Rot
 pub use panel::Panel;
 pub use panel_power::PanelPower;
 pub use qmi8658::{Acceleration, Error as Qmi8658Error, Qmi8658};
-pub use qspi::{Lanes, QspiBus};
+pub use qspi::{FrameBus, Lanes, QspiBus};
 pub use retry::{FlushRetry, Retry, Transient, reset_due};
 pub use stale_watch::{StaleWatch, WatchAction, decode_resets, encode_resets};
 pub use tca9554::{Pin as ExpanderPin, Tca9554};

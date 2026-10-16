@@ -68,3 +68,19 @@ Consequence: rendering and sending share the one framebuffer the bus
 holds (`frame_mut` and `write_frame` both borrow it), so double buffering
 (drawing the next frame during the DMA of the previous one) needs a trait
 change; ADR-0004 already keeps it out of scope.
+
+## Update (t-58): the framebuffer moves to a `FrameBus` subtrait
+
+`QspiBus` is back to a transport: `Error`, `MAX_TRANSFER_LEN` and
+`write`. `FrameBus: QspiBus` adds `frame`, `frame_mut` and `write_frame`
+(whose length stays fixed); `Co5300`'s constructor and `Panel` impl
+require it. A command-only QSPI device no longer has to carry a frame.
+`Co5300`'s register methods (`init`, `sleep`) are written against
+`QspiBus` only, so generic code holding a `Co5300` (a panel recovery, for
+example) needs no frame bound, but a `Co5300` is always built on a
+`FrameBus`. Double buffering is still out of reach: `Panel`, `flush_rows`
+and the shared `&mut self` borrow of the one frame would all have to
+change, not only `FrameBus` (ADR-0004 keeps it out of scope).
+`Co5300::new` also checks that the bus frame holds exactly one RGB565
+frame of the geometry (`Error::FrameSizeMismatch`), so a wrong-sized
+framebuffer fails at construction rather than on a flush.

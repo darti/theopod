@@ -5,7 +5,8 @@ use crate::{
     panel::Panel,
     qspi::Lanes,
     test_support::{
-        BusFault, NoDelay, RecordingBus, RecordingDelay, Transfer, block_on, poll_once,
+        BusFault, NoDelay, RecordingBus, RecordingDelay, Transfer, block_on, counting_frame,
+        poll_once,
     },
 };
 
@@ -15,14 +16,54 @@ const GEOMETRY: PanelGeometry = PanelGeometry {
     column_offset: 16,
 };
 
+/// Bytes of a full [`GEOMETRY`] frame of RGB565.
+const FRAME_LEN: usize = GEOMETRY.width as usize * GEOMETRY.height as usize * 2;
+
+/// A panel whose bus frame counts up ([`counting_frame`]).
 fn panel() -> Co5300<RecordingBus> {
-    Co5300::new(RecordingBus::default(), GEOMETRY).unwrap()
+    panel_on(RecordingBus::default())
 }
 
+/// A panel on `bus`, given a full [`GEOMETRY`] frame that counts up.
+fn panel_on(bus: RecordingBus) -> Co5300<RecordingBus> {
+    Co5300::new(bus.with_frame(counting_frame(FRAME_LEN)), GEOMETRY).unwrap()
+}
+
+/// A recording bus with a full [`GEOMETRY`] frame that counts up.
+fn bus() -> RecordingBus {
+    RecordingBus::default().with_frame(counting_frame(FRAME_LEN))
+}
+
+/// The bus holds a full [`GEOMETRY`] frame, which none of the invalid
+/// geometries matches: the geometry check must come first.
 fn assert_invalid_geometry(geometry: PanelGeometry) {
-    let result = Co5300::new(RecordingBus::default(), geometry);
+    let result = Co5300::new(bus(), geometry);
 
     assert_that!(result.err()).is_equal_to(Some(Error::InvalidGeometry { geometry }));
+}
+
+#[test]
+fn new_frame_shorter_than_geometry_returns_frame_size_mismatch() {
+    let bus = RecordingBus::default().with_frame(counting_frame(FRAME_LEN - 2));
+
+    let result = Co5300::new(bus, GEOMETRY);
+
+    assert_that!(result.err()).is_equal_to(Some(Error::FrameSizeMismatch {
+        expected: FRAME_LEN,
+        actual: FRAME_LEN - 2,
+    }));
+}
+
+#[test]
+fn new_frame_longer_than_geometry_returns_frame_size_mismatch() {
+    let bus = RecordingBus::default().with_frame(counting_frame(FRAME_LEN + 2));
+
+    let result = Co5300::new(bus, GEOMETRY);
+
+    assert_that!(result.err()).is_equal_to(Some(Error::FrameSizeMismatch {
+        expected: FRAME_LEN,
+        actual: FRAME_LEN + 2,
+    }));
 }
 
 #[test]
@@ -130,7 +171,7 @@ fn init_sends_waveshare_v2_sequence() {
 
 #[test]
 fn init_bus_failure_returns_bus_error_and_stops() {
-    let mut panel = Co5300::new(RecordingBus::failing(2), GEOMETRY).unwrap();
+    let mut panel = panel_on(RecordingBus::failing(2));
 
     let result = block_on(panel.init(&mut NoDelay));
 
@@ -162,7 +203,7 @@ fn sleep_waits_for_controller_to_settle() {
 
 #[test]
 fn sleep_in_failure_returns_bus_error_without_settling() {
-    let mut panel = Co5300::new(RecordingBus::failing(1), GEOMETRY).unwrap();
+    let mut panel = panel_on(RecordingBus::failing(1));
     let mut delay = RecordingDelay::default();
 
     let result = block_on(panel.sleep(&mut delay));
@@ -174,7 +215,7 @@ fn sleep_in_failure_returns_bus_error_without_settling() {
 
 #[test]
 fn sleep_bus_failure_returns_bus_error_and_stops() {
-    let mut panel = Co5300::new(RecordingBus::failing(0), GEOMETRY).unwrap();
+    let mut panel = panel_on(RecordingBus::failing(0));
 
     let result = block_on(panel.sleep(&mut NoDelay));
 
@@ -257,7 +298,7 @@ fn begin_area_beyond_panel_returns_invalid_area() {
 
 #[test]
 fn begin_area_bus_failure_closes_previous_area() {
-    let mut panel = Co5300::new(RecordingBus::failing(3), GEOMETRY).unwrap();
+    let mut panel = panel_on(RecordingBus::failing(3));
     block_on(panel.begin_area(0..2, 0..2)).unwrap();
 
     let reopened = block_on(panel.begin_area(0..2, 0..2));
@@ -275,8 +316,9 @@ fn begin_area_bus_failure_closes_previous_area() {
 // the command/address phases.
 #[test]
 fn write_frame_sends_quad_data_with_memory_write_continue() {
-    let bus = RecordingBus::default().with_frame(vec![0xF8, 0x00, 0x07, 0xE0]);
-    let mut panel = Co5300::new(bus, GEOMETRY).unwrap();
+    let mut frame = counting_frame(FRAME_LEN);
+    frame[..4].copy_from_slice(&[0xF8, 0x00, 0x07, 0xE0]);
+    let mut panel = Co5300::new(RecordingBus::default().with_frame(frame), GEOMETRY).unwrap();
     block_on(panel.begin_area(0..2, 0..2)).unwrap();
 
     block_on(panel.write_frame(0..4)).unwrap();
@@ -323,7 +365,7 @@ fn write_frame_non_multiple_of_bus_limit_sends_remainder_last() {
 // is unknown, as after a cancellation.
 #[test]
 fn write_frame_failure_after_first_chunk_closes_the_area() {
-    let mut panel = Co5300::new(RecordingBus::failing(4), GEOMETRY).unwrap();
+    let mut panel = panel_on(RecordingBus::failing(4));
     block_on(panel.begin_area(0..4, 0..4)).unwrap();
 
     let failed = block_on(panel.write_frame(0..32));
@@ -353,7 +395,7 @@ fn write_frame_after_area_filled_returns_pixel_overflow() {
 
 #[test]
 fn write_frame_bus_failure_requires_new_area() {
-    let mut panel = Co5300::new(RecordingBus::failing(3), GEOMETRY).unwrap();
+    let mut panel = panel_on(RecordingBus::failing(3));
     block_on(panel.begin_area(0..2, 0..2)).unwrap();
 
     let failed = block_on(panel.write_frame(0..8));
@@ -368,7 +410,7 @@ fn write_frame_bus_failure_requires_new_area() {
 // transfer, so the area's remaining budget is unknown.
 #[test]
 fn write_frame_cancelled_mid_transfer_requires_new_area() {
-    let mut panel = Co5300::new(RecordingBus::pending(3), GEOMETRY).unwrap();
+    let mut panel = panel_on(RecordingBus::pending(3));
     block_on(panel.begin_area(0..2, 0..2)).unwrap();
 
     let completed = poll_once(panel.write_frame(0..8));
@@ -426,6 +468,31 @@ fn write_frame_odd_byte_count_returns_pixel_overflow() {
 }
 
 #[test]
+fn error_display_describes_frame_size_mismatch() {
+    let message = Error::<BusFault>::FrameSizeMismatch {
+        expected: 8,
+        actual: 6,
+    }
+    .to_string();
+
+    assert_that!(message.as_str()).is_equal_to("frame holds 6 bytes, panel needs 8");
+}
+
+#[test]
+fn write_frame_range_ending_at_the_frame_end_sends_the_last_bytes() {
+    let mut panel = panel();
+    block_on(panel.begin_area(0..2, 0..2)).unwrap();
+
+    let result = block_on(panel.write_frame(FRAME_LEN - 8..FRAME_LEN));
+
+    assert_that!(result).is_ok();
+    let last = counting_frame(FRAME_LEN)[FRAME_LEN - 8..].to_vec();
+    assert_that!(panel.release().transfers.last().cloned())
+        .is_some()
+        .is_equal_to(Transfer::pixels(&last));
+}
+
+#[test]
 fn error_display_describes_invalid_area() {
     let message = Error::<BusFault>::InvalidArea { x: 1..3, y: 0..2 }.to_string();
 
@@ -450,9 +517,11 @@ fn write_frame_past_the_frame_returns_invalid_range_before_sending() {
     let mut panel = panel();
     block_on(panel.begin_area(0..4, 0..4)).unwrap();
 
-    let result = block_on(panel.write_frame(48..80));
+    let past_end = FRAME_LEN - 16..FRAME_LEN + 16;
 
-    assert_that!(result.err()).is_equal_to(Some(Error::InvalidRange { bytes: 48..80 }));
+    let result = block_on(panel.write_frame(past_end.clone()));
+
+    assert_that!(result.err()).is_equal_to(Some(Error::InvalidRange { bytes: past_end }));
     // Only the three area registers: no partial pixel transfer.
     assert_that!(panel.release().transfers).has_length(3);
 }

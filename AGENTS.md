@@ -20,7 +20,8 @@ the ESP toolchain and target are defined in `rust-toolchain.toml`.
   implemented.
 - Keep ESP- and board-specific code in `src/device/`. Drivers in
   `crates/theo-drivers` must stay HAL-independent (`embedded-hal` and
-  `embedded-hal-async` traits and `QspiBus` only) and keep their host unit tests passing.
+  `embedded-hal-async` traits and `QspiBus`/`FrameBus` only) and keep
+  their host unit tests passing.
 - Keep changes compatible with the `xtensa-esp32s3-none-elf` target and the
   dependency versions declared in `Cargo.toml`.
 - Record significant technical decisions in `docs/adr/`.

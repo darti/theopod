@@ -37,9 +37,9 @@ for the V2 pinout and hardware resources.
   watchdog, the start-cause log and the display reboot count.
 - `src/slint_backend.rs`: Slint platform and framebuffer rendering.
 - `crates/theo-drivers/`: HAL-independent drivers (CO5300, TCA9554, CST820,
-  QMI8658, panel power-up/down, button and long press, `Panel`, `QspiBus`,
-  framebuffer flushing) and the view-orientation logic, unit-tested on the
-  host. See its `ARCHITECTURE.md`.
+  QMI8658, panel power-up/down, button and long press, `Panel`,
+  `QspiBus`/`FrameBus`, framebuffer flushing) and the view-orientation logic,
+  unit-tested on the host. See its `ARCHITECTURE.md`.
 - `crates/theo-frame-dump/`: `no_std` text format for dumping the framebuffer
   over the serial log (firmware writer, host parser).
 - `tools/frame-png/`: host tool turning a dump in a serial log into a PNG.

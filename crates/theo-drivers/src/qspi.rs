@@ -1,11 +1,13 @@
 //! Quad-SPI command bus abstraction for display controllers.
 //!
-//! - [`QspiBus`]: transport trait used by QSPI panel drivers; it holds the
-//!   panel's framebuffer, which it sends from in place.
+//! - [`QspiBus`]: transport trait used by QSPI device drivers: commands and
+//!   data from the caller's buffers.
+//! - [`FrameBus`]: a [`QspiBus`] that also holds a panel's framebuffer and
+//!   sends from it in place.
 //! - [`Lanes`]: number of data lines used by the data phase.
 //!
-//! `embedded-hal` has no Quad-SPI trait, so panel drivers depend on
-//! [`QspiBus`] instead of a concrete HAL.
+//! `embedded-hal` has no Quad-SPI trait, so QSPI drivers depend on
+//! [`QspiBus`] (and panel drivers on [`FrameBus`]) instead of a concrete HAL.
 
 use core::{fmt::Debug, ops::Range};
 
@@ -18,19 +20,14 @@ pub enum Lanes {
     Quad,
 }
 
-/// Transport for QSPI panels using an 8-bit opcode and 24-bit address frame.
+/// Transport for QSPI devices using an 8-bit opcode and 24-bit address frame.
 ///
-/// Implement this trait to run a QSPI panel driver on another HAL. The
+/// Implement this trait to run a QSPI device driver on another HAL. The
 /// opcode and address phases are always sent on a single line; only the data
 /// phase uses `lanes`. Chip select must stay asserted for the whole transfer.
 ///
-/// The bus owns the panel's framebuffer: a DMA implementation reads it in
-/// place, so it must know it is the frame (ADR-0004). The renderer draws
-/// into [`QspiBus::frame_mut`] between transfers, and drivers send byte
-/// ranges of it with [`QspiBus::write_frame`].
-///
-/// The trait is async so DMA implementations can yield while a framebuffer
-/// is streamed out. Implementations should be cancel-safe: dropping a
+/// The trait is async so DMA implementations can yield during long
+/// transfers. Implementations should be cancel-safe: dropping a
 /// [`QspiBus::write`] future mid-transfer must release chip select (see
 /// [`crate::ChipSelect`]) and leave the bus usable, the device then holding
 /// a partial transfer.
@@ -55,10 +52,26 @@ pub trait QspiBus {
         lanes: Lanes,
         data: &[u8],
     ) -> Result<(), Self::Error>;
+}
 
+/// A [`QspiBus`] holding the panel framebuffer it sends from in place.
+///
+/// Implement this trait to run a framebuffer panel driver (such as
+/// `Co5300`'s `Panel`) on another HAL. A DMA implementation reads the frame
+/// in place, so it must know it is the frame (ADR-0004). The renderer
+/// draws into [`FrameBus::frame_mut`] between transfers, and panel drivers
+/// send byte ranges of it with [`FrameBus::write_frame`], which must be
+/// cancel-safe like [`QspiBus::write`]. Command-only devices need
+/// [`QspiBus`] alone.
+#[expect(
+    async_fn_in_trait,
+    reason = "single-threaded executor; implementations need no `Send` bound"
+)]
+pub trait FrameBus: QspiBus {
     /// The framebuffer the bus sends from, as raw bytes.
     ///
-    /// Its size and pixel format are the panel driver's contract.
+    /// Its size and pixel format are the panel driver's contract; its length
+    /// stays fixed for the life of the bus.
     fn frame(&self) -> &[u8];
 
     /// The framebuffer, to draw into between transfers.

@@ -1,7 +1,7 @@
 //! Host-side fakes for driver tests.
 //!
-//! - [`RecordingBus`]: [`QspiBus`] that records every transfer.
-//! - [`AddressBus`]: [`QspiBus`] that records where frame transfers start.
+//! - [`RecordingBus`]: [`FrameBus`] that records every transfer.
+//! - [`AddressBus`]: [`FrameBus`] that records where frame transfers start.
 //! - [`counting_frame`]: a frame whose bytes count up, wrapping.
 //! - [`RecordingPanel`]: [`Panel`] that records every call.
 //! - [`FakeTca9554`]: async I2C bus modelling a TCA9554's registers; can
@@ -29,7 +29,7 @@ use embedded_hal_async::delay::DelayNs;
 use crate::{
     co5300::OPCODE_WRITE_PIXELS,
     panel::Panel,
-    qspi::{Lanes, QspiBus},
+    qspi::{FrameBus, Lanes, QspiBus},
     retry::Transient,
 };
 
@@ -91,7 +91,8 @@ impl Transient for BusFault {
 ///
 /// It accepts at most 16 bytes per transfer and panics on longer payloads,
 /// so every test checks that drivers respect `MAX_TRANSFER_LEN`. Its frame
-/// is [`counting_frame`]`(64)` unless set with [`RecordingBus::with_frame`].
+/// is [`counting_frame`]`(64)` unless set with [`RecordingBus::with_frame`]:
+/// a `Co5300` needs a full frame of its geometry.
 #[derive(Debug)]
 pub struct RecordingBus {
     pub transfers: Vec<Transfer>,
@@ -182,7 +183,9 @@ impl QspiBus for RecordingBus {
         })
         .await
     }
+}
 
+impl FrameBus for RecordingBus {
     fn frame(&self) -> &[u8] {
         &self.frame
     }
@@ -254,7 +257,9 @@ impl<const MAX: usize> QspiBus for AddressBus<MAX> {
         );
         Ok(())
     }
+}
 
+impl<const MAX: usize> FrameBus for AddressBus<MAX> {
     fn frame(&self) -> &[u8] {
         &self.frame
     }

@@ -1,4 +1,4 @@
-//! [`QspiBus`] implementation for an esp-hal SPI master with DMA.
+//! [`QspiBus`] and [`FrameBus`] for an esp-hal SPI master with DMA.
 //!
 //! - [`EspQspi`]: async half-duplex SPI master with a software chip select,
 //!   owning the PSRAM framebuffer.
@@ -30,7 +30,9 @@ use esp_hal::{
         master::{Address, Command, DataMode, SpiDma, SpiDmaTransfer},
     },
 };
-use theo_drivers::{ChipSelect, FramePayloadError, Lanes, QspiBus, Transient, frame_payload};
+use theo_drivers::{
+    ChipSelect, FrameBus, FramePayloadError, Lanes, QspiBus, Transient, frame_payload,
+};
 
 use super::psram_tx_buf::{self, PsramTxBuf};
 
@@ -378,7 +380,9 @@ impl<CS: OutputPin> QspiBus for EspQspi<'_, CS> {
         self.transfer(opcode, address, lanes, Source::Slice(data))
             .await
     }
+}
 
+impl<CS: OutputPin> FrameBus for EspQspi<'_, CS> {
     fn frame(&self) -> &[u8] {
         &*self.frame
     }

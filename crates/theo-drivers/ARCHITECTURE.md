@@ -3,7 +3,8 @@
 HAL-independent drivers for the Theo Pod hardware, plus HAL-free logic
 (orientation, flush bands and retries, DMA arithmetic). `no_std`, depends
 only on `embedded-hal` / `embedded-hal-async`, unit-tested on the host
-(`just test`). See `docs/adr/0001` and `0002` for why.
+(`just test`). See `docs/adr/0001` and `0002` for why. Dependencies: no
+sibling crates; the firmware crate (`theo-pod`) depends on this one.
 
 ## Contents
 
@@ -13,13 +14,14 @@ only on `embedded-hal` / `embedded-hal-async`, unit-tested on the host
   `flush_bands` sends each band of a `DirtyRows` (few disjoint bands).
 - `retry.rs`, `stale_watch.rs`: `Transient` errors, the `FlushRetry` and
   `reset_due` policies; `StaleWatch`, the reboot policy for a broken panel.
-- `qspi.rs`: async `QspiBus` trait (8-bit opcode, 24-bit address, single or
-  quad data, `MAX_TRANSFER_LEN`; holds the framebuffer, `write_frame`).
+- `qspi.rs`: async `QspiBus` transport (8-bit opcode, 24-bit address,
+  single or quad data, `MAX_TRANSFER_LEN`); `FrameBus` adds the
+  framebuffer it sends in place (`write_frame`).
 - `chip_select.rs`: `ChipSelect`, released on drop (cancel-safe buses).
 - `dma_layout.rs`, `memory_check.rs`: in-place PSRAM DMA arithmetic;
   `check_pattern`, a RAM self-test.
-- `co5300.rs`: CO5300 AMOLED (init, sleep), a `Panel` on any `QspiBus`;
-  checks geometry, 2x2 areas and pixel counts, splits long payloads.
+- `co5300.rs`: CO5300 AMOLED (init, sleep), a `Panel` on any `FrameBus`;
+  checks geometry, frame size, areas and pixel counts, splits payloads.
 - `tca9554.rs`, `panel_power.rs`: TCA9554 expander (registers read once,
   then cached; levels before direction); `PanelPower`, rail pulse/cut.
 - `cst820.rs`: `Cst820` touch, reset by a `Tca9554` pin; interrupt-driven
@@ -34,16 +36,13 @@ only on `embedded-hal` / `embedded-hal-async`, unit-tested on the host
 
 ## Extension points
 
-- Implement `QspiBus` to run the CO5300 on another HAL (the ESP32-S3
-  implementation lives in the firmware crate, `src/device/esp_qspi.rs`).
+- Implement `QspiBus` and `FrameBus` to run the CO5300 on another HAL
+  (ESP32-S3: `src/device/esp_qspi.rs`).
 - Implement `Panel` to support another display controller.
 
-## Dependencies
-
-No sibling crates; the firmware crate (`theo-pod`) depends on this one.
 ## Tests
 
 Side-by-side `*_tests.rs` files use the fakes in `test_support/`
-(recording `QspiBus` and `Panel`, delays, one async I2C fake per chip).
+(recording `FrameBus` and `Panel`, delays, one async I2C fake per chip).
 Hardware-only: QSPI phases and DMA of `src/device/` (their arithmetic is
 `dma_layout.rs`), CST820 timing, and the IMU axis map.

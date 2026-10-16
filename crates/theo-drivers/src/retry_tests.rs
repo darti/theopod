@@ -139,6 +139,16 @@ fn flush_error_frame_size_mismatch_is_permanent() {
 }
 
 #[test]
+fn co5300_frame_size_mismatch_is_permanent() {
+    let error = Co5300Error::<BusFault>::FrameSizeMismatch {
+        expected: 8,
+        actual: 6,
+    };
+
+    assert_that!(error.is_transient()).is_false();
+}
+
+#[test]
 fn co5300_invalid_area_is_permanent() {
     let error = Co5300Error::<BusFault>::InvalidArea { x: 0..1, y: 0..2 };
 

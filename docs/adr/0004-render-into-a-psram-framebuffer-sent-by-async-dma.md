@@ -23,7 +23,7 @@ of PSRAM that the GDMA can read.
   region, and allocates one zeroed full-panel framebuffer there with
   `allocator_api2` + `esp_alloc::ExternalMemory`, 64-byte aligned. The
   display owns it from then on (t-46): `EspQspi` holds it as
-  `&'static mut [u8]`, `QspiBus`/`Panel` expose it (`frame`, `frame_mut`)
+  `&'static mut [u8]`, `FrameBus`/`Panel` expose it (`frame`, `frame_mut`)
   and send byte ranges of it (`write_frame`), so framebuffer transfers are
   an explicit API rather than inferred from payload addresses.
 - Slint renders into it (borrowed through `Panel::frame_mut`) with

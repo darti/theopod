@@ -7,7 +7,7 @@
 //! - [`Button`]: the BOOT push button, debounced.
 //! - [`DeepSleep`]: stops the chip until the BOOT button is pressed.
 //! - [`Touch`]: the CST820 touch controller, with the expander that resets
-//!   it.
+//!   it; [`TouchError`], [`TouchResetError`]: its failures.
 //! - [`Expander`]: the TCA9554, shared by its runtime users.
 //! - [`Imu`], [`IMU_AXES`]: the QMI8658 accelerometer, and how its axes lie
 //!   on the panel.
@@ -27,24 +27,25 @@
 //! implements [`theo_drivers::Panel`].
 
 mod esp_qspi;
+mod expander;
 mod psram_tx_buf;
 mod restart;
+mod sleep;
 
-use core::{convert::Infallible, fmt};
+use core::fmt;
 
 use esp_backtrace as _;
 
 use allocator_api2::{boxed::Box, vec};
-use embassy_embedded_hal::shared_bus::{I2cDeviceError, asynch::i2c::I2cDevice as SharedI2cDevice};
+use embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice as SharedI2cDevice;
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, mutex::Mutex};
 use embassy_time::{Delay, Instant};
 use esp_alloc::ExternalMemory;
 use esp_hal::{
     Async,
-    gpio::{Event, Input, InputConfig, Level, Output, OutputConfig, Pull, WakeupConfig},
-    i2c::master::{BusTimeout, Config as I2cConfig, Error as I2cError, I2c},
+    gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull},
+    i2c::master::{BusTimeout, Config as I2cConfig, I2c},
     psram::{PsramConfig, PsramMode, SpiRamFreq},
-    rtc_cntl::sleep::{LowPower, RtcSleepConfig},
     spi::{
         Mode,
         master::{Config as SpiConfig, Spi},
@@ -54,16 +55,22 @@ use esp_hal::{
 };
 use static_cell::StaticCell;
 
+pub use self::expander::{Expander, Touch};
+#[expect(
+    unused_imports,
+    reason = "named in `Touch`'s signatures and the docs; callers (`input`) only infer them"
+)]
+pub use self::expander::{TouchError, TouchResetError};
 pub use self::restart::{
     WATCHDOG_TIMEOUT_MS, Watchdog, clear_display_resets, display_resets, log_start_cause,
     reset_for_display,
 };
+pub use self::sleep::DeepSleep;
 use self::{esp_qspi::EspQspi, psram_tx_buf::PsramTxBuf};
 use embedded_hal::digital::PinState;
 use theo_drivers::{
-    Axis, AxisMap, Co5300, Cst820, Cst820Error, Cst820InitError, DebouncedButton, ExpanderPin,
-    PanelGeometry, PanelPower, PanelSize, Qmi8658, Tca9554, TouchEvent, Transient,
-    check_pattern_with, flush_rows,
+    Axis, AxisMap, Co5300, Cst820, DebouncedButton, ExpanderPin, PanelGeometry, PanelPower,
+    PanelSize, Qmi8658, Tca9554, Transient, check_pattern_with, flush_rows,
 };
 
 pub use esp_hal::main as entry;
@@ -148,139 +155,6 @@ pub type Display = Co5300<EspQspi<'static, Output<'static>>>;
 /// A press held at start-up, such as the one that woke the chip from
 /// [`DeepSleep`], only reports its release.
 pub type Button = DebouncedButton<Input<'static>, Delay>;
-
-/// Deep sleep of the ESP32-S3, ended by a press of the BOOT button.
-///
-/// GPIO0 is an RTC pad, so it can wake the chip while the digital domain
-/// is off. Waking resets the chip: the firmware starts again from
-/// [`Board::init`].
-pub struct DeepSleep {
-    low_power: LowPower<'static>,
-}
-
-impl DeepSleep {
-    /// Waits for `button` to be released, then sleeps until it is pressed.
-    ///
-    /// Waking restarts the firmware. Sleeping with the button down would
-    /// wake the chip at once, hence the wait. Peripherals outside the chip
-    /// keep their state: put the panel to sleep, then park [`Touch`] (panel
-    /// rails, touch reset) and power the [`Imu`] down first.
-    ///
-    /// If GPIO0 cannot be armed as a wakeup source, which its RTC pad rules
-    /// out, the chip restarts instead: the panel is already dark, and a
-    /// halted chip would look dead.
-    pub async fn until_pressed(mut self, mut button: Button) -> ! {
-        while button.is_pressed() {
-            match button.changed().await {
-                Ok(_) => {}
-                Err(never) => match never {},
-            }
-        }
-        let (mut pin, _) = button.release();
-        // The low-power path is the one that works with the digital domain
-        // off; sleep keeps the pin's pull-up, so the pad stays high.
-        if let Err(error) =
-            pin.apply_wakeup_config(&WakeupConfig::default().with_low_power_path(true))
-        {
-            log::error!("BOOT button cannot wake the chip, restarting: {error:?}");
-            esp_hal::system::software_reset();
-        }
-        log::info!("entering deep sleep until BOOT is pressed");
-        // The wake level is the listen trigger. Interrupts stay off from
-        // here: the async GPIO handler would stop listening on a press
-        // and leave the sleep without a wakeup source.
-        critical_section::with(|_| {
-            pin.listen(Event::LowLevel);
-            self.low_power.sleep_deep(RtcSleepConfig::deep())
-        })
-    }
-}
-
-impl fmt::Debug for DeepSleep {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("DeepSleep").finish_non_exhaustive()
-    }
-}
-
-/// CST820 touch controller; interrupt on GPIO21 (Waveshare BSP
-/// `BSP_LCD_TOUCH_INT`, active low), points in panel pixels.
-///
-/// It reaches the shared [`Expander`] to reset the controller at run time,
-/// and to cut the panel rails before deep sleep ([`Touch::park`]).
-pub struct Touch {
-    controller: Cst820<I2cDevice, Input<'static>, Delay>,
-    expander: &'static Expander,
-}
-
-/// The TCA9554 expander, shared by its runtime users (ADR-0005).
-///
-/// EXIO0/1 hold the panel reset and power, EXIO2 the touch reset; today
-/// only [`Touch`] uses it at run time (resets, and parking before deep
-/// sleep). One `Tca9554` behind a mutex: a user locks it for a whole change, so
-/// read-modify-writes cannot interleave, and the driver's register copy
-/// stays the single view of the chip. Hand out `&'static Expander`, never a
-/// second `Tca9554`.
-pub type Expander = Mutex<CriticalSectionRawMutex, Tca9554<I2cDevice>>;
-
-/// Failure of [`Touch::changed`].
-pub type TouchError = Cst820Error<I2cDeviceError<I2cError>, Infallible>;
-
-/// Failure of [`Touch::reset`].
-pub type TouchResetError = Cst820InitError<I2cDeviceError<I2cError>, I2cDeviceError<I2cError>>;
-
-impl Touch {
-    /// Waits for the next press, move, release or cancellation.
-    ///
-    /// # Errors
-    ///
-    /// Returns the controller's error; see [`Cst820::changed`].
-    pub async fn changed(&mut self) -> Result<TouchEvent, TouchError> {
-        self.controller.changed().await
-    }
-
-    /// Pulses the controller's reset and enables its interrupts again.
-    ///
-    /// A touch in progress is then reported as cancelled.
-    ///
-    /// # Errors
-    ///
-    /// Returns the expander or controller error; see [`Cst820::init`].
-    pub async fn reset(&mut self) -> Result<(), TouchResetError> {
-        // Held for the whole reset (about 210 ms): no other expander change
-        // can slip between the pulse's writes.
-        let mut expander = self.expander.lock().await;
-        self.controller.init(&mut expander, TOUCH_RESET).await
-    }
-
-    /// Holds the controller in reset and cuts the panel rails, for deep
-    /// sleep.
-    ///
-    /// Call it after the panel's sleep-in. Both steps are tried even if the
-    /// first fails; the expander keeps its pins until the next boot powers
-    /// the panel and resets the controller again.
-    ///
-    /// # Errors
-    ///
-    /// Returns the first expander error.
-    pub async fn park(&mut self) -> Result<(), I2cDeviceError<I2cError>> {
-        // Held across both steps, like a reset: no expander change slips in.
-        let mut expander = self.expander.lock().await;
-        let held = self
-            .controller
-            .hold_in_reset(&mut expander, TOUCH_RESET)
-            .await;
-        let cut = PANEL_POWER.power_down(&mut expander).await;
-        held.and(cut)
-    }
-}
-
-impl fmt::Debug for Touch {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // `Cst820`'s and `Tca9554`'s derived `Debug` need `I2cDevice:
-        // Debug`, which the shared-bus handle does not implement.
-        f.debug_struct("Touch").finish_non_exhaustive()
-    }
-}
 
 /// QMI8658 accelerometer, used for the screen orientation.
 ///
@@ -394,10 +268,7 @@ impl Board {
             log::error!("touch controller init failed: {error}");
         }
         static EXPANDER: StaticCell<Expander> = StaticCell::new();
-        let touch = Touch {
-            controller,
-            expander: EXPANDER.init(Mutex::new(expander)),
-        };
+        let touch = Touch::new(controller, EXPANDER.init(Mutex::new(expander)));
         let imu = start_imu(i2c).await;
 
         let pixels = usize::from(DISPLAY_GEOMETRY.width) * usize::from(DISPLAY_GEOMETRY.height);
@@ -472,9 +343,7 @@ impl Board {
             Ok(false) => {}
             Err(never) => match never {},
         }
-        let deep_sleep = DeepSleep {
-            low_power: LowPower::new(peripherals.LPWR),
-        };
+        let deep_sleep = DeepSleep::new(peripherals.LPWR);
 
         // Bring-up took well under the timeout; the UI loop's first pass
         // feeds it next, after the Slint setup in `main`.

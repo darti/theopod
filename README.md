@@ -25,9 +25,11 @@ for the V2 pinout and hardware resources.
 
 ## Layout
 
-- `src/main.rs`: Slint event loop and the BOOT button, touch and
-  orientation tasks; talks to the board only through the `device` module
-  and `theo-drivers` types.
+- `src/main.rs`: Slint event loop; talks to the board only through the
+  `device` module and `theo-drivers` types.
+- `src/input.rs`: the BOOT button (and its long-press stop), touch and
+  orientation tasks, and the channels and signals between them and the
+  event loop.
 - `src/device/`: everything specific to the ESP32-S3 and this board (chip
   runtime, heaps and PSRAM, logger, pins, panel geometry, esp-hal QSPI DMA
   transport, BOOT button and deep sleep, shared async I2C bus, touch

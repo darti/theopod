@@ -29,8 +29,8 @@ for `xtensa-esp32s3-none-elf`, so nothing in it can run as a host unit test.
   `IMU_AXES`, the shared I2C bus types, the display reboot counter
   (`display_resets`, `reset_for_display`, `clear_display_resets`),
   `log_heap_usage` and, with the `frame-dump` feature, `dump_frame`.
-- `src/main.rs` and `src/slint_backend.rs` see the board only through
-  `device` and driver traits such as `Panel`.
+- `src/main.rs`, `src/input.rs` and `src/slint_backend.rs` see the board
+  only through `device` and driver traits such as `Panel`.
 - Board *values* (expander pins, delays, geometry) stay in `src/device/`;
   the *sequence* using them lives in the drivers (for example
   `PanelPower::power_up`), so tests can enforce its ordering.

@@ -17,8 +17,11 @@ use embassy_futures::select::{Either, select};
 use embassy_sync::{
     blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel, signal::Signal,
 };
-use embassy_time::{Duration, Instant, Ticker, Timer, with_timeout};
-use theo_drivers::{ButtonEvent, LongPress, OrientationDetector, Rotation, TouchEvent, reset_due};
+use embassy_time::{Delay, Duration, Instant, Ticker, Timer, with_timeout};
+use theo_drivers::{
+    ButtonEvent, LongPressButton, LongPressEvent, OrientationDetector, Rotation, TouchEvent,
+    reset_due,
+};
 
 use crate::device;
 
@@ -161,28 +164,17 @@ impl Park {
 /// for the release and puts the chip in deep sleep until the next press.
 /// Its release is not forwarded: it is not a click.
 #[embassy_executor::task]
-async fn watch_button(mut button: device::Button, deep_sleep: device::DeepSleep) {
-    let mut press = LongPress::new(LONG_PRESS_MS);
+async fn watch_button(button: device::Button, deep_sleep: device::DeepSleep) {
+    // `Delay` and `Instant` run on the same embassy time driver, as
+    // `LongPressButton` requires.
+    let now_ms: fn() -> u64 = || Instant::now().as_millis();
+    let mut button = LongPressButton::new(button, LONG_PRESS_MS, Delay, now_ms);
     loop {
-        let changed = match press.deadline_ms() {
-            // Cancelling `changed` keeps the debounced state (pressed). A
-            // release still in its debounce at the deadline loses: the
-            // stop window is at most one debounce delay short.
-            Some(at) => match select(button.changed(), Timer::at(Instant::from_millis(at))).await {
-                Either::First(changed) => changed,
-                Either::Second(()) => {
-                    press.held();
-                    break;
-                }
-            },
-            None => button.changed().await,
-        };
-        match changed {
-            Ok(event) => {
-                if let Some(event) = press.changed(event, Instant::now().as_millis()) {
-                    BUTTON_EVENTS.send(ButtonMessage::Changed(event)).await;
-                }
+        match button.next().await {
+            Ok(LongPressEvent::Changed(event)) => {
+                BUTTON_EVENTS.send(ButtonMessage::Changed(event)).await;
             }
+            Ok(LongPressEvent::Held) => break,
             Err(error) => log::error!("button read failed: {error:?}"),
         }
     }
@@ -194,7 +186,7 @@ async fn watch_button(mut button: device::Button, deep_sleep: device::DeepSleep)
     // unpowered device can clamp the bus for the IMU.
     IMU_PARK.request().await;
     TOUCH_PARK.request().await;
-    deep_sleep.until_pressed(button).await
+    deep_sleep.until_pressed(button.into_button()).await
 }
 
 /// Reports touches to the UI loop.

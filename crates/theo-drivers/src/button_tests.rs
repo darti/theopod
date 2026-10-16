@@ -1,92 +1,14 @@
-use std::collections::VecDeque;
-
-use embedded_hal::digital::{ErrorKind, ErrorType, InputPin, PinState};
-use embedded_hal_async::digital::Wait;
+use embedded_hal::digital::{ErrorKind, PinState};
 use speculoos::prelude::*;
 
 use crate::{
     button::{ButtonEvent, DebouncedButton},
-    test_support::{RecordingDelay, block_on, poll_once},
+    test_support::{RecordingDelay, ScriptedPin, block_on, poll_once},
 };
 
 const DEBOUNCE_MS: u32 = 20;
 const HIGH: bool = true;
 const LOW: bool = false;
-
-/// Input pin replaying scripted level samples, one per read.
-///
-/// Level waits return at once (as if the level were already reached) and
-/// are recorded; edge waits are not used by the button.
-#[derive(Debug, Default)]
-struct ScriptedPin {
-    /// Levels returned by successive reads; `true` is high.
-    samples: VecDeque<bool>,
-    /// Levels waited for, in order.
-    waits: Vec<PinState>,
-    /// Fail every access once `samples` is exhausted.
-    fail_when_exhausted: bool,
-}
-
-impl ScriptedPin {
-    fn new(samples: &[bool]) -> Self {
-        Self {
-            samples: samples.iter().copied().collect(),
-            ..Self::default()
-        }
-    }
-
-    fn wait_for(&mut self, level: PinState) -> Result<(), ErrorKind> {
-        if self.samples.is_empty() && self.fail_when_exhausted {
-            return Err(ErrorKind::Other);
-        }
-        assert!(
-            !self.samples.is_empty(),
-            "waiting for a level that never comes"
-        );
-        self.waits.push(level);
-        Ok(())
-    }
-}
-
-impl ErrorType for ScriptedPin {
-    type Error = ErrorKind;
-}
-
-impl InputPin for ScriptedPin {
-    fn is_high(&mut self) -> Result<bool, Self::Error> {
-        match self.samples.pop_front() {
-            Some(level) => Ok(level),
-            None if self.fail_when_exhausted => Err(ErrorKind::Other),
-            None => panic!("unexpected pin read"),
-        }
-    }
-
-    fn is_low(&mut self) -> Result<bool, Self::Error> {
-        self.is_high().map(|high| !high)
-    }
-}
-
-impl Wait for ScriptedPin {
-    async fn wait_for_high(&mut self) -> Result<(), Self::Error> {
-        self.wait_for(PinState::High)
-    }
-
-    async fn wait_for_low(&mut self) -> Result<(), Self::Error> {
-        self.wait_for(PinState::Low)
-    }
-
-    async fn wait_for_rising_edge(&mut self) -> Result<(), Self::Error> {
-        unimplemented!("the button waits for levels, not edges")
-    }
-
-    async fn wait_for_falling_edge(&mut self) -> Result<(), Self::Error> {
-        unimplemented!("the button waits for levels, not edges")
-    }
-
-    async fn wait_for_any_edge(&mut self) -> Result<(), Self::Error> {
-        unimplemented!("the button waits for levels, not edges")
-    }
-}
 
 /// Active-low button (pressed pulls the pin low), like the BOOT button.
 fn button(samples: &[bool]) -> DebouncedButton<ScriptedPin, RecordingDelay> {

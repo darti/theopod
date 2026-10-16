@@ -29,7 +29,8 @@ only on `embedded-hal` / `embedded-hal-async`, unit-tested on the host
   `OrientationDetector` (gravity to `Rotation`), `AxisMap` (const-checked
   by `is_rotation`), the rotated view size and touch mapping.
 - `button.rs`, `long_press.rs`: `DebouncedButton`, cancel-safe debounced
-  press/release; `LongPress`, short vs long presses (ADR-0008).
+  press/release; `LongPress`, short vs long presses, and `LongPressButton`,
+  a button raced against the long-press deadline (ADR-0008).
 
 ## Extension points
 
@@ -39,8 +40,7 @@ only on `embedded-hal` / `embedded-hal-async`, unit-tested on the host
 
 ## Dependencies
 
-- No sibling crates. The firmware crate (`theo-pod`) depends on this one.
-
+No sibling crates; the firmware crate (`theo-pod`) depends on this one.
 ## Tests
 
 Side-by-side `*_tests.rs` files use the fakes in `test_support/`

@@ -2,6 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-10-15
+- Amended: 2026-10-16, host-tested long-press race (t-52)
 
 ## Context
 
@@ -22,13 +23,15 @@ leaves deep sleep.
   UI actions on Return fire on release, as `ui/main.slint` does: an action
   on press would fire on every stop.
 - The button task owns the stop: it races `DebouncedButton::changed`
-  against the long-press deadline (cancelling `changed` keeps the
-  debounced state), asks the UI loop to put the CO5300 to sleep (display
-  off, sleep-in), then hands the button to `DeepSleep::until_pressed`
-  (`src/device/`). It waits for the release, since sleeping with the
-  button down would wake at once, arms GPIO0 as a low-level wakeup on its
-  low-power path and enters deep sleep. If GPIO0 cannot be armed, the chip
-  restarts rather than halt with the panel dark.
+  against the long-press deadline (`LongPressButton`, host-tested since
+  t-52: cancelling `changed` keeps the debounced state, and the deadline
+  is absolute, so restarting the wait does not restart the hold), asks the
+  UI loop to put the CO5300 to sleep (display off, sleep-in), then hands
+  the button to `DeepSleep::until_pressed` (`src/device/`). It waits for
+  the release, since sleeping with the button down would wake at once,
+  arms GPIO0 as a low-level wakeup on its low-power path and enters deep
+  sleep. If GPIO0 cannot be armed, the chip restarts rather than halt with
+  the panel dark.
 - Putting the panel to sleep is best effort: a failure is logged and the
   chip sleeps anyway. A panel that ignores sleep-in would ignore a retry,
   and keeping the chip awake would not darken it. Like a flush, it gives
@@ -65,7 +68,7 @@ leaves deep sleep.
   task that does not answer within `PARK_TIMEOUT` (200 ms) is logged and
   slept over. Such a task may still be mid-transfer when the chip
   sleeps, as before t-50.
-- The sleep current and the stop-then-wake behaviour on the board are
-  not checked yet (t-55).
+- The stop-then-wake behaviour was checked on the board (t-55); the
+  sleep current is not measured yet (t-59).
 - Plugging the board in still boots it directly; BOOT only matters once
   the firmware has stopped.

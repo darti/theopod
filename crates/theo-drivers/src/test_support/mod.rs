@@ -9,9 +9,12 @@
 //! - [`FakeCst820`]: async I2C bus replaying scripted CST820 touch reports
 //!   and recording register writes.
 //! - [`FakeQmi8658`]: async I2C bus modelling a QMI8658's registers.
+//! - [`ScriptedPin`]: input pin replaying scripted levels; waits return at
+//!   once, or stay pending once the script is exhausted.
 //! - [`NoDelay`]: [`DelayNs`] that returns immediately.
 //! - [`RecordingDelay`]: [`DelayNs`] that records millisecond delays and can
 //!   stay pending once, to cancel a future mid-delay.
+//! - [`FakeClock`]: shared millisecond clock; its delays advance it.
 //! - [`block_on`]: runs a future that never waits on I/O to completion.
 
 use core::{
@@ -30,11 +33,15 @@ use crate::{
     retry::Transient,
 };
 
+mod clock;
 mod cst820;
+mod pin;
 mod qmi8658;
 mod tca9554;
 
+pub use clock::FakeClock;
 pub use cst820::FakeCst820;
+pub use pin::ScriptedPin;
 pub use qmi8658::FakeQmi8658;
 pub use tca9554::{FakeTca9554, TCA_CONFIG, TCA_OUTPUT};
 
@@ -409,13 +416,20 @@ pub fn poll_once<F: Future>(future: F) -> bool {
     future.as_mut().poll(&mut context).is_ready()
 }
 
-/// Polls `future` until it completes; it must never return `Pending` forever.
+/// Polls `future` until it completes.
+///
+/// Panics after [`MAX_POLLS`] pending polls, so a future that waits forever
+/// (e.g. on an exhausted [`ScriptedPin`]) fails the test instead of hanging.
 pub fn block_on<F: Future>(future: F) -> F::Output {
     let mut future = pin!(future);
     let mut context = Context::from_waker(Waker::noop());
-    loop {
+    for _ in 0..MAX_POLLS {
         if let Poll::Ready(output) = future.as_mut().poll(&mut context) {
             return output;
         }
     }
+    panic!("future still pending after {MAX_POLLS} polls");
 }
+
+/// Pending polls [`block_on`] allows; fakes pend once per step at most.
+const MAX_POLLS: usize = 1000;

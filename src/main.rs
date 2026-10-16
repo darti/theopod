@@ -72,6 +72,9 @@ const FLUSH_RETRY_MAX_MS: u32 = 1000;
 ///
 /// A full frame takes about 17 ms on the bus.
 const FLUSH_TIMEOUT: Duration = Duration::from_millis(500);
+/// Time since start-up after which the start cause is logged (t-51): after
+/// a wake, the USB serial port takes about a second to come back.
+const START_CAUSE_LOG_AFTER: Duration = Duration::from_secs(3);
 /// How long the panel may stay stale before the device reboots (t-44).
 const DISPLAY_RESET_AFTER: Duration = Duration::from_secs(10);
 /// Reboots in a row for a broken display before giving up on rebooting.
@@ -110,6 +113,7 @@ async fn main(spawner: Spawner) {
     let mut flush_retry = FlushRetry::new(FLUSH_RETRY_FIRST_MS, FLUSH_RETRY_MAX_MS);
     let mut resend_at: Option<Instant> = None;
     let mut first_frame_sent = false;
+    let mut start_cause_logged = false;
     let mut display_watch = DisplayWatch::new();
     let mut rotation = INITIAL_ROTATION;
     // Set when `rotation` changed and the next frame must redraw everything.
@@ -201,6 +205,10 @@ async fn main(spawner: Spawner) {
         }
 
         display_watch.check(flush_retry.is_stale());
+        if !start_cause_logged && frame_start.as_millis() >= START_CAUSE_LOG_AFTER.as_millis() {
+            start_cause_logged = true;
+            device::log_start_cause();
+        }
 
         let wake_up = Timer::at(next_wake_up(&window, frame_start, resend_at));
         let mut on_button = |message| match message {

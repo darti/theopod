@@ -3,7 +3,7 @@
 - Status: Accepted
 - Date: 2026-10-15
 - Amended: 2026-10-16, host-tested long-press race (t-52), bounded wait
-  for the panel's sleep-in (t-54)
+  for the panel's sleep-in (t-54), start cause logged (t-51)
 
 ## Context
 
@@ -55,11 +55,16 @@ leaves deep sleep.
   `Board::init`: "start" is a normal boot. `DebouncedButton::sync_state`
   takes the level at start-up as the button state, so a press still held
   then only reports its release, which `LongPress` drops: the press that
-  woke the pod neither clicks nor stops it again.
+  woke the pod neither clicks nor stops it again. The level, not the wake
+  cause, decides (t-51): a press held across any reset is just as stale,
+  and one released before the start needs no special case.
 
 ## Consequences
 
 - Stopping keeps no state: the UI starts afresh after each wake.
+- Each start logs its cause (t-51). On this board, the start after a BOOT
+  wake reports `ChipPowerOn` with no wakeup source, not `CoreDeepSleep`:
+  the chip may not reach deep sleep, or loses power on the way out (t-67).
 - After the panel's sleep-in, the button task has the orientation task,
   then the touch task, park their devices (t-50): the QMI8658's sensors
   and oscillator stop, then the touch task holds the CST820 in reset

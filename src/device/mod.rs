@@ -14,8 +14,9 @@
 //! - [`I2cBus`], [`I2cDevice`]: the async I2C bus shared by the TCA9554
 //!   expander and the touch controller, and one device's handle on it.
 //! - [`log_heap_usage`]: logs internal RAM and PSRAM heap usage.
+//! - [`log_start_cause`]: logs the reset or wake cause.
 //! - [`display_resets`], [`reset_for_display`], [`clear_display_resets`]:
-//!   reboots for a broken display, counted across software resets.
+//!   reboots for a broken display, counted across core resets.
 //! - `dump_frame` (feature `frame-dump`): prints the framebuffer to the
 //!   serial log.
 //!
@@ -26,6 +27,7 @@
 
 mod esp_qspi;
 mod psram_tx_buf;
+mod restart;
 
 use core::{convert::Infallible, fmt};
 
@@ -51,12 +53,13 @@ use esp_hal::{
 };
 use static_cell::StaticCell;
 
+pub use self::restart::{clear_display_resets, display_resets, log_start_cause, reset_for_display};
 use self::{esp_qspi::EspQspi, psram_tx_buf::PsramTxBuf};
 use embedded_hal::digital::PinState;
 use theo_drivers::{
     Axis, AxisMap, Co5300, Cst820, Cst820Error, Cst820InitError, DebouncedButton, ExpanderPin,
     PanelGeometry, PanelPower, PanelSize, Qmi8658, Tca9554, TouchEvent, Transient,
-    check_pattern_with, decode_resets, encode_resets, flush_rows,
+    check_pattern_with, flush_rows,
 };
 
 pub use esp_hal::main as entry;
@@ -516,44 +519,6 @@ async fn start_imu(i2c: &'static I2cBus) -> Option<Imu> {
     }
     log::error!("IMU not found: the screen will not rotate");
     None
-}
-
-/// Reboots for a broken display in a row, kept across software resets.
-///
-/// In RTC fast RAM, which a software reset keeps. Its contents are
-/// arbitrary after an early reset (esp-hal `persistent`) or a deep sleep,
-/// which powers that RAM down (`DeepSleep`); the complement
-/// ([`encode_resets`]) makes those read as zero, so a stop clears the count.
-#[esp_hal::ram(unstable(rtc_fast, persistent))]
-static mut DISPLAY_RESETS: [u32; 2] = [0; 2];
-
-/// Reboots for a broken display since the display last stayed healthy.
-///
-/// Only the UI task may call this and the functions below: nothing else
-/// touches the counter.
-#[must_use]
-pub fn display_resets() -> u32 {
-    // SAFETY: a volatile read through a raw pointer (no reference to the
-    // `static mut`); only the UI task touches it, and every bit pattern is
-    // a valid `[u32; 2]`.
-    decode_resets(unsafe { (&raw const DISPLAY_RESETS).read_volatile() })
-}
-
-fn set_display_resets(count: u32) {
-    // SAFETY: as in `display_resets`; a reset during the write leaves a
-    // pair that fails the check and reads as zero.
-    unsafe { (&raw mut DISPLAY_RESETS).write_volatile(encode_resets(count)) };
-}
-
-/// Forgets past display reboots, once the display has stayed healthy.
-pub fn clear_display_resets() {
-    set_display_resets(0);
-}
-
-/// Reboots the device to recover a broken display, counting the reboot.
-pub fn reset_for_display() -> ! {
-    set_display_resets(display_resets().saturating_add(1));
-    esp_hal::system::software_reset()
 }
 
 /// Logs used and free bytes of every heap region (internal RAM and PSRAM).

@@ -467,6 +467,23 @@ fn write_frame_odd_byte_count_returns_pixel_overflow() {
     }));
 }
 
+// Regression guard (t-56 review): `init` resets the controller, which
+// closes its area; pixels sent without a new `begin_area` would go to
+// wherever the reset left it.
+#[test]
+fn init_after_begin_area_closes_the_area() {
+    let mut panel = panel();
+    block_on(panel.begin_area(0..2, 0..2)).unwrap();
+    block_on(panel.init(&mut NoDelay)).unwrap();
+
+    let result = block_on(panel.write_frame(0..8));
+
+    assert_that!(result.err()).is_equal_to(Some(Error::PixelOverflow {
+        remaining: 0,
+        submitted: 8,
+    }));
+}
+
 #[test]
 fn error_display_describes_frame_size_mismatch() {
     let message = Error::<BusFault>::FrameSizeMismatch {

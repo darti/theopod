@@ -74,11 +74,12 @@ const FLUSH_RETRY_MAX_MS: u32 = 1000;
 ///
 /// A full frame takes about 17 ms on the bus.
 const FLUSH_TIMEOUT: Duration = Duration::from_millis(500);
-// A loop pass waits at most `MAX_IDLE`, then flushes (or puts the panel to
-// sleep) within `FLUSH_TIMEOUT`; keep that within half the watchdog's
-// timeout, leaving the rest for the render (ADR-0009).
+// A loop pass flushes within `FLUSH_TIMEOUT`, waits at most `MAX_IDLE`,
+// and on a stop puts the panel to sleep within `FLUSH_TIMEOUT` again; keep
+// that within half the watchdog's timeout, leaving the rest for the render
+// (ADR-0009).
 const _: () = assert!(
-    MAX_IDLE.as_millis() + FLUSH_TIMEOUT.as_millis() <= device::WATCHDOG_TIMEOUT_MS / 2,
+    MAX_IDLE.as_millis() + 2 * FLUSH_TIMEOUT.as_millis() <= device::WATCHDOG_TIMEOUT_MS / 2,
     "a UI loop pass must fit well within the watchdog timeout"
 );
 /// Time since start-up after which the start cause is logged (t-51): after

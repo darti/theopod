@@ -219,10 +219,14 @@ impl<B: QspiBus> Co5300<B> {
 
     /// Runs the Waveshare V2 power-up sequence and turns the panel on.
     ///
+    /// Any open area is closed, as the software reset closes it in the
+    /// controller: running it again never leaves pixels pending.
+    ///
     /// # Errors
     ///
     /// Returns [`Error::Bus`] on the first failed register write.
     pub async fn init(&mut self, delay: &mut impl DelayNs) -> Result<(), Error<B::Error>> {
+        self.remaining = 0;
         self.write_register(CMD_SOFTWARE_RESET, &[]).await?;
         delay.delay_ms(RESET_SETTLE_MS).await;
         self.write_register(CMD_SLEEP_OUT, &[]).await?;

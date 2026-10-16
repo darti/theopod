@@ -29,10 +29,10 @@ holding.
   `Wdt::enable` sets stage 0 to `ResetSystem`, which on the ESP32-S3 is
   the `CoreMwdt0` core reset (esp-hal's doc for that action mentions RTC
   peripherals; the board check below is what counts).
-- The UI loop feeds it once per pass. A pass is an idle wait (1 s at
-  most), a render (unbounded, short) and a flush or sleep-in (500 ms at
-  most); `src/main.rs` asserts at compile time that the bounded parts fit
-  in half the timeout.
+- The UI loop feeds it once per pass. A pass is a render (unbounded,
+  short), a flush (500 ms at most), an idle wait (1 s at most) and, on a
+  stop, a sleep-in (500 ms at most); `src/main.rs` asserts at compile time
+  that the bounded parts fit in half the timeout.
 - A frame dump (feature `frame-dump`) runs with the watchdog paused
   (`Watchdog::paused`): it takes seconds on the serial port.
 - It keeps feeding once `StaleWatch` gives up: the loop still runs then,
@@ -44,9 +44,9 @@ holding.
 - The UI loop logs why the chip started, the reset reason or the
   deep-sleep wake cause (t-51), 3 s after start-up
   (`START_CAUSE_LOG_AFTER`): after a wake the USB serial port takes about
-  a second to come back, and logged earlier the line was lost. `reset_reason` and `wakeup_cause` are free
-  functions in esp-hal 1.2, and `Rtc` takes `RTC_TIMER`, so `DeepSleep`
-  keeps `LPWR`.
+  a second to come back, and logged earlier the line was lost.
+  `reset_reason` and `wakeup_cause` are free functions in esp-hal 1.2, and
+  `Rtc` takes `RTC_TIMER`, so `DeepSleep` keeps `LPWR`.
 
 ## Consequences
 

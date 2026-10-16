@@ -22,8 +22,8 @@ use theo_drivers::{decode_resets, encode_resets};
 
 /// How long the UI loop may go without feeding the [`Watchdog`], in ms.
 ///
-/// A pass is an idle wait, a render and a flush; `src/main.rs` asserts its
-/// bounded parts fit in half of it, leaving the rest for the render.
+/// A pass is a render, a flush, an idle wait and, on a stop, a sleep-in;
+/// `src/main.rs` asserts its bounded parts fit in half of it.
 pub const WATCHDOG_TIMEOUT_MS: u64 = 5000;
 const WATCHDOG_TIMEOUT: Duration = Duration::from_millis(WATCHDOG_TIMEOUT_MS);
 

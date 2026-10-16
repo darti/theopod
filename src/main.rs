@@ -49,7 +49,7 @@ use theo_drivers::{
 
 use crate::{
     device::Board,
-    input::{BUTTON_EVENTS, ButtonMessage, INITIAL_ROTATION, PANEL_ASLEEP, ROTATION, TOUCH_EVENTS},
+    input::{BUTTON_EVENTS, ButtonMessage, INITIAL_ROTATION, ROTATION, TOUCH_EVENTS},
     slint_backend::{FrameRenderer, FrameRows, TheoPlatform},
 };
 
@@ -250,9 +250,8 @@ async fn main(spawner: Spawner) {
                     log::error!("panel sleep timed out after {FLUSH_TIMEOUT:?}");
                 }
             }
-            PANEL_ASLEEP.signal(());
             // The button task puts the chip to sleep; nothing to draw until then.
-            core::future::pending::<()>().await;
+            input::report_panel_asleep().await;
         }
         if let Some(new_rotation) = deferred_rotation.filter(|_| !finger_down) {
             deferred_rotation = None;

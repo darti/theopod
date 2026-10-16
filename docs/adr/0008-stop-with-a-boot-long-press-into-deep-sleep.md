@@ -2,7 +2,8 @@
 
 - Status: Accepted
 - Date: 2026-10-15
-- Amended: 2026-10-16, host-tested long-press race (t-52)
+- Amended: 2026-10-16, host-tested long-press race (t-52), bounded wait
+  for the panel's sleep-in (t-54)
 
 ## Context
 
@@ -35,9 +36,19 @@ leaves deep sleep.
 - Putting the panel to sleep is best effort: a failure is logged and the
   chip sleeps anyway. A panel that ignores sleep-in would ignore a retry,
   and keeping the chip awake would not darken it. Like a flush, it gives
-  up after `FLUSH_TIMEOUT`, so a hung bus cannot keep the pod awake. A
-  stop also clears the display reboot count (t-44): deep sleep powers
-  down the RTC fast RAM that keeps it.
+  up after `FLUSH_TIMEOUT`, so a hung bus cannot keep the pod awake. The
+  button task waits for it `PANEL_SLEEP_TIMEOUT` (2 s) at most, sending
+  the stop request included, then stops anyway (t-54): a stalled UI loop
+  must not keep the pod awake either. The cost is a panel that skips its
+  sleep-in: it goes dark only when the touch task cuts its rails, and a
+  loop that resumes late may send sleep-in to an unpowered panel, which
+  fails and is logged. If the timeout cancels the stop request itself, a
+  loop that resumes renders into the unpowered panel; its failed flushes
+  can only reboot the chip (t-44) if BOOT is still held 10 s later, before
+  deep sleep. Button changes never wait for the UI loop: they are dropped
+  while its queue is full, so a stalled loop cannot hide a long press
+  either. A stop also clears the display reboot count (t-44): deep sleep
+  powers down the RTC fast RAM that keeps it.
 - The sleep API (`LowPower`, `WakeupConfig`) is esp-hal `unstable`
   (ADR-0003): recheck it when leaving the `~1.2` pin.
 - The wake resets the chip, so the firmware starts again from

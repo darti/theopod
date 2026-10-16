@@ -8,9 +8,10 @@
 //!
 //! Holding BOOT for [`LONG_PRESS_MS`] stops the pod: [`watch_button`] sends
 //! [`ButtonMessage::Stop`], waits for the loop to put the panel to sleep
-//! ([`PANEL_ASLEEP`]), has the orientation then the touch task park their
-//! devices ([`IMU_PARK`], [`TOUCH_PARK`]), then waits for the release and
-//! puts the chip in deep sleep.
+//! ([`report_panel_asleep`], [`PANEL_SLEEP_TIMEOUT`] at most), has the
+//! orientation then the touch task park their devices ([`IMU_PARK`],
+//! [`TOUCH_PARK`]), then waits for the release and puts the chip in deep
+//! sleep.
 
 use embassy_executor::Spawner;
 use embassy_futures::select::{Either, select};
@@ -50,6 +51,12 @@ const TOUCH_RESET_RETRY_MAX: Duration = Duration::from_secs(1);
 /// Accelerometer sample period; a rotation needs
 /// [`OrientationDetector::STABLE_SAMPLES`] samples in a row.
 const ORIENTATION_PERIOD: Duration = Duration::from_millis(100);
+/// Longest wait for the UI loop to put the panel to sleep before a stop.
+///
+/// Room for one flush in flight and the sleep-in, each bounded by the
+/// loop's `FLUSH_TIMEOUT` (`src/main.rs`, 500 ms), and a render. A loop that
+/// keeps retrying flushes past that is the stall this bounds.
+const PANEL_SLEEP_TIMEOUT: Duration = Duration::from_secs(2);
 /// Longest wait for an input task to park its device before deep sleep: at
 /// most four I2C writes, each failing within the device module's bus
 /// timeout (about 13 ms).
@@ -59,8 +66,9 @@ const PARK_TIMEOUT: Duration = Duration::from_millis(200);
 /// loop.
 pub static BUTTON_EVENTS: Channel<CriticalSectionRawMutex, ButtonMessage, BUTTON_QUEUE> =
     Channel::new();
-/// The panel is asleep, from the UI loop to [`watch_button`].
-pub static PANEL_ASLEEP: Signal<CriticalSectionRawMutex, ()> = Signal::new();
+/// The panel is asleep, from the UI loop ([`report_panel_asleep`]) to
+/// [`watch_button`].
+static PANEL_ASLEEP: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 /// Touch presses, moves, releases and cancellations, from [`watch_touch`]
 /// to the UI loop.
 pub static TOUCH_EVENTS: Channel<CriticalSectionRawMutex, TouchEvent, TOUCH_QUEUE> = Channel::new();
@@ -76,8 +84,8 @@ static IMU_PARK: Park = Park::new("IMU");
 pub enum ButtonMessage {
     /// A press or release for Slint.
     Changed(ButtonEvent),
-    /// BOOT was held: put the panel to sleep, signal [`PANEL_ASLEEP`], then
-    /// stop.
+    /// BOOT was held: put the panel to sleep, then call
+    /// [`report_panel_asleep`].
     Stop,
 }
 
@@ -99,6 +107,14 @@ pub fn spawn(
     } else {
         IMU_PARK.not_needed();
     }
+}
+
+/// Reports the panel asleep to [`watch_button`], then never returns.
+///
+/// The UI loop calls it last: nothing runs there until the chip sleeps.
+pub async fn report_panel_asleep() -> ! {
+    PANEL_ASLEEP.signal(());
+    core::future::pending().await
 }
 
 /// Stop handshake: [`watch_button`] asks an input task to park its device,
@@ -156,13 +172,14 @@ impl Park {
     }
 }
 
-/// Debounces the BOOT button and queues its changes for the UI loop, until
-/// it is held for [`LONG_PRESS_MS`]; then stops the pod.
+/// Forwards BOOT changes to the UI loop; a long press stops the pod.
 ///
-/// A long press asks the UI loop to put the panel to sleep, waits for that,
-/// has the orientation then the touch task park their devices, then waits
-/// for the release and puts the chip in deep sleep until the next press.
-/// Its release is not forwarded: it is not a click.
+/// Changes are dropped, not queued, while the UI loop's queue is full. A
+/// press held for [`LONG_PRESS_MS`] asks the UI loop to put the panel to
+/// sleep and waits for that, [`PANEL_SLEEP_TIMEOUT`] at most, has the
+/// orientation then the touch task park their devices, then waits for the
+/// release and puts the chip in deep sleep until the next press. Its release
+/// is not forwarded: it is not a click.
 #[embassy_executor::task]
 async fn watch_button(button: device::Button, deep_sleep: device::DeepSleep) {
     // `Delay` and `Instant` run on the same embassy time driver, as
@@ -171,17 +188,35 @@ async fn watch_button(button: device::Button, deep_sleep: device::DeepSleep) {
     let mut button = LongPressButton::new(button, LONG_PRESS_MS, Delay, now_ms);
     loop {
         match button.next().await {
+            // Never waits on the UI loop (t-54 review): a stalled loop with a
+            // full queue would otherwise keep the long press from being seen.
             Ok(LongPressEvent::Changed(event)) => {
-                BUTTON_EVENTS.send(ButtonMessage::Changed(event)).await;
+                if BUTTON_EVENTS
+                    .try_send(ButtonMessage::Changed(event))
+                    .is_err()
+                {
+                    log::warn!("button {event:?} dropped: the UI loop is not keeping up");
+                }
             }
             Ok(LongPressEvent::Held) => break,
             Err(error) => log::error!("button read failed: {error:?}"),
         }
     }
     log::info!("BOOT held for {LONG_PRESS_MS} ms, stopping");
-    BUTTON_EVENTS.send(ButtonMessage::Stop).await;
-    PANEL_ASLEEP.wait().await;
-    // The panel is asleep before its rails drop. Cutting them is the last
+    // Bounded (t-54): a stalled UI loop, which may not even drain the
+    // queue, must not keep the pod awake. The touch park below cuts the
+    // panel rails anyway, so a panel left awake still goes dark.
+    let sleep_panel = async {
+        BUTTON_EVENTS.send(ButtonMessage::Stop).await;
+        PANEL_ASLEEP.wait().await;
+    };
+    if with_timeout(PANEL_SLEEP_TIMEOUT, sleep_panel)
+        .await
+        .is_err()
+    {
+        log::error!("panel not asleep within {PANEL_SLEEP_TIMEOUT:?}, stopping anyway");
+    }
+    // The panel is asleep (or timed out) before its rails drop. Cutting them is the last
     // bus access: the touch controller may hang off those rails, and an
     // unpowered device can clamp the bus for the IMU.
     IMU_PARK.request().await;

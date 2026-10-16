@@ -23,6 +23,7 @@ lint:
     LIBCLANG_PATH="{{libclang_path}}" PATH="{{gcc_path}}:${PATH}" RUSTUP_TOOLCHAIN=esp cargo clippy -- -D warnings
     LIBCLANG_PATH="{{libclang_path}}" PATH="{{gcc_path}}:${PATH}" RUSTUP_TOOLCHAIN=esp cargo clippy --features frame-dump -- -D warnings
     LIBCLANG_PATH="{{libclang_path}}" PATH="{{gcc_path}}:${PATH}" RUSTUP_TOOLCHAIN=esp cargo clippy --features imu-calibration -- -D warnings
+    LIBCLANG_PATH="{{libclang_path}}" PATH="{{gcc_path}}:${PATH}" RUSTUP_TOOLCHAIN=esp cargo clippy --features watchdog-check -- -D warnings
     RUSTUP_TOOLCHAIN=stable cargo clippy -p theo-drivers -p theo-frame-dump -p frame-png --target {{host_target}} --all-targets -- -D warnings
 
 build:
@@ -52,6 +53,11 @@ flash-dump log="target/frame.log" port="":
 # axes once a second, to measure `IMU_AXES` in `src/device/mod.rs`.
 imu-calibrate port="":
     ESP_LOG=info LIBCLANG_PATH="{{libclang_path}}" PATH="{{gcc_path}}:${PATH}" RUSTUP_TOOLCHAIN=esp cargo espflash flash --release --features imu-calibration --monitor --chip {{chip}} {{ if port != "" { "--port " + port } else { "" } }}
+
+# Flash a build that hangs once to trip the watchdog, and record the log
+# from boot: the next start must report the display reboot count it set.
+watchdog-check log="target/watchdog.log" port="":
+    ESP_LOG=info LIBCLANG_PATH="{{libclang_path}}" PATH="{{gcc_path}}:${PATH}" RUSTUP_TOOLCHAIN=esp cargo espflash flash --release --features watchdog-check --monitor --non-interactive --chip {{chip}} {{ if port != "" { "--port " + port } else { "" } }} | tee {{log}}
 
 # Record the serial log to a file, e.g. for dumps triggered by BOOT presses.
 monitor-log log="target/frame.log" port="":

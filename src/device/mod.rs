@@ -14,7 +14,8 @@
 //! - [`I2cBus`], [`I2cDevice`]: the async I2C bus shared by the TCA9554
 //!   expander and the touch controller, and one device's handle on it.
 //! - [`log_heap_usage`]: logs internal RAM and PSRAM heap usage.
-//! - [`log_start_cause`]: logs the reset or wake cause.
+//! - [`Watchdog`], [`WATCHDOG_TIMEOUT_MS`]: the main watchdog the UI loop
+//!   feeds; [`log_start_cause`]: logs the reset or wake cause.
 //! - [`display_resets`], [`reset_for_display`], [`clear_display_resets`]:
 //!   reboots for a broken display, counted across core resets.
 //! - `dump_frame` (feature `frame-dump`): prints the framebuffer to the
@@ -53,7 +54,10 @@ use esp_hal::{
 };
 use static_cell::StaticCell;
 
-pub use self::restart::{clear_display_resets, display_resets, log_start_cause, reset_for_display};
+pub use self::restart::{
+    WATCHDOG_TIMEOUT_MS, Watchdog, clear_display_resets, display_resets, log_start_cause,
+    reset_for_display,
+};
 use self::{esp_qspi::EspQspi, psram_tx_buf::PsramTxBuf};
 use embedded_hal::digital::PinState;
 use theo_drivers::{
@@ -308,6 +312,8 @@ pub struct Board {
     pub touch: Touch,
     /// Accelerometer, started; `None` if no QMI8658 answered (logged).
     pub imu: Option<Imu>,
+    /// Armed main watchdog: the UI loop must feed it.
+    pub watchdog: Watchdog,
 }
 
 impl fmt::Debug for Board {
@@ -318,6 +324,7 @@ impl fmt::Debug for Board {
             .field("deep_sleep", &self.deep_sleep)
             .field("touch", &self.touch)
             .field("imu", &self.imu.is_some())
+            .field("watchdog", &self.watchdog)
             .finish()
     }
 }
@@ -347,6 +354,9 @@ impl Board {
         };
         esp_alloc::psram_allocator!(peripherals.PSRAM, esp_hal::psram, psram_config);
         let timg0 = TimerGroup::new(peripherals.TIMG0);
+        // Armed as soon as it exists: the display bring-up waits on DMA
+        // with no timeout of its own, and a panic from here on reboots.
+        let mut watchdog = Watchdog::arm(timg0.wdt);
         esp_rtos::start(timg0.timer0, peripherals.FROM_CPU_INTR0);
 
         let i2c = I2c::new(
@@ -466,6 +476,12 @@ impl Board {
             low_power: LowPower::new(peripherals.LPWR),
         };
 
+        // Bring-up took well under the timeout; the UI loop's first pass
+        // feeds it next, after the Slint setup in `main`.
+        watchdog.feed();
+        #[cfg(feature = "watchdog-check")]
+        restart::check_watchdog_reset();
+
         log_heap_usage();
         Self {
             display,
@@ -473,6 +489,7 @@ impl Board {
             deep_sleep,
             touch,
             imu,
+            watchdog,
         }
     }
 }

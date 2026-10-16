@@ -19,7 +19,9 @@
 //! firmware; that press never reaches Slint.
 //!
 //! Each wake-up of the loop dispatches every queued input event before the
-//! next frame, so a drag never trails the finger.
+//! next frame, so a drag never trails the finger. Each pass also feeds the
+//! main watchdog ([`device::Watchdog`], ADR-0009), which reboots a loop that
+//! hangs.
 
 #![no_std]
 #![no_main]
@@ -72,6 +74,13 @@ const FLUSH_RETRY_MAX_MS: u32 = 1000;
 ///
 /// A full frame takes about 17 ms on the bus.
 const FLUSH_TIMEOUT: Duration = Duration::from_millis(500);
+// A loop pass waits at most `MAX_IDLE`, then flushes (or puts the panel to
+// sleep) within `FLUSH_TIMEOUT`; keep that within half the watchdog's
+// timeout, leaving the rest for the render (ADR-0009).
+const _: () = assert!(
+    MAX_IDLE.as_millis() + FLUSH_TIMEOUT.as_millis() <= device::WATCHDOG_TIMEOUT_MS / 2,
+    "a UI loop pass must fit well within the watchdog timeout"
+);
 /// Time since start-up after which the start cause is logged (t-51): after
 /// a wake, the USB serial port takes about a second to come back.
 const START_CAUSE_LOG_AFTER: Duration = Duration::from_secs(3);
@@ -90,6 +99,7 @@ async fn main(spawner: Spawner) {
         deep_sleep,
         touch,
         imu,
+        mut watchdog,
     } = Board::init().await;
     input::spawn(spawner, button, deep_sleep, touch, imu);
     let size = display.size();
@@ -127,6 +137,10 @@ async fn main(spawner: Spawner) {
     #[cfg(feature = "frame-dump")]
     let mut dump_pending = true;
     loop {
+        // Every pass ends within a few seconds (bounded waits, flushes and
+        // sleep-in), so a missed feed means the loop or the executor hung.
+        // Fed even once `DisplayWatch` gave up: the loop still runs then.
+        watchdog.feed();
         let frame_start = Instant::now();
         slint::platform::update_timers_and_animations();
         let mut dirty = FrameRows::new(size.1);
@@ -185,7 +199,8 @@ async fn main(spawner: Spawner) {
                     #[cfg(feature = "frame-dump")]
                     if dump_pending {
                         dump_pending = false;
-                        device::dump_frame(size, display.frame());
+                        // Seconds on the serial port: past the watchdog.
+                        watchdog.paused(|| device::dump_frame(size, display.frame()));
                     }
                 }
                 Ok(Err(error)) => {
@@ -258,7 +273,9 @@ async fn main(spawner: Spawner) {
                     log::error!("panel sleep timed out after {FLUSH_TIMEOUT:?}");
                 }
             }
-            // The button task puts the chip to sleep; nothing to draw until then.
+            // The button task puts the chip to sleep; nothing to draw until
+            // then, and it may wait for the BOOT release for any time.
+            watchdog.disarm();
             input::report_panel_asleep().await;
         }
         if let Some(new_rotation) = deferred_rotation.filter(|_| !finger_down) {

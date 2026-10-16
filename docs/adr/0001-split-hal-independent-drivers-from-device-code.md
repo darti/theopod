@@ -24,12 +24,12 @@ for `xtensa-esp32s3-none-elf`, so nothing in it can run as a host unit test.
   `src/device/`.
 - `src/device/` is the only code that touches esp-hal, the ESP runtime
   crates, pin numbers, panel geometry and board timings. It exposes
-  `entry`, `Board` (display, button, deep sleep, touch, IMU), `Display`
-  (which owns the PSRAM framebuffer), `Button`, `Touch`, `Expander`,
-  `Imu`, `IMU_AXES`, the shared I2C bus types, `log_start_cause`, the
-  display reboot counter (`display_resets`, `reset_for_display`,
-  `clear_display_resets`), `log_heap_usage` and, with the `frame-dump`
-  feature, `dump_frame`.
+  `entry`, `Board` (display, button, deep sleep, touch, IMU, watchdog),
+  `Display` (which owns the PSRAM framebuffer), `Button`, `Touch`,
+  `Expander`, `Imu`, `IMU_AXES`, the shared I2C bus types, the main
+  `Watchdog` (ADR-0009), `log_start_cause`, the display reboot counter
+  (`display_resets`, `reset_for_display`, `clear_display_resets`),
+  `log_heap_usage` and, with the `frame-dump` feature, `dump_frame`.
 - `src/main.rs`, `src/input.rs` and `src/slint_backend.rs` see the board
   only through `device` and driver traits such as `Panel`.
 - Board *values* (expander pins, delays, geometry) stay in `src/device/`;

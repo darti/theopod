@@ -3,7 +3,8 @@
 - Status: Accepted
 - Date: 2026-10-15
 - Amended: 2026-10-16, host-tested long-press race (t-52), bounded wait
-  for the panel's sleep-in (t-54), start cause logged (t-51)
+  for the panel's sleep-in (t-54), start cause logged (t-51), watchdog
+  disarmed before the stop (t-57)
 
 ## Context
 
@@ -44,8 +45,9 @@ leaves deep sleep.
   loop that resumes late may send sleep-in to an unpowered panel, which
   fails and is logged. If the timeout cancels the stop request itself, a
   loop that resumes renders into the unpowered panel; its failed flushes
-  can only reboot the chip (t-44) if BOOT is still held 10 s later, before
-  deep sleep. Button changes never wait for the UI loop: they are dropped
+  can only reboot the chip if BOOT is still held long enough: the main
+  watchdog (ADR-0009) fires 5 s into a stall, the display one (t-44)
+  after 10 s. Button changes never wait for the UI loop: they are dropped
   while its queue is full, so a stalled loop cannot hide a long press
   either. A stop also clears the display reboot count (t-44): deep sleep
   powers down the RTC fast RAM that keeps it.
@@ -65,6 +67,8 @@ leaves deep sleep.
 - Each start logs its cause (t-51). On this board, the start after a BOOT
   wake reports `ChipPowerOn` with no wakeup source, not `CoreDeepSleep`:
   the chip may not reach deep sleep, or loses power on the way out (t-67).
+- The UI loop disarms the main watchdog (ADR-0009) before it reports the
+  panel asleep, so the wait for the BOOT release cannot trip it.
 - After the panel's sleep-in, the button task has the orientation task,
   then the touch task, park their devices (t-50): the QMI8658's sensors
   and oscillator stop, then the touch task holds the CST820 in reset

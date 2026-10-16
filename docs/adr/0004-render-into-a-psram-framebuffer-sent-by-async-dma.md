@@ -82,7 +82,7 @@ of PSRAM that the GDMA can read.
   reboots the device, as a boot recovers it (t-44). The policy is
   `theo_drivers::StaleWatch`, host-tested; `DisplayWatch` in `src/main.rs`
   runs its actions. The reboots are counted in RTC fast RAM, which a
-  software reset keeps; stored with its complement (`encode_resets`), so
+  core reset (software, or the watchdog of ADR-0009) keeps; stored with its complement (`encode_resets`), so
   arbitrary contents after an early reset read as zero. After 3 in a row
   the cause survives reboots, and the device keeps running with the error
   logged rather than looping. A minute of uninterrupted health clears the

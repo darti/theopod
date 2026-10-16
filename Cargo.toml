@@ -71,6 +71,10 @@ frame-dump = ["dep:theo-frame-dump"]
 # Keeps the view upright and logs the raw accelerometer axes once a
 # second, to measure `IMU_AXES` (`just imu-calibrate`).
 imu-calibration = []
+# On each start that is not a watchdog reset, sets the display reboot count
+# to 1 and hangs, to check that the count survives the watchdog reset; logs
+# PASS or FAIL after it (`just watchdog-check`).
+watchdog-check = []
 
 [build-dependencies]
 slint-build.workspace = true

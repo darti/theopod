@@ -39,6 +39,10 @@ the ESP toolchain and target are defined in `rust-toolchain.toml`.
 
 ## Gotchas
 
+- The UI loop feeds the main watchdog once per pass (ADR-0009): a pass
+  must stay well under 5 s. Bound any new wait in it (`with_timeout`),
+  as the flush and sleep-in are; a compile-time assert in `src/main.rs`
+  checks the idle wait and `FLUSH_TIMEOUT`.
 - The display DMA reads the PSRAM framebuffer in place only through
   `PsramTxBuf` (64-byte bursts, aligned descriptors) with PSRAM at 80 MHz
   and transfers starting 64-byte aligned; dropping any of these brings back
@@ -82,5 +86,5 @@ the ESP toolchain and target are defined in `rust-toolchain.toml`.
 
 Flashing and the serial monitor (`just flash`, `just monitor`, `just run`,
 `just flash-monitor`, `just flash-dump`, `just monitor-log`,
-`just imu-calibrate`) require the board
+`just imu-calibrate`, `just watchdog-check`) require the board
 to be connected and must not be run without an explicit request.

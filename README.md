@@ -33,8 +33,8 @@ for the V2 pinout and hardware resources.
 - `src/device/`: everything specific to the ESP32-S3 and this board (chip
   runtime, heaps and PSRAM, logger, pins, panel geometry, esp-hal QSPI DMA
   transport, BOOT button and deep sleep, shared async I2C bus, touch
-  controller, IMU and its measured axis map); `restart.rs` holds the
-  start-cause log and the display reboot count.
+  controller, IMU and its measured axis map); `restart.rs` holds the main
+  watchdog, the start-cause log and the display reboot count.
 - `src/slint_backend.rs`: Slint platform and framebuffer rendering.
 - `crates/theo-drivers/`: HAL-independent drivers (CO5300, TCA9554, CST820,
   QMI8658, panel power-up/down, button and long press, `Panel`, `QspiBus`,

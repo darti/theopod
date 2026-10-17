@@ -29,8 +29,9 @@ const WATCHDOG_TIMEOUT: Duration = Duration::from_millis(WATCHDOG_TIMEOUT_MS);
 
 /// Logs why the chip started: the deep-sleep wake cause, or the reset reason.
 ///
-/// The UI loop calls it a few seconds after start-up: after a wake, the
-/// USB serial port takes about a second to come back.
+/// The UI loop calls it a few seconds after start-up, so a monitor
+/// attached once the USB serial port is back still sees it. Read a wake
+/// with a passive monitor: `espflash monitor` resets the chip on connect.
 pub fn log_start_cause() {
     let wake = wakeup_cause();
     if !wake.is_empty() {
@@ -40,6 +41,8 @@ pub fn log_start_cause() {
     } else {
         log::info!("started after an unknown reset");
     }
+    #[cfg(feature = "sleep-check")]
+    super::sleep::check::log();
 }
 
 /// Main watchdog of timer group 0, armed early in `Board::init`.

@@ -82,8 +82,8 @@ const _: () = assert!(
     MAX_IDLE.as_millis() + 2 * FLUSH_TIMEOUT.as_millis() <= device::WATCHDOG_TIMEOUT_MS / 2,
     "a UI loop pass must fit well within the watchdog timeout"
 );
-/// Time since start-up after which the start cause is logged (t-51): after
-/// a wake, the USB serial port takes about a second to come back.
+/// Time since start-up after which the start cause is logged (t-51), so a
+/// monitor attached once the USB serial port is back still sees it.
 const START_CAUSE_LOG_AFTER: Duration = Duration::from_secs(3);
 /// How long the panel may stay stale before the device reboots (t-44).
 const DISPLAY_RESET_AFTER: Duration = Duration::from_secs(10);

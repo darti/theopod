@@ -45,6 +45,9 @@ for the V2 pinout and hardware resources.
 - `crates/theo-frame-dump/`: `no_std` text format for dumping the framebuffer
   over the serial log (firmware writer, host parser).
 - `tools/frame-png/`: host tool turning a dump in a serial log into a PNG.
+- `tools/passive-monitor.py`: serial log recorder (macOS, `python3`) that
+  does not reset the chip and follows it across deep-sleep wakes
+  (`just monitor-passive`).
 - `docs/adr/`: architecture decision records.
 
 ## Setup
@@ -85,6 +88,11 @@ just flash-dump      # flash with the `frame-dump` feature, record the log from 
 just frame-png       # target/frame.log -> target/frame.png
 just monitor-log     # record later dumps (one after each BOOT press)
 ```
+
+`just monitor-log` resets the chip when it connects. To follow the board
+across a stop and wake without resetting it, use `just monitor-passive`
+(`tools/passive-monitor.py`: macOS, needs `python3`, standard library
+only).
 
 ## License
 

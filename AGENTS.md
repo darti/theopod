@@ -30,7 +30,8 @@ the ESP toolchain and target are defined in `rust-toolchain.toml`.
   `tests/regressions/` (ADR-0007).
 - Layout: `README.md`; driver map in `crates/theo-drivers/ARCHITECTURE.md`.
   Debug tooling: `crates/theo-frame-dump` (`no_std`, shared by the firmware
-  and the host) and the host-only `tools/frame-png`.
+  and the host), the host-only `tools/frame-png`, and
+  `tools/passive-monitor.py` (serial log without reset).
 - Use `just` for firmware operations; its recipes configure the required ESP
   environment.
 - Undocumented board wiring: check Waveshare's sources
@@ -67,7 +68,15 @@ the ESP toolchain and target are defined in `rust-toolchain.toml`.
   ("region 'vectors_seg' already defined"): prefix link/flash recipes with
   `RUSTFLAGS="-C link-arg=-Tlinkall.x"`.
 - `just monitor`, `just run` and `just imu-calibrate` need a TTY; from an
-  agent use `just flash-dump` (logs from boot) or `just monitor-log`.
+  agent use `just flash-dump` (logs from boot), `just monitor-log` or
+  `just monitor-passive`.
+- espflash's monitor (`just monitor-log`, `monitor`, `run`, the `--monitor`
+  recipes) resets the chip through DTR/RTS when it connects. To see a
+  deep-sleep wake, use `just monitor-passive` (`tools/passive-monitor.py`,
+  macOS: no reset observed on open, reattaches after each wake): through
+  espflash the wake is replaced by a reset reported as `ChipPowerOn`
+  (t-67). Python tools in `tools/` use the standard library only, and no
+  `just` recipe lints or tests them.
 - A flash stuck on "Connecting…": check `lsof /dev/cu.usbmodem*` for a
   process holding the serial port.
 - `flash-dump` shows the framebuffer, not the panel: panel-side effects
@@ -87,5 +96,6 @@ the ESP toolchain and target are defined in `rust-toolchain.toml`.
 
 Flashing and the serial monitor (`just flash`, `just monitor`, `just run`,
 `just flash-monitor`, `just flash-dump`, `just monitor-log`,
+`just monitor-passive`, `just sleep-check`,
 `just imu-calibrate`, `just watchdog-check`) require the board
 to be connected and must not be run without an explicit request.

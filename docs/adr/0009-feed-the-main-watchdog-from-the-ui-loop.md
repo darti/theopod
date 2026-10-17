@@ -2,6 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-10-16
+- Amended: 2026-10-16, why the start cause is logged late (t-67)
 
 ## Context
 
@@ -43,8 +44,11 @@ holding.
   clock stops in deep sleep, and the wake resets the chip anyway.
 - The UI loop logs why the chip started, the reset reason or the
   deep-sleep wake cause (t-51), 3 s after start-up
-  (`START_CAUSE_LOG_AFTER`): after a wake the USB serial port takes about
-  a second to come back, and logged earlier the line was lost.
+  (`START_CAUSE_LOG_AFTER`): a margin for a monitor attached by hand once
+  the USB serial port is back. The port itself returns about 0.15 s after
+  a wake (t-67); the line was first thought lost for a second because
+  `espflash monitor` resets the chip when it connects. A shorter delay
+  would do with `just monitor-passive`.
   `reset_reason` and `wakeup_cause` are free functions in esp-hal 1.2, and
   `Rtc` takes `RTC_TIMER`, so `DeepSleep` keeps `LPWR`.
 

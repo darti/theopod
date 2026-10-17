@@ -24,6 +24,7 @@ lint:
     LIBCLANG_PATH="{{libclang_path}}" PATH="{{gcc_path}}:${PATH}" RUSTUP_TOOLCHAIN=esp cargo clippy --features frame-dump -- -D warnings
     LIBCLANG_PATH="{{libclang_path}}" PATH="{{gcc_path}}:${PATH}" RUSTUP_TOOLCHAIN=esp cargo clippy --features imu-calibration -- -D warnings
     LIBCLANG_PATH="{{libclang_path}}" PATH="{{gcc_path}}:${PATH}" RUSTUP_TOOLCHAIN=esp cargo clippy --features watchdog-check -- -D warnings
+    LIBCLANG_PATH="{{libclang_path}}" PATH="{{gcc_path}}:${PATH}" RUSTUP_TOOLCHAIN=esp cargo clippy --features sleep-check -- -D warnings
     RUSTUP_TOOLCHAIN=stable cargo clippy -p theo-drivers -p theo-frame-dump -p frame-png --target {{host_target}} --all-targets -- -D warnings
 
 build:
@@ -59,7 +60,21 @@ imu-calibrate port="":
 watchdog-check log="target/watchdog.log" port="":
     ESP_LOG=info LIBCLANG_PATH="{{libclang_path}}" PATH="{{gcc_path}}:${PATH}" RUSTUP_TOOLCHAIN=esp cargo espflash flash --release --features watchdog-check --monitor --non-interactive --chip {{chip}} {{ if port != "" { "--port " + port } else { "" } }} | tee {{log}}
 
-# Record the serial log to a file, e.g. for dumps triggered by BOOT presses.
+# Flash a build that counts deep sleeps in an always-on RTC register and
+# logs the count and the raw reset state at each start (t-67), then record
+# the log with `monitor-passive`: stop, wake, and read the start after it.
+sleep-check log="target/sleep.log" port="":
+    ESP_LOG=info LIBCLANG_PATH="{{libclang_path}}" PATH="{{gcc_path}}:${PATH}" RUSTUP_TOOLCHAIN=esp cargo espflash flash --release --features sleep-check --chip {{chip}} {{ if port != "" { "--port " + port } else { "" } }}
+    python3 -I tools/passive-monitor.py {{quote(log)}} {{ if port != "" { quote(port) } else { "" } }}
+
+# Record the serial log without resetting the chip, across deep-sleep
+# wakes (macOS, Ctrl-C to stop). Use it to see a wake: `monitor-log` resets
+# the chip on connect, and the start then reports `ChipPowerOn` (t-67).
+monitor-passive log="target/serial.log" port="":
+    python3 -I tools/passive-monitor.py {{quote(log)}} {{ if port != "" { quote(port) } else { "" } }}
+
+# Record the serial log to a file, e.g. for dumps triggered by BOOT
+# presses. Connecting resets the chip.
 monitor-log log="target/frame.log" port="":
     LIBCLANG_PATH="{{libclang_path}}" PATH="{{gcc_path}}:${PATH}" RUSTUP_TOOLCHAIN=esp cargo espflash monitor --non-interactive --chip {{chip}} {{ if port != "" { "--port " + port } else { "" } }} | tee {{log}}
 

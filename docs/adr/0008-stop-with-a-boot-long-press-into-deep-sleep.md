@@ -4,7 +4,7 @@
 - Date: 2026-10-15
 - Amended: 2026-10-16, host-tested long-press race (t-52), bounded wait
   for the panel's sleep-in (t-54), start cause logged (t-51), watchdog
-  disarmed before the stop (t-57)
+  disarmed before the stop (t-57), wake cause checked on the board (t-67)
 
 ## Context
 
@@ -64,9 +64,17 @@ leaves deep sleep.
 ## Consequences
 
 - Stopping keeps no state: the UI starts afresh after each wake.
-- Each start logs its cause (t-51). On this board, the start after a BOOT
-  wake reports `ChipPowerOn` with no wakeup source, not `CoreDeepSleep`:
-  the chip may not reach deep sleep, or loses power on the way out (t-67).
+- Each start logs its cause (t-51). The start after a BOOT wake reports
+  `CoreDeepSleep` with the `Ext1` wakeup source, checked on the board
+  (t-67): a count of sleeps kept in the always-on RTC_CNTL STORE0 register
+  (feature `sleep-check`) survives the wake. Read a wake with
+  `just monitor-passive`: `espflash monitor` (`just monitor-log`) resets
+  the chip through DTR/RTS when it connects, and that start reports
+  `ChipPowerOn`, as the first reports did; that reset also clears the
+  count, which a wake keeps. Ruled out on the board: the analog brown-out
+  reset the bootloader leaves enabled (disabling it before the sleep
+  changed nothing), and an inrush when the panel rails come back (the
+  start already reported `ChipPowerOn` before they did).
 - The UI loop disarms the main watchdog (ADR-0009) before it reports the
   panel asleep, so the wait for the BOOT release cannot trip it.
 - After the panel's sleep-in, the button task has the orientation task,

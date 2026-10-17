@@ -21,7 +21,7 @@
 //! Each wake-up of the loop dispatches every queued input event before the
 //! next frame, so a drag never trails the finger. Each pass also feeds the
 //! main watchdog ([`device::Watchdog`], ADR-0009), which reboots a loop that
-//! hangs.
+//! hangs; the third such reboot in a row stops the pod instead (t-66).
 
 #![no_std]
 #![no_main]
@@ -225,6 +225,9 @@ async fn main(spawner: Spawner) {
             start_cause_logged = true;
             device::log_start_cause();
         }
+        // The loop got this far for a while: past watchdog reboots were
+        // not a hang that comes back at every boot (t-66).
+        device::clear_watchdog_resets_if_healthy(frame_start.as_millis());
 
         let wake_up = Timer::at(next_wake_up(&window, frame_start, resend_at));
         let mut on_button = |message| match message {

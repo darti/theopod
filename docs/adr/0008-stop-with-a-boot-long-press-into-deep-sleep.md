@@ -5,6 +5,8 @@
 - Amended: 2026-10-16, host-tested long-press race (t-52), bounded wait
   for the panel's sleep-in (t-54), start cause logged (t-51), watchdog
   disarmed before the stop (t-57), wake cause checked on the board (t-67)
+- Amended: 2026-10-17, a stop after repeated watchdog reboots shares the
+  sleep path (t-66)
 
 ## Context
 
@@ -30,9 +32,10 @@ leaves deep sleep.
   is absolute, so restarting the wait does not restart the hold), asks the
   UI loop to put the CO5300 to sleep (display off, sleep-in), then hands
   the button to `DeepSleep::until_pressed` (`src/device/`). It waits for
-  the release, since sleeping with the button down would wake at once,
-  arms GPIO0 as a low-level wakeup on its low-power path and enters deep
-  sleep. If GPIO0 cannot be armed, the chip restarts rather than halt with
+  the release, since sleeping with the button down would wake at once;
+  then `DeepSleep::enter`, the sleep path the early stop after repeated
+  watchdog reboots shares (ADR-0009, t-66), arms GPIO0 as a low-level
+  wakeup on its low-power path and enters deep sleep. If GPIO0 cannot be armed, the chip restarts rather than halt with
   the panel dark.
 - Putting the panel to sleep is best effort: a failure is logged and the
   chip sleeps anyway. A panel that ignores sleep-in would ignore a retry,

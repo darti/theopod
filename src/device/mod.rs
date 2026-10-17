@@ -18,6 +18,8 @@
 //!   feeds; [`log_start_cause`]: logs the reset or wake cause.
 //! - [`display_resets`], [`reset_for_display`], [`clear_display_resets`]:
 //!   reboots for a broken display, counted across core resets.
+//! - [`clear_watchdog_resets_if_healthy`]: forgets watchdog reboots in a
+//!   row; `Board::init` counts them and stops at the cap.
 //! - `dump_frame` (feature `frame-dump`): prints the framebuffer to the
 //!   serial log.
 //!
@@ -45,6 +47,7 @@ use esp_hal::{
     Async,
     gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull},
     i2c::master::{BusTimeout, Config as I2cConfig, I2c},
+    peripherals::GPIO0,
     psram::{PsramConfig, PsramMode, SpiRamFreq},
     spi::{
         Mode,
@@ -62,15 +65,15 @@ pub use self::expander::{Expander, Touch};
 )]
 pub use self::expander::{TouchError, TouchResetError};
 pub use self::restart::{
-    WATCHDOG_TIMEOUT_MS, Watchdog, clear_display_resets, display_resets, log_start_cause,
-    reset_for_display,
+    WATCHDOG_TIMEOUT_MS, Watchdog, clear_display_resets, clear_watchdog_resets_if_healthy,
+    display_resets, log_start_cause, reset_for_display,
 };
 pub use self::sleep::DeepSleep;
 use self::{esp_qspi::EspQspi, psram_tx_buf::PsramTxBuf};
 use embedded_hal::digital::PinState;
 use theo_drivers::{
     Axis, AxisMap, Co5300, Cst820, DebouncedButton, ExpanderPin, PanelGeometry, PanelPower,
-    PanelSize, Qmi8658, Tca9554, Transient, check_pattern_with, flush_rows,
+    PanelSize, Qmi8658, StartAction, Tca9554, Transient, check_pattern_with, flush_rows,
 };
 
 pub use esp_hal::main as entry;
@@ -210,6 +213,12 @@ impl Board {
     /// The expander then becomes the shared [`Expander`], so runtime
     /// read-modify-writes cannot race (ADR-0005).
     ///
+    /// # Stops
+    ///
+    /// Never returns at the third watchdog reset since the UI loop last ran
+    /// healthy: it parks the board and sleeps until BOOT instead
+    /// (`stop_after_watchdog_resets`, ADR-0009).
+    ///
     /// # Panics
     ///
     /// Panics if a bring-up step fails: the board cannot run without it.
@@ -231,6 +240,9 @@ impl Board {
         // Armed as soon as it exists: the display bring-up waits on DMA
         // with no timeout of its own, and a panic from here on reboots.
         let mut watchdog = Watchdog::arm(timg0.wdt);
+        // Counted at once, so a hang anywhere in the bring-up is capped; the
+        // stop itself waits for the expander, below (t-66).
+        let start = restart::count_watchdog_start();
         esp_rtos::start(timg0.timer0, peripherals.FROM_CPU_INTR0);
 
         let i2c = I2c::new(
@@ -245,6 +257,17 @@ impl Board {
         static I2C_BUS: StaticCell<I2cBus> = StaticCell::new();
         let i2c: &'static I2cBus = I2C_BUS.init(Mutex::new(i2c));
         let mut expander = Tca9554::new(I2cDevice::new(i2c), TCA9554_ADDRESS);
+        let deep_sleep = DeepSleep::new(peripherals.LPWR);
+        // Before the panel bring-up, which a hang may be in.
+        let park = match start {
+            StartAction::Run => None,
+            StartAction::Stop => Some(true),
+            StartAction::StopWithoutParking => Some(false),
+        };
+        if let Some(park) = park {
+            let boot = peripherals.GPIO0;
+            stop_after_watchdog_resets(park, &mut expander, i2c, watchdog, deep_sleep, boot).await;
+        }
         PANEL_POWER
             .power_up(&mut expander, &mut Delay)
             .await
@@ -343,13 +366,14 @@ impl Board {
             Ok(false) => {}
             Err(never) => match never {},
         }
-        let deep_sleep = DeepSleep::new(peripherals.LPWR);
 
         // Bring-up took well under the timeout; the UI loop's first pass
         // feeds it next, after the Slint setup in `main`.
         watchdog.feed();
         #[cfg(feature = "watchdog-check")]
         restart::check_watchdog_reset();
+        #[cfg(feature = "watchdog-loop")]
+        restart::hang_until_watchdog();
 
         log_heap_usage();
         Self {
@@ -389,6 +413,53 @@ async fn check_display(display: &mut Display) {
             panic!("display cannot send a full transfer: {error}");
         }
     }
+}
+
+/// Parks the board if `park`, then sleeps until BOOT, after watchdog reboots.
+///
+/// Runs early in [`Board::init`], before the panel bring-up. A watchdog
+/// reset keeps the expander's pins, so the panel rails may still be on.
+/// Parking follows a normal stop (ADR-0008) without the panel's sleep-in,
+/// as QSPI is not up yet: the IMU powers down (written at the first
+/// address that acknowledges, without the probe `start_imu` does), the
+/// touch controller is held in reset, and the rails are cut last. Each
+/// step is best effort and bounded by the I2C timeout, under the armed
+/// watchdog: if parking hangs anyway, the next start skips it (`park`
+/// false), and the rails may then stay on through the sleep. The count is
+/// cleared and the watchdog disarmed just before the sleep; a press of
+/// BOOT starts the device afresh.
+async fn stop_after_watchdog_resets(
+    park: bool,
+    expander: &mut Tca9554<I2cDevice>,
+    i2c: &'static I2cBus,
+    watchdog: Watchdog,
+    deep_sleep: DeepSleep,
+    boot: GPIO0<'static>,
+) -> ! {
+    if park {
+        let mut imu_down = false;
+        for address in IMU_ADDRESSES {
+            let mut imu = Qmi8658::new(I2cDevice::new(i2c), address);
+            if imu.power_down().await.is_ok() {
+                imu_down = true;
+                break;
+            }
+        }
+        if !imu_down {
+            log::error!("IMU power-down failed before the stop");
+        }
+        // No `Cst820` yet: what its `hold_in_reset` does.
+        if let Err(error) = expander.configure_output(TOUCH_RESET, PinState::Low).await {
+            log::error!("touch reset failed before the stop: {error:?}");
+        }
+        if let Err(error) = PANEL_POWER.power_down(expander).await {
+            log::error!("panel power-down failed before the stop: {error:?}");
+        }
+    }
+    restart::clear_watchdog_resets();
+    watchdog.disarm();
+    let boot = Input::new(boot, InputConfig::default().with_pull(Pull::Up));
+    deep_sleep.enter(boot)
 }
 
 /// Starts the QMI8658 at the first of [`IMU_ADDRESSES`] that answers.

@@ -13,6 +13,8 @@
 //!   after failed flushes; [`reset_due`]: when to reset a failing device.
 //! - [`StaleWatch`], [`WatchAction`], [`encode_resets`], [`decode_resets`]:
 //!   when a display that stays broken calls for a reboot.
+//! - [`RebootCap`], [`StartDecision`], [`StartAction`]: when repeated watchdog
+//!   reboots call for a stop instead.
 //! - [`QspiBus`], [`Lanes`]: Quad-SPI transport for display controllers;
 //!   [`FrameBus`]: one that holds the framebuffer it sends in place.
 //! - [`ChipSelect`]: chip select released even when a transfer is cancelled.
@@ -52,6 +54,7 @@ pub mod panel;
 pub mod panel_power;
 pub mod qmi8658;
 pub mod qspi;
+pub mod reboot_cap;
 pub mod retry;
 pub mod stale_watch;
 pub mod tca9554;
@@ -81,6 +84,8 @@ mod panel_power_tests;
 #[cfg(test)]
 mod qmi8658_tests;
 #[cfg(test)]
+mod reboot_cap_tests;
+#[cfg(test)]
 mod retry_tests;
 #[cfg(test)]
 mod stale_watch_tests;
@@ -104,6 +109,7 @@ pub use panel::Panel;
 pub use panel_power::PanelPower;
 pub use qmi8658::{Acceleration, Error as Qmi8658Error, Qmi8658};
 pub use qspi::{FrameBus, Lanes, QspiBus};
+pub use reboot_cap::{RebootCap, StartAction, StartDecision};
 pub use retry::{FlushRetry, Retry, Transient, reset_due};
 pub use stale_watch::{StaleWatch, WatchAction, decode_resets, encode_resets};
 pub use tca9554::{Pin as ExpanderPin, Tca9554};

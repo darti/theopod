@@ -6,7 +6,7 @@
 use core::fmt;
 
 use esp_hal::{
-    gpio::{Event, WakeupConfig},
+    gpio::{Event, Input, WakeupConfig},
     peripherals::LPWR,
     rtc_cntl::sleep::{LowPower, RtcSleepConfig},
 };
@@ -41,14 +41,25 @@ impl DeepSleep {
     /// If GPIO0 cannot be armed as a wakeup source, which its RTC pad rules
     /// out, the chip restarts instead: the panel is already dark, and a
     /// halted chip would look dead.
-    pub async fn until_pressed(mut self, mut button: Button) -> ! {
+    pub async fn until_pressed(self, mut button: Button) -> ! {
         while button.is_pressed() {
             match button.changed().await {
                 Ok(_) => {}
                 Err(never) => match never {},
             }
         }
-        let (mut pin, _) = button.release();
+        let (pin, _) = button.release();
+        self.enter(pin)
+    }
+
+    /// Sleeps until `pin`, the BOOT button on GPIO0 pulled up, goes low.
+    ///
+    /// The path shared by every stop: [`Self::until_pressed`] after the
+    /// release, and the early stop after too many watchdog reboots (t-66),
+    /// which has no debounced button yet. With the pin already low the
+    /// chip wakes at once, which then starts it as a press would. The same
+    /// preconditions apply: park the peripherals outside the chip first.
+    pub(super) fn enter(mut self, mut pin: Input<'static>) -> ! {
         // The low-power path is the one that works with the digital domain
         // off; sleep keeps the pin's pull-up, so the pad stays high.
         if let Err(error) =

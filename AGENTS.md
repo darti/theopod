@@ -97,5 +97,5 @@ the ESP toolchain and target are defined in `rust-toolchain.toml`.
 Flashing and the serial monitor (`just flash`, `just monitor`, `just run`,
 `just flash-monitor`, `just flash-dump`, `just monitor-log`,
 `just monitor-passive`, `just sleep-check`,
-`just imu-calibrate`, `just watchdog-check`) require the board
-to be connected and must not be run without an explicit request.
+`just imu-calibrate`, `just watchdog-check`, `just watchdog-loop`) require
+the board to be connected and must not be run without an explicit request.

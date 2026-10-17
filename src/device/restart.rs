@@ -7,6 +7,9 @@
 //!   UI loop (t-57).
 //! - [`display_resets`], [`reset_for_display`], [`clear_display_resets`]:
 //!   reboots for a broken display, counted across resets (t-44).
+//! - [`clear_watchdog_resets_if_healthy`]: forgets watchdog reboots in a
+//!   row once the UI loop has run a while; `Board::init` counts them and
+//!   stops at the cap (t-66).
 //!
 //! Every reset here is a digital-core reset (`CoreSw`, `CoreMwdt0`), which
 //! keeps RTC fast RAM and so the reboot count; deep sleep powers that RAM
@@ -14,11 +17,12 @@
 
 use esp_hal::{
     peripherals::TIMG0,
+    rtc_cntl::SocResetReason,
     system::{reset_reason, wakeup_cause},
     time::Duration,
     timer::timg::{MwdtStage, Wdt},
 };
-use theo_drivers::{decode_resets, encode_resets};
+use theo_drivers::{RebootCap, StartAction, decode_resets, encode_resets};
 
 /// How long the UI loop may go without feeding the [`Watchdog`], in ms.
 ///
@@ -26,6 +30,13 @@ use theo_drivers::{decode_resets, encode_resets};
 /// `src/main.rs` asserts its bounded parts fit in half of it.
 pub const WATCHDOG_TIMEOUT_MS: u64 = 5000;
 const WATCHDOG_TIMEOUT: Duration = Duration::from_millis(WATCHDOG_TIMEOUT_MS);
+
+/// Stops at the third watchdog start in a row.
+///
+/// 60 s of UI loop forget them. A hang or panic that comes back after
+/// every boot would otherwise reboot every [`WATCHDOG_TIMEOUT_MS`],
+/// forever; one that comes back later than that is not capped (t-66).
+const WATCHDOG_REBOOT_CAP: RebootCap = RebootCap::new(3, 60_000);
 
 /// Logs why the chip started: the deep-sleep wake cause, or the reset reason.
 ///
@@ -102,8 +113,6 @@ impl core::fmt::Debug for Watchdog {
 /// A nonzero count before any hang also fails, so the check never loops.
 #[cfg(feature = "watchdog-check")]
 pub(super) fn check_watchdog_reset() {
-    use esp_hal::rtc_cntl::SocResetReason;
-
     let reason = reset_reason();
     let count = display_resets();
     if reason == Some(SocResetReason::CoreMwdt0) && count == 1 {
@@ -120,6 +129,22 @@ pub(super) fn check_watchdog_reset() {
         loop {
             core::hint::spin_loop();
         }
+    }
+}
+
+/// Hangs until the watchdog resets the chip, on every start.
+///
+/// Feature `watchdog-loop`: a hang that comes back at each boot, so the
+/// third watchdog start in a row must stop into deep sleep (t-66).
+#[cfg(feature = "watchdog-loop")]
+pub(super) fn hang_until_watchdog() {
+    log::info!(
+        "watchdog loop: {} resets in a row so far, hanging until the watchdog resets \
+         ({WATCHDOG_TIMEOUT_MS} ms)",
+        watchdog_resets()
+    );
+    loop {
+        core::hint::spin_loop();
     }
 }
 
@@ -159,4 +184,67 @@ pub fn clear_display_resets() {
 pub fn reset_for_display() -> ! {
     set_display_resets(display_resets().saturating_add(1));
     esp_hal::system::software_reset()
+}
+
+/// Watchdog reboots in a row, kept across core resets like `DISPLAY_RESETS`.
+#[esp_hal::ram(unstable(rtc_fast, persistent))]
+static mut WATCHDOG_RESETS: [u32; 2] = [0; 2];
+
+/// Watchdog reboots in a row since the UI loop last ran healthy.
+///
+/// Only `Board::init` and then the UI task use the functions below, one
+/// after the other: nothing else touches the counter.
+fn watchdog_resets() -> u32 {
+    // SAFETY: a volatile read through a raw pointer (no reference to the
+    // `static mut`); one user at a time, and every bit pattern is a valid
+    // `[u32; 2]`.
+    decode_resets(unsafe { (&raw const WATCHDOG_RESETS).read_volatile() })
+}
+
+fn set_watchdog_resets(count: u32) {
+    // SAFETY: as in `watchdog_resets`; a reset during the write leaves a
+    // pair that fails the check and reads as zero.
+    unsafe { (&raw mut WATCHDOG_RESETS).write_volatile(encode_resets(count)) };
+}
+
+/// Forgets past watchdog reboots, just before the stop's deep sleep.
+///
+/// Deep sleep powers RTC fast RAM down, but a short sleep may not lose it.
+pub(super) fn clear_watchdog_resets() {
+    set_watchdog_resets(0);
+}
+
+/// Forgets past watchdog reboots once the UI loop has run `uptime_ms`.
+///
+/// The UI loop calls it on each pass: a loop that got this far is not a
+/// hang that comes back at every boot.
+pub fn clear_watchdog_resets_if_healthy(uptime_ms: u64) {
+    if WATCHDOG_REBOOT_CAP.should_clear(uptime_ms, watchdog_resets()) {
+        clear_watchdog_resets();
+        log::info!("UI loop healthy: watchdog reboot count cleared");
+    }
+}
+
+/// Counts this start if the watchdog caused it, and says whether to stop.
+///
+/// For `Board::init`, once, right after arming the watchdog: a hang later
+/// in the bring-up is capped too. Only `CoreMwdt0`, the main watchdog's
+/// reset (ADR-0009), counts.
+pub(super) fn count_watchdog_start() -> StartAction {
+    let watchdog = reset_reason() == Some(SocResetReason::CoreMwdt0);
+    let start = WATCHDOG_REBOOT_CAP.on_start(watchdog, watchdog_resets());
+    set_watchdog_resets(start.reboots);
+    match start.action {
+        StartAction::Run if watchdog => {
+            log::warn!("watchdog reset: {} in a row", start.reboots);
+        }
+        StartAction::Run => {}
+        StartAction::Stop => {
+            log::error!("{} watchdog resets in a row: stopping", start.reboots);
+        }
+        StartAction::StopWithoutParking => {
+            log::error!("the last stop did not finish: stopping without parking");
+        }
+    }
+    start.action
 }

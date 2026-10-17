@@ -3,6 +3,7 @@
 - Status: Accepted
 - Date: 2026-10-11
 - Amended: 2026-10-15, HAL-free logic and the current `device` items
+- Amended: 2026-10-17, the watchdog reboot cap (t-66)
 
 ## Context
 
@@ -28,7 +29,8 @@ for `xtensa-esp32s3-none-elf`, so nothing in it can run as a host unit test.
   `Display` (which owns the PSRAM framebuffer), `Button`, `Touch`,
   `Expander`, `Imu`, `IMU_AXES`, the shared I2C bus types, the main
   `Watchdog` (ADR-0009), `log_start_cause`, the display reboot counter
-  (`display_resets`, `reset_for_display`, `clear_display_resets`),
+  (`display_resets`, `reset_for_display`, `clear_display_resets`), the
+  watchdog reboot cap (`clear_watchdog_resets_if_healthy`),
   `log_heap_usage` and, with the `frame-dump` feature, `dump_frame`.
 - `src/main.rs`, `src/input.rs` and `src/slint_backend.rs` see the board
   only through `device` and driver traits such as `Panel`.

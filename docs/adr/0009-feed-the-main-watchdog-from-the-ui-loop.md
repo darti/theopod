@@ -3,6 +3,7 @@
 - Status: Accepted
 - Date: 2026-10-16
 - Amended: 2026-10-16, why the start cause is logged late (t-67)
+- Amended: 2026-10-17, watchdog reboots capped by a stop (t-66)
 
 ## Context
 
@@ -63,11 +64,30 @@ holding.
   then spins) ends in a MWDT0 reset 5 s later, instead of a halt; the
   next start reports `CoreMwdt0`. Only a panic before `TimerGroup::new`
   still halts.
-- Negative: a hang or panic that repeats after every boot reboots every
-  5 s with no cap; watchdog resets do not count toward the display cap
-  (t-66).
+- Capped (t-66): a hang or panic that repeats after every boot no longer
+  reboots every 5 s forever. `WATCHDOG_RESETS`, in RTC fast RAM like the
+  display count, counts `CoreMwdt0` starts since the UI loop last ran
+  healthy (`RebootCap`, host-tested in `theo-drivers`): other starts
+  neither count nor clear it (a display reboot keeps it), and power-on or
+  deep sleep read it as zero. `Board::init` counts right after arming the
+  watchdog, so a hang anywhere in the bring-up is capped. At the third,
+  it stops before the panel bring-up: it parks the IMU, the touch
+  controller and the panel rails like a normal stop, minus the panel's
+  sleep-in (QSPI is not up yet), then clears the count, disarms the
+  watchdog and sleeps until BOOT (`DeepSleep::enter`, the sleep path
+  every stop shares). The count stays at the cap while it parks: if
+  parking hangs, the next watchdog start sleeps without parking, and the
+  rails may then stay on through the sleep. The UI loop clears the count
+  once it has run 60 s, so a hang that comes back later than that is not
+  capped. Checked on the board with `just watchdog-loop` (hangs at every
+  start): three resets, then deep sleep. A stop with BOOT still held
+  wakes at once and starts a fresh round. Watchdog resets still do not
+  count toward the display cap.
+- Checked on the board (t-66): BOOT held through a MWDT0 reset does not
+  re-sample the GPIO0 strapping pin; the chip boots the firmware
+  (`SPI_FAST_FLASH_BOOT`), never download mode.
 - Negative: only the UI task and the executor are watched; a stuck input
-  task goes unnoticed, and nothing watches the stop once disarmed (t-66).
+  task goes unnoticed (t-83), and nothing watches the stop once disarmed.
 - Neutral: a loop stalled for 5 s reboots the chip, stop or not. The
   `PANEL_SLEEP_TIMEOUT` path of ADR-0008 (the loop never reports the panel
   asleep, so it never disarms the watchdog) therefore ends in deep sleep
@@ -83,5 +103,8 @@ holding.
   module, which the reboot count relies on.
 - Stop feeding once `StaleWatch` gives up: rejected, the watchdog would
   then reboot the chip past the display cap.
-- Count watchdog resets toward the display cap: left to t-66, which caps
-  watchdog reboots on their own and falls back to deep sleep.
+- Count watchdog resets toward the display cap: rejected (t-66), the two
+  causes differ; watchdog reboots have their own cap and fall back to deep
+  sleep.
+- Stop at the cap after the bring-up, with the debounced button: rejected
+  (t-66), a hang during the bring-up would never reach the check.

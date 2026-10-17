@@ -34,7 +34,8 @@ for the V2 pinout and hardware resources.
   runtime, heaps and PSRAM, logger, pins, panel geometry, esp-hal QSPI DMA
   transport, BOOT button and deep sleep, shared async I2C bus, touch
   controller, IMU and its measured axis map); `restart.rs` holds the main
-  watchdog, the start-cause log and the display reboot count,
+  watchdog and its reboot cap, the start-cause log and the display reboot
+  count,
   `expander.rs` the shared TCA9554 and the touch controller, `sleep.rs`
   deep sleep.
 - `src/slint_backend.rs`: Slint platform and framebuffer rendering.

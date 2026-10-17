@@ -75,6 +75,10 @@ imu-calibration = []
 # to 1 and hangs, to check that the count survives the watchdog reset; logs
 # PASS or FAIL after it (`just watchdog-check`).
 watchdog-check = []
+# Hangs at the end of every start until the watchdog resets, to check that
+# the third reset in a row stops into deep sleep (`just watchdog-loop`,
+# t-66); a BOOT press then starts the loop again.
+watchdog-loop = []
 # Counts deep sleeps in the always-on RTC_CNTL STORE0 register and logs it
 # at each start with the raw reset state and brown-out configuration, to
 # tell a wake from deep sleep from a chip reset (`just sleep-check`, t-67).

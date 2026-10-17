@@ -40,9 +40,10 @@ const WATCHDOG_REBOOT_CAP: RebootCap = RebootCap::new(3, 60_000);
 
 /// Logs why the chip started: the deep-sleep wake cause, or the reset reason.
 ///
-/// The UI loop calls it a few seconds after start-up, so a monitor
-/// attached once the USB serial port is back still sees it. Read a wake
-/// with a passive monitor: `espflash monitor` resets the chip on connect.
+/// The UI loop calls it once the USB serial port is back from a wake
+/// (`START_CAUSE_LOG_AFTER`), or before a stop that comes earlier. Read a
+/// wake with a passive monitor: `espflash monitor` resets the chip on
+/// connect.
 pub fn log_start_cause() {
     let wake = wakeup_cause();
     if !wake.is_empty() {

@@ -4,7 +4,7 @@
 - Date: 2026-10-16
 - Amended: 2026-10-16, why the start cause is logged late (t-67)
 - Amended: 2026-10-17, watchdog reboots capped by a stop (t-66), I2C bus
-  freed at every start (t-84)
+  freed at every start (t-84), start cause logged after 500 ms (t-76)
 
 ## Context
 
@@ -45,12 +45,15 @@ holding.
   the button task then waits for the BOOT release for any time. MWDT0's
   clock stops in deep sleep, and the wake resets the chip anyway.
 - The UI loop logs why the chip started, the reset reason or the
-  deep-sleep wake cause (t-51), 3 s after start-up
-  (`START_CAUSE_LOG_AFTER`): a margin for a monitor attached by hand once
-  the USB serial port is back. The port itself returns about 0.15 s after
-  a wake (t-67); the line was first thought lost for a second because
-  `espflash monitor` resets the chip when it connects. A shorter delay
-  would do with `just monitor-passive`.
+  deep-sleep wake cause (t-51), on the first pass at least 500 ms after
+  start-up (`START_CAUSE_LOG_AFTER`, t-76), so up to a pass later, or
+  first thing on a stop that comes before (the stop never returns). The
+  USB serial port returns about 0.15 s after a wake (t-67), so a
+  `just monitor-passive` already running sees the line; one opened by
+  hand later does not. The delay was 3 s while the line was thought lost
+  for a second after a wake: `espflash monitor` was resetting the chip on
+  connect. Measured on a deep-sleep wake only: a cold plug-in, which the
+  host enumerates from scratch, may still miss the line.
   `reset_reason` and `wakeup_cause` are free functions in esp-hal 1.2, and
   `Rtc` takes `RTC_TIMER`, so `DeepSleep` keeps `LPWR`.
 

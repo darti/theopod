@@ -82,9 +82,13 @@ const _: () = assert!(
     MAX_IDLE.as_millis() + 2 * FLUSH_TIMEOUT.as_millis() <= device::WATCHDOG_TIMEOUT_MS / 2,
     "a UI loop pass must fit well within the watchdog timeout"
 );
-/// Time since start-up after which the start cause is logged (t-51), so a
-/// monitor attached once the USB serial port is back still sees it.
-const START_CAUSE_LOG_AFTER: Duration = Duration::from_secs(3);
+/// Time since start-up after which the start cause is logged (t-51).
+///
+/// After a wake the USB serial port is back in about 0.15 s, so a
+/// `just monitor-passive` already running sees the line (t-67, t-76). The
+/// loop checks it once per pass, so the line comes up to a pass later; a
+/// stop before that logs it first.
+const START_CAUSE_LOG_AFTER: Duration = Duration::from_millis(500);
 /// How long the panel may stay stale before the device reboots (t-44).
 const DISPLAY_RESET_AFTER: Duration = Duration::from_secs(10);
 /// Reboots in a row for a broken display before giving up on rebooting.
@@ -266,6 +270,10 @@ async fn main(spawner: Spawner) {
             on_touch(event);
         }
         if stop {
+            // A stop never returns: say why the chip started, if not yet.
+            if !start_cause_logged {
+                device::log_start_cause();
+            }
             // No flush is in flight here: flushes are awaited above. Best
             // effort: a panel that ignores sleep-in would ignore a retry
             // too, and staying awake would not darken it either. Bounded

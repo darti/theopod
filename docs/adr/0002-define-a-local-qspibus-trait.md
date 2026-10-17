@@ -2,6 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-10-11
+- Amended: 2026-10-17, reads checked impossible on the V2 (t-68)
 
 ## Context
 
@@ -84,3 +85,20 @@ change, not only `FrameBus` (ADR-0004 keeps it out of scope).
 `Co5300::new` also checks that the bus frame holds exactly one RGB565
 frame of the geometry (`Error::FrameSizeMismatch`), so a wrong-sized
 framebuffer fails at construction rather than on a flush.
+
+## Update (t-68): reads stay out of scope, the V2 cannot read the panel
+
+Reads were meant to let the firmware check the panel's health (RDDPM) and
+recover a latched panel. They are not possible on this board. The CO5300
+datasheet (V0.01, §5.2.3, p. 28) reads with opcode `03h`, address
+`{00h, CMD, 00h}` and no dummy cycles, the data leaving on a separate
+`SDO` pin that the module may tie to SDI (SIO0). On the V2, a
+diagnostic build read RDDPM, RDID1-3 and others on SIO0 and on SIO1,
+with 0 and 8 dummy cycles, at 40 MHz down to 500 kHz (the datasheet's
+read clock limit is about 10 MHz): every read gave `00`, the same after
+display off and display on. With the pads' pull-ups enabled the same
+reads gave `FF`: the read path works, and no line is driven, so `SDO`
+is not routed to the ESP32-S3 (Waveshare's pin list has SIO0-3, SCLK and
+CS only). Panel health stays known only from ESP-side flush failures
+(`StaleWatch`, ADR-0004); a latched panel that accepts writes goes
+unnoticed.

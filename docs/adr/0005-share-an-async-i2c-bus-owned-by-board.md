@@ -1,6 +1,6 @@
 # ADR-0005: Share an async I2C bus owned by Board
 
-- Status: Accepted, amended by the t-19 and t-20/t-34 updates below
+- Status: Accepted, amended by the t-19, t-20/t-34, t-43 and t-84 updates below
 - Date: 2026-10-11
 
 ## Context
@@ -143,3 +143,24 @@ Out of scope: the touch driver itself (t-19).
   With a single runtime user (touch) they would be unused; the panel's
   first runtime user (sleep, power-off, re-init) should add them, or take
   the shared reference as touch does.
+
+## Update (t-84): bus clear at every start
+
+A reset of the ESP32-S3 in the middle of a transfer (a watchdog reset,
+ADR-0009) leaves the devices on the bus where they were: one driving a 0
+on SDA keeps the bus, and every transfer then fails within the bus
+timeout. The early stop after repeated watchdog reboots parks the board
+over this bus, and the bring-up's first transfer (`PanelPower::power_up`)
+panics on failure. `device::i2c_bus::init` therefore frees the bus on
+every start, before `I2c::new`: GPIO14/15 as open-drain lines with
+pull-ups, then `clear_i2c_bus` (`theo-drivers`, host-tested), the bus
+clear of the I2C specification (UM10204, 3.1.16): up to nine SCL pulses
+until SDA is released, then a STOP, the lines read again after it (a
+slave sending a byte may put a 0 back on SDA) and SCL given up to 100 µs
+to rise (clock stretching). It takes a few µs on an idle bus and about
+120 µs at most. The 5 µs half period relies on the board's bus pull-ups;
+the pads' own (about 45 kΩ) are marginal at that rate. A line that stays
+low is logged and the bring-up goes on: nothing on the board can reset a
+device holding SCL (the TCA9554 that resets the touch controller is on the
+same bus), and esp-hal clears the bus in hardware after a timed-out
+transfer, which stays the fallback at run time.

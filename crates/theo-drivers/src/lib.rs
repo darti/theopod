@@ -33,12 +33,15 @@
 //! - [`OrientationDetector`], [`Rotation`], [`AxisMap`], [`Axis`],
 //!   [`PanelAcceleration`]: view rotation from gravity, and the matching
 //!   touch transform.
+//! - [`clear_i2c_bus`], [`BusClear`], [`BusClearError`], [`MAX_CLOCK_PULSES`]:
+//!   frees an I2C bus a slave keeps busy after a reset.
 //! - [`Tca9554`], [`ExpanderPin`]: TCA9554 async I2C I/O expander with per-pin access.
 //! - [`PanelPower`]: panel rail/reset power-up and power-down through the
 //!   expander.
 
 #![cfg_attr(not(test), no_std)]
 
+pub mod bus_clear;
 pub mod button;
 pub mod chip_select;
 pub mod co5300;
@@ -59,6 +62,8 @@ pub mod retry;
 pub mod stale_watch;
 pub mod tca9554;
 
+#[cfg(test)]
+mod bus_clear_tests;
 #[cfg(test)]
 mod button_tests;
 #[cfg(test)]
@@ -94,6 +99,7 @@ mod tca9554_tests;
 #[cfg(test)]
 mod test_support;
 
+pub use bus_clear::{BusClear, BusClearError, MAX_CLOCK_PULSES, clear_i2c_bus};
 pub use button::{ButtonEvent, DebouncedButton};
 pub use chip_select::ChipSelect;
 pub use co5300::{Co5300, Error as Co5300Error, PanelGeometry};

@@ -35,9 +35,9 @@ for the V2 pinout and hardware resources.
   transport, BOOT button and deep sleep, shared async I2C bus, touch
   controller, IMU and its measured axis map); `restart.rs` holds the main
   watchdog and its reboot cap, the start-cause log and the display reboot
-  count,
-  `expander.rs` the shared TCA9554 and the touch controller, `sleep.rs`
-  deep sleep.
+  count, `expander.rs` the shared TCA9554 and the touch controller,
+  `i2c_bus.rs` the shared I2C bus (freed at every start), `sleep.rs` deep
+  sleep.
 - `src/slint_backend.rs`: Slint platform and framebuffer rendering.
 - `crates/theo-drivers/`: HAL-independent drivers (CO5300, TCA9554, CST820,
   QMI8658, panel power-up/down, button and long press, `Panel`,

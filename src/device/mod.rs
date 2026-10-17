@@ -30,6 +30,7 @@
 
 mod esp_qspi;
 mod expander;
+mod i2c_bus;
 mod psram_tx_buf;
 mod restart;
 mod sleep;
@@ -39,14 +40,11 @@ use core::fmt;
 use esp_backtrace as _;
 
 use allocator_api2::{boxed::Box, vec};
-use embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice as SharedI2cDevice;
-use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, mutex::Mutex};
+use embassy_sync::mutex::Mutex;
 use embassy_time::{Delay, Instant};
 use esp_alloc::ExternalMemory;
 use esp_hal::{
-    Async,
     gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull},
-    i2c::master::{BusTimeout, Config as I2cConfig, I2c},
     peripherals::GPIO0,
     psram::{PsramConfig, PsramMode, SpiRamFreq},
     spi::{
@@ -64,6 +62,7 @@ pub use self::expander::{Expander, Touch};
     reason = "named in `Touch`'s signatures and the docs; callers (`input`) only infer them"
 )]
 pub use self::expander::{TouchError, TouchResetError};
+pub use self::i2c_bus::{I2cBus, I2cDevice};
 pub use self::restart::{
     WATCHDOG_TIMEOUT_MS, Watchdog, clear_display_resets, clear_watchdog_resets_if_healthy,
     display_resets, log_start_cause, reset_for_display,
@@ -90,14 +89,6 @@ const PSRAM_MODE: PsramMode = PsramMode::OctalSpi;
 /// aligned transfers (ADR-0004, t-27). `Board::init` pattern-tests the
 /// framebuffer region, as esp-hal does no timing tuning at 80 MHz.
 const PSRAM_FREQUENCY: SpiRamFreq = SpiRamFreq::Freq80m;
-
-/// I2C bus timeout: at least 10 ms of SCL unchanged at 100 kHz.
-///
-/// esp-hal rounds it up to a power of two of clock cycles (about 13 ms).
-/// A timed-out transfer fails and esp-hal clocks the bus free. The ESP32-S3
-/// default disables it: a device holding SCL low would hang every transfer
-/// on the bus (t-20).
-const I2C_BUS_TIMEOUT: BusTimeout = BusTimeout::BusCycles(1000);
 
 const TCA9554_ADDRESS: u8 = 0x20;
 /// EXIO0 is the panel reset, EXIO1 its power enable (Waveshare
@@ -163,18 +154,6 @@ pub type Button = DebouncedButton<Input<'static>, Delay>;
 ///
 /// Power it down with [`Qmi8658::power_down`] before deep sleep.
 pub type Imu = Qmi8658<I2cDevice>;
-
-/// I2C0 on GPIO15 (SDA) / GPIO14 (SCL), locked per transaction.
-///
-/// The TCA9554 expander (0x20), the touch controller and the IMU share it.
-pub type I2cBus = Mutex<CriticalSectionRawMutex, I2c<'static, Async>>;
-
-/// One device's handle on [`I2cBus`]; implements `embedded-hal-async` I2C.
-///
-/// `Board::init` creates one per driver from the static bus. The expander
-/// has a single handle, shared as [`Expander`]: its read-modify-writes are
-/// not atomic across handles (ADR-0005).
-pub type I2cDevice = SharedI2cDevice<'static, CriticalSectionRawMutex, I2c<'static, Async>>;
 
 /// Board peripherals initialized and ready to use.
 pub struct Board {
@@ -245,17 +224,9 @@ impl Board {
         let start = restart::count_watchdog_start();
         esp_rtos::start(timg0.timer0, peripherals.FROM_CPU_INTR0);
 
-        let i2c = I2c::new(
-            peripherals.I2C0,
-            I2cConfig::default().with_timeout(I2C_BUS_TIMEOUT),
-        )
-        .unwrap()
-        .with_sda(peripherals.GPIO15)
-        .with_scl(peripherals.GPIO14)
-        .into_async();
-        // In `.bss`: internal RAM, never PSRAM, and initialized only once.
-        static I2C_BUS: StaticCell<I2cBus> = StaticCell::new();
-        let i2c: &'static I2cBus = I2C_BUS.init(Mutex::new(i2c));
+        // I2C0: SCL on GPIO14, SDA on GPIO15 (Waveshare `pin_config.h`),
+        // freed first (t-84).
+        let i2c = i2c_bus::init(peripherals.I2C0, peripherals.GPIO14, peripherals.GPIO15);
         let mut expander = Tca9554::new(I2cDevice::new(i2c), TCA9554_ADDRESS);
         let deep_sleep = DeepSleep::new(peripherals.LPWR);
         // Before the panel bring-up, which a hang may be in.

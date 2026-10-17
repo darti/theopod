@@ -12,9 +12,9 @@ sibling crates; the firmware crate (`theo-pod`) depends on this one.
 - `framebuffer.rs`, `dirty_rows.rs`: `flush_rows` sends a band of rows of a
   full-panel framebuffer as one full-width, even-row-aligned area;
   `flush_bands` sends each band of a `DirtyRows` (few disjoint bands).
-- `retry.rs`, `stale_watch.rs`, `reboot_cap.rs`: `Transient` errors, the
-  `FlushRetry` and `reset_due` policies; `StaleWatch`, the reboot policy for
-  a broken panel; `RebootCap`, the cap on watchdog reboots in a row.
+- `retry.rs`, `stale_watch.rs`, `reboot_cap.rs`, `bus_clear.rs`: recovery:
+  `Transient` errors, `FlushRetry`, `reset_due`; `StaleWatch` (broken panel);
+  `RebootCap` (watchdog reboots); `clear_i2c_bus` (I2C bus after a reset).
 - `qspi.rs`: async `QspiBus` transport (8-bit opcode, 24-bit address,
   single or quad data, `MAX_TRANSFER_LEN`); `FrameBus` adds the
   framebuffer it sends in place (`write_frame`).

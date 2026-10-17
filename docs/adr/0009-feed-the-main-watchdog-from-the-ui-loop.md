@@ -3,7 +3,8 @@
 - Status: Accepted
 - Date: 2026-10-16
 - Amended: 2026-10-16, why the start cause is logged late (t-67)
-- Amended: 2026-10-17, watchdog reboots capped by a stop (t-66)
+- Amended: 2026-10-17, watchdog reboots capped by a stop (t-66), I2C bus
+  freed at every start (t-84)
 
 ## Context
 
@@ -77,7 +78,9 @@ holding.
   watchdog and sleeps until BOOT (`DeepSleep::enter`, the sleep path
   every stop shares). The count stays at the cap while it parks: if
   parking hangs, the next watchdog start sleeps without parking, and the
-  rails may then stay on through the sleep. The UI loop clears the count
+  rails may then stay on through the sleep. Every start frees the I2C bus
+  first (ADR-0005, t-84), so a device left mid-transfer by the reset does
+  not keep the bus from the parking. The UI loop clears the count
   once it has run 60 s, so a hang that comes back later than that is not
   capped. Checked on the board with `just watchdog-loop` (hangs at every
   start): three resets, then deep sleep. A stop with BOOT still held

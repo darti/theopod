@@ -33,6 +33,7 @@ mod expander;
 mod i2c_bus;
 mod psram_tx_buf;
 mod restart;
+mod sd;
 mod sleep;
 
 use core::fmt;
@@ -66,6 +67,10 @@ pub use self::i2c_bus::{I2cBus, I2cDevice};
 pub use self::restart::{
     WATCHDOG_TIMEOUT_MS, Watchdog, clear_display_resets, clear_watchdog_resets_if_healthy,
     display_resets, log_start_cause, reset_for_display,
+};
+pub use self::sd::{
+    SdStatus, SdStorage, init_error_message as sd_init_error_message,
+    status_message as sd_status_message,
 };
 pub use self::sleep::DeepSleep;
 use self::{esp_qspi::EspQspi, psram_tx_buf::PsramTxBuf};
@@ -101,6 +106,8 @@ const PANEL_POWER: PanelPower = PanelPower {
 };
 /// Touch controller reset, active low (Waveshare `TOUCH_RST`).
 const TOUCH_RESET: ExpanderPin = ExpanderPin::P2;
+/// microSD card-select on the TCA9554 (Waveshare `SDCS`), active low.
+const SD_CARD_SELECT: ExpanderPin = ExpanderPin::P7;
 /// CST820 I2C address (Waveshare `board_variant.c`, probed as CST816).
 const TOUCH_ADDRESS: u8 = 0x15;
 /// QMI8658 I2C addresses, in probe order: Waveshare's Arduino examples use
@@ -155,6 +162,14 @@ pub type Button = DebouncedButton<Input<'static>, Delay>;
 /// Power it down with [`Qmi8658::power_down`] before deep sleep.
 pub type Imu = Qmi8658<I2cDevice>;
 
+// The V2 microSD socket is driven over SPI3:
+// GPIO2=SCK, GPIO1=MOSI and GPIO3=MISO. TCA9554 EXIO7 is the card-select
+// signal (`SD_CS`). See the official
+// schematic and `09_sdmmc` example. The peripheral and FAT mount are brought
+// up opportunistically during `Board::init`; failures leave the UI running.
+// https://files.waveshare.com/wiki/ESP32-S3-Touch-AMOLED-1.8/ESP32-S3-Touch-AMOLED-1.8.pdf
+// https://github.com/waveshareteam/ESP32-S3-Touch-AMOLED-1.8/tree/main/examples/esp-idf/09_sdmmc
+
 /// Board peripherals initialized and ready to use.
 pub struct Board {
     /// Initialized and powered AMOLED panel.
@@ -168,6 +183,10 @@ pub struct Board {
     pub touch: Touch,
     /// Accelerometer, started; `None` if no QMI8658 answered (logged).
     pub imu: Option<Imu>,
+    /// Mounted FAT volume, or `None` when initialization/mount failed.
+    pub sd: Option<SdStorage>,
+    /// Result of the SDMMC and FAT bring-up.
+    pub sd_status: SdStatus,
     /// Armed main watchdog: the UI loop must feed it.
     pub watchdog: Watchdog,
 }
@@ -206,6 +225,7 @@ impl Board {
     pub async fn init() -> Self {
         esp_alloc::heap_allocator!(size: HEAP_SIZE);
         esp_println::logger::init_logger_from_env();
+        log::info!("firmware init");
         let peripherals = esp_hal::init(esp_hal::Config::default());
         // Registered after the internal heap, so general allocations only
         // spill into PSRAM once internal RAM is full.
@@ -228,6 +248,12 @@ impl Board {
         // freed first (t-84).
         let i2c = i2c_bus::init(peripherals.I2C0, peripherals.GPIO14, peripherals.GPIO15);
         let mut expander = Tca9554::new(I2cDevice::new(i2c), TCA9554_ADDRESS);
+        let sd_powered = expander
+            .configure_output(SD_CARD_SELECT, sd::CARD_SELECT_LEVEL)
+            .await;
+        if let Err(error) = sd_powered {
+            log::error!("microSD card-select setup failed: {error:?}");
+        }
         let deep_sleep = DeepSleep::new(peripherals.LPWR);
         // Before the panel bring-up, which a hang may be in.
         let park = match start {
@@ -262,8 +288,42 @@ impl Board {
             log::error!("touch controller init failed: {error}");
         }
         static EXPANDER: StaticCell<Expander> = StaticCell::new();
-        let touch = Touch::new(controller, EXPANDER.init(Mutex::new(expander)));
+        let expander = EXPANDER.init(Mutex::new(expander));
+        let touch = Touch::new(controller, expander);
         let imu = start_imu(i2c).await;
+        let (mut sd, sd_status) = match sd::init(
+            peripherals.SPI3,
+            peripherals.GPIO2,
+            peripherals.GPIO1,
+            peripherals.GPIO3,
+            expander,
+        )
+        .await
+        {
+            Ok(device) => match sd::mount(device).await {
+                Ok(volume) => {
+                    log::info!("microSD FAT volume mounted");
+                    (Some(volume), SdStatus::Mounted)
+                }
+                Err(error) => {
+                    log::warn!("microSD FAT mount failed ({error:?}); continuing without storage");
+                    (None, SdStatus::MountFailed)
+                }
+            },
+            Err(error) => {
+                log::info!("microSD unavailable; continuing without storage");
+                (None, SdStatus::InitFailed(error))
+            }
+        };
+        let mut persistent_log = crate::storage::LogBuffer::<1024>::new();
+        persistent_log.push_fmt(format_args!("boot"));
+        if let Some(volume) = sd.as_mut() {
+            if sd::append_log(volume, &mut persistent_log).await.is_err() {
+                log::warn!("microSD log flush failed; continuing without persistence");
+            } else if sd::verify_boot_log(volume).await.is_err() {
+                log::warn!("microSD boot log read-back failed");
+            }
+        }
 
         let pixels = usize::from(DISPLAY_GEOMETRY.width) * usize::from(DISPLAY_GEOMETRY.height);
         // Burst-aligned, so the display DMA reads it in whole bursts
@@ -353,6 +413,8 @@ impl Board {
             deep_sleep,
             touch,
             imu,
+            sd,
+            sd_status,
             watchdog,
         }
     }

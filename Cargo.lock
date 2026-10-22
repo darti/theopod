@@ -2213,6 +2213,84 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b40ca9252762c466af32d0b1002e91e4e1bc5398f77455e55474deb466355ff5"
 
 [[package]]
+name = "hadris-common"
+version = "3.0.0-rc.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e0281820a632d18793a2b2512afdf3095f928f1188516cecc37d2990d46536bf"
+dependencies = [
+ "bytemuck",
+]
+
+[[package]]
+name = "hadris-fat"
+version = "3.0.0-rc.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "52a23579704c3d4a3f6b99adc4d5cf299c093efbb25dcadb92456e45929a226c"
+dependencies = [
+ "bytemuck",
+ "hadris-common",
+ "hadris-fat-raw",
+ "hadris-fs",
+ "hadris-io",
+ "hadris-macros",
+ "hadris-storage",
+]
+
+[[package]]
+name = "hadris-fat-raw"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5a32ff44d2d25ae0b547c0f798a131f360839dcd8bba50225c492159ed9842c8"
+dependencies = [
+ "bytemuck",
+ "hadris-common",
+ "hadris-fs",
+ "hadris-macros",
+ "hadris-storage",
+]
+
+[[package]]
+name = "hadris-fs"
+version = "3.0.0-rc.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f3935f410dbfad4b4cd4ec8ffa7d8e4a2b3ac4f4388b2e166b75bbd1d70ac707"
+dependencies = [
+ "bitflags 2.13.2",
+ "hadris-io",
+ "hadris-macros",
+ "hadris-storage",
+]
+
+[[package]]
+name = "hadris-io"
+version = "3.0.0-rc.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3ceb2444e786cdeb0fc732d9b405831050609a13e32aafa6f5fa9721b91e64ed"
+dependencies = [
+ "bytemuck",
+ "hadris-macros",
+]
+
+[[package]]
+name = "hadris-macros"
+version = "3.0.0-rc.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "17564167ddba078018254501b890302e721d1cb7a1b9c6059f505231e61d44ee"
+dependencies = [
+ "proc-macro2",
+]
+
+[[package]]
+name = "hadris-storage"
+version = "3.0.0-rc.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8492c17b5fbc57fd2697d1b4d4ab430779ef0c9ffc1a9b43c0b2bed305be3984"
+dependencies = [
+ "hadris-io",
+ "hadris-macros",
+]
+
+[[package]]
 name = "half"
 version = "2.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5192,7 +5270,9 @@ dependencies = [
 name = "theo-pod"
 version = "0.1.0"
 dependencies = [
+ "aligned",
  "allocator-api2 0.3.1",
+ "block-device-driver",
  "bytemuck",
  "critical-section",
  "embassy-embedded-hal",
@@ -5208,7 +5288,12 @@ dependencies = [
  "esp-hal",
  "esp-println",
  "esp-rtos",
+ "hadris-fat",
+ "hadris-fs",
+ "hadris-io",
+ "hadris-storage",
  "log",
+ "sdio",
  "slint",
  "slint-build",
  "static_cell",

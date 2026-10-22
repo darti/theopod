@@ -31,6 +31,7 @@ extern crate alloc;
 mod device;
 mod input;
 mod slint_backend;
+mod storage;
 
 use alloc::boxed::Box;
 
@@ -104,6 +105,8 @@ async fn main(spawner: Spawner) {
         deep_sleep,
         touch,
         imu,
+        sd: _sd,
+        sd_status,
         mut watchdog,
     } = Board::init().await;
     input::spawn(spawner, button, deep_sleep, touch, imu);
@@ -129,6 +132,7 @@ async fn main(spawner: Spawner) {
     let mut resend_at: Option<Instant> = None;
     let mut first_frame_sent = false;
     let mut start_cause_logged = false;
+    let mut sd_status_logged = false;
     let mut display_watch = DisplayWatch::new();
     let mut rotation = INITIAL_ROTATION;
     // Set when `rotation` changed and the next frame must redraw everything.
@@ -228,6 +232,16 @@ async fn main(spawner: Spawner) {
         if !start_cause_logged && frame_start.as_millis() >= START_CAUSE_LOG_AFTER.as_millis() {
             start_cause_logged = true;
             device::log_start_cause();
+        }
+        if !sd_status_logged && frame_start.as_millis() >= START_CAUSE_LOG_AFTER.as_millis() {
+            sd_status_logged = true;
+            log::info!("microSD storage: {}", device::sd_status_message(sd_status));
+            if let device::SdStatus::InitFailed(error) = sd_status {
+                log::error!(
+                    "microSD initialization error: {}",
+                    device::sd_init_error_message(error)
+                );
+            }
         }
         // The loop got this far for a while: past watchdog reboots were
         // not a hang that comes back at every boot (t-66).

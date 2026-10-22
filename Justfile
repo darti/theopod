@@ -29,27 +29,31 @@ lint:
     RUSTUP_TOOLCHAIN=stable cargo clippy -p theo-drivers -p theo-frame-dump -p frame-png --target {{host_target}} --all-targets -- -D warnings
 
 build:
-    LIBCLANG_PATH="{{libclang_path}}" PATH="{{gcc_path}}:${PATH}" RUSTUP_TOOLCHAIN=esp cargo build --release
+    ESP_LOG=info LIBCLANG_PATH="{{libclang_path}}" PATH="{{gcc_path}}:${PATH}" RUSTUP_TOOLCHAIN=esp cargo build --release
 
 flash port="":
-    LIBCLANG_PATH="{{libclang_path}}" PATH="{{gcc_path}}:${PATH}" RUSTUP_TOOLCHAIN=esp cargo espflash flash --release --chip {{chip}} {{ if port != "" { "--port " + port } else { "" } }}
+    ESP_LOG=info LIBCLANG_PATH="{{libclang_path}}" PATH="{{gcc_path}}:${PATH}" RUSTUP_TOOLCHAIN=esp cargo espflash flash --release --chip {{chip}} {{ if port != "" { "--port " + port } else { "" } }}
 
 monitor port="":
-    LIBCLANG_PATH="{{libclang_path}}" PATH="{{gcc_path}}:${PATH}" RUSTUP_TOOLCHAIN=esp cargo espflash monitor --chip {{chip}} {{ if port != "" { "--port " + port } else { "" } }}
+    ESP_LOG=info LIBCLANG_PATH="{{libclang_path}}" PATH="{{gcc_path}}:${PATH}" RUSTUP_TOOLCHAIN=esp cargo espflash monitor --chip {{chip}} {{ if port != "" { "--port " + port } else { "" } }}
 
 run port="":
-    LIBCLANG_PATH="{{libclang_path}}" PATH="{{gcc_path}}:${PATH}" RUSTUP_TOOLCHAIN=esp cargo espflash flash --release --monitor --chip {{chip}} {{ if port != "" { "--port " + port } else { "" } }}
+    ESP_LOG=info LIBCLANG_PATH="{{libclang_path}}" PATH="{{gcc_path}}:${PATH}" RUSTUP_TOOLCHAIN=esp cargo espflash flash --release --monitor --chip {{chip}} {{ if port != "" { "--port " + port } else { "" } }}
 
 # Like `run`, but flash, hard-reset, then monitor as separate espflash calls.
 flash-monitor port="":
-    LIBCLANG_PATH="{{libclang_path}}" PATH="{{gcc_path}}:${PATH}" RUSTUP_TOOLCHAIN=esp cargo espflash flash --release --chip {{chip}} {{ if port != "" { "--port " + port } else { "" } }}
-    LIBCLANG_PATH="{{libclang_path}}" PATH="{{gcc_path}}:${PATH}" RUSTUP_TOOLCHAIN=esp cargo espflash reset --chip {{chip}} {{ if port != "" { "--port " + port } else { "" } }}
-    LIBCLANG_PATH="{{libclang_path}}" PATH="{{gcc_path}}:${PATH}" RUSTUP_TOOLCHAIN=esp cargo espflash monitor --chip {{chip}} {{ if port != "" { "--port " + port } else { "" } }}
+    ESP_LOG=info LIBCLANG_PATH="{{libclang_path}}" PATH="{{gcc_path}}:${PATH}" RUSTUP_TOOLCHAIN=esp cargo espflash flash --release --chip {{chip}} {{ if port != "" { "--port " + port } else { "" } }}
+    ESP_LOG=info LIBCLANG_PATH="{{libclang_path}}" PATH="{{gcc_path}}:${PATH}" RUSTUP_TOOLCHAIN=esp cargo espflash reset --chip {{chip}} {{ if port != "" { "--port " + port } else { "" } }}
+    ESP_LOG=info LIBCLANG_PATH="{{libclang_path}}" PATH="{{gcc_path}}:${PATH}" RUSTUP_TOOLCHAIN=esp cargo espflash monitor --chip {{chip}} {{ if port != "" { "--port " + port } else { "" } }}
 
 # Flash a build that dumps the framebuffer, recording the log from boot
 # (Ctrl-C once `theo-frame-end` is printed).
 flash-dump log="target/frame.log" port="":
-    LIBCLANG_PATH="{{libclang_path}}" PATH="{{gcc_path}}:${PATH}" RUSTUP_TOOLCHAIN=esp cargo espflash flash --release --features frame-dump --monitor --non-interactive --chip {{chip}} {{ if port != "" { "--port " + port } else { "" } }} | tee {{log}}
+    ESP_LOG=info LIBCLANG_PATH="{{libclang_path}}" PATH="{{gcc_path}}:${PATH}" RUSTUP_TOOLCHAIN=esp cargo espflash flash --release --features frame-dump --monitor --non-interactive --chip {{chip}} {{ if port != "" { "--port " + port } else { "" } }} | tee {{log}}
+
+# Flash normal firmware and capture serial logs from boot without a TTY.
+flash-log log="target/serial.log" port="":
+    ESP_LOG=info LIBCLANG_PATH="{{libclang_path}}" PATH="{{gcc_path}}:${PATH}" RUSTUP_TOOLCHAIN=esp cargo espflash flash --release --monitor --non-interactive --chip {{chip}} {{ if port != "" { "--port " + port } else { "" } }} | tee {{log}}
 
 # Flash a build that keeps the view upright and logs the raw accelerometer
 # axes once a second, to measure `IMU_AXES` in `src/device/mod.rs`.

@@ -149,12 +149,21 @@ pub(super) fn hang_until_watchdog() {
     }
 }
 
-/// Reboots for a broken display in a row, kept across core resets.
+/// A reboot count kept across digital-core resets in RTC fast RAM.
 ///
-/// In RTC fast RAM, which a digital-core reset (software or MWDT0) keeps. Its contents are
-/// arbitrary after an early reset (esp-hal `persistent`) or a deep sleep,
-/// which powers that RAM down (`DeepSleep`); the complement
-/// ([`encode_resets`]) makes those read as zero, so a stop clears the count.
+/// A reset during its volatile write is detected through the complement.
+struct RtcCount;
+
+impl RtcCount {
+    fn read(storage: *const [u32; 2]) -> u32 {
+        decode_resets(unsafe { storage.read_volatile() })
+    }
+
+    fn write(storage: *mut [u32; 2], count: u32) {
+        unsafe { storage.write_volatile(encode_resets(count)) };
+    }
+}
+
 #[esp_hal::ram(unstable(rtc_fast, persistent))]
 static mut DISPLAY_RESETS: [u32; 2] = [0; 2];
 
@@ -167,13 +176,13 @@ pub fn display_resets() -> u32 {
     // SAFETY: a volatile read through a raw pointer (no reference to the
     // `static mut`); only the UI task touches it, and every bit pattern is
     // a valid `[u32; 2]`.
-    decode_resets(unsafe { (&raw const DISPLAY_RESETS).read_volatile() })
+    RtcCount::read(&raw const DISPLAY_RESETS)
 }
 
 fn set_display_resets(count: u32) {
     // SAFETY: as in `display_resets`; a reset during the write leaves a
     // pair that fails the check and reads as zero.
-    unsafe { (&raw mut DISPLAY_RESETS).write_volatile(encode_resets(count)) };
+    RtcCount::write(&raw mut DISPLAY_RESETS, count);
 }
 
 /// Forgets past display reboots, once the display has stayed healthy.
@@ -199,13 +208,13 @@ fn watchdog_resets() -> u32 {
     // SAFETY: a volatile read through a raw pointer (no reference to the
     // `static mut`); one user at a time, and every bit pattern is a valid
     // `[u32; 2]`.
-    decode_resets(unsafe { (&raw const WATCHDOG_RESETS).read_volatile() })
+    RtcCount::read(&raw const WATCHDOG_RESETS)
 }
 
 fn set_watchdog_resets(count: u32) {
     // SAFETY: as in `watchdog_resets`; a reset during the write leaves a
     // pair that fails the check and reads as zero.
-    unsafe { (&raw mut WATCHDOG_RESETS).write_volatile(encode_resets(count)) };
+    RtcCount::write(&raw mut WATCHDOG_RESETS, count);
 }
 
 /// Forgets past watchdog reboots, just before the stop's deep sleep.

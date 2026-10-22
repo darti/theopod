@@ -420,10 +420,7 @@ async fn stop_after_watchdog_resets(
             log::error!("IMU power-down failed before the stop");
         }
         // No `Cst820` yet: what its `hold_in_reset` does.
-        if let Err(error) = expander.configure_output(TOUCH_RESET, PinState::Low).await {
-            log::error!("touch reset failed before the stop: {error:?}");
-        }
-        if let Err(error) = PANEL_POWER.power_down(expander).await {
+        if let Err(error) = expander::park_touch_and_panel(expander).await {
             log::error!("panel power-down failed before the stop: {error:?}");
         }
     }

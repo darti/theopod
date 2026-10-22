@@ -2,8 +2,6 @@
 //!
 //! - [`StaleWatch`], [`WatchAction`]: watches how long the panel stays
 //!   stale and healthy, with the reboots already made in a row.
-//! - [`encode_resets`], [`decode_resets`]: the reboot count as stored in RAM
-//!   that a reset keeps, with its complement.
 //!
 //! A display no flush can repair (a lost SPI master, a permanent error) is
 //! recovered by a reboot, as at boot. After a few reboots in a row the
@@ -78,17 +76,4 @@ impl StaleWatch {
             WatchAction::GiveUp
         }
     }
-}
-
-/// The reboot count with its complement, as stored across resets.
-#[must_use]
-pub const fn encode_resets(count: u32) -> [u32; 2] {
-    [count, !count]
-}
-
-/// Reads a stored reboot count; contents that fail the complement check
-/// (RAM never written, or a reset mid-write) read as zero.
-#[must_use]
-pub const fn decode_resets([count, check]: [u32; 2]) -> u32 {
-    if check == !count { count } else { 0 }
 }

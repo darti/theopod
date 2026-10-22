@@ -43,6 +43,20 @@ pub type TouchError = Cst820Error<I2cDeviceError<I2cError>, Infallible>;
 /// Failure of [`Touch::reset`].
 pub type TouchResetError = Cst820InitError<I2cDeviceError<I2cError>, I2cDeviceError<I2cError>>;
 
+/// Holds the touch controller in reset, then cuts the panel rails.
+///
+/// The order is safety-critical: the unpowered controller must not be left
+/// connected to the shared I2C bus. Both operations are attempted.
+pub async fn park_touch_and_panel(
+    expander: &mut Tca9554<I2cDevice>,
+) -> Result<(), I2cDeviceError<I2cError>> {
+    let held = expander
+        .configure_output(TOUCH_RESET, embedded_hal::digital::PinState::Low)
+        .await;
+    let cut = PANEL_POWER.power_down(expander).await;
+    held.and(cut)
+}
+
 impl Touch {
     /// Pairs the controller with the shared expander that resets it.
     pub(super) fn new(
@@ -91,12 +105,7 @@ impl Touch {
     pub async fn park(&mut self) -> Result<(), I2cDeviceError<I2cError>> {
         // Held across both steps, like a reset: no expander change slips in.
         let mut expander = self.expander.lock().await;
-        let held = self
-            .controller
-            .hold_in_reset(&mut expander, TOUCH_RESET)
-            .await;
-        let cut = PANEL_POWER.power_down(&mut expander).await;
-        held.and(cut)
+        park_touch_and_panel(&mut expander).await
     }
 }
 

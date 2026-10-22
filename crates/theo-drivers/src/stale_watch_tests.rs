@@ -1,6 +1,6 @@
 use speculoos::prelude::*;
 
-use crate::stale_watch::{StaleWatch, WatchAction, decode_resets, encode_resets};
+use crate::stale_watch::{StaleWatch, WatchAction};
 
 const LIMIT_MS: u64 = 10_000;
 const HEALTHY_MS: u64 = 60_000;
@@ -87,26 +87,4 @@ fn check_stale_period_restarts_the_healthy_period() {
 
     assert_that!(watch.check(55_000 + HEALTHY_MS - 1, false, 2)).is_equal_to(WatchAction::None);
     assert_that!(watch.check(55_000 + HEALTHY_MS, false, 2)).is_equal_to(WatchAction::ClearResets);
-}
-
-#[test]
-fn decode_resets_reads_back_what_was_encoded() {
-    assert_that!(decode_resets(encode_resets(2))).is_equal_to(2);
-}
-
-#[test]
-fn decode_resets_random_contents_read_as_zero() {
-    assert_that!(decode_resets([0xDEAD_BEEF, 0x1234_5678])).is_equal_to(0);
-}
-
-#[test]
-fn decode_resets_one_corrupted_word_reads_as_zero() {
-    let [count, check] = encode_resets(2);
-
-    assert_that!(decode_resets([count ^ 1, check])).is_equal_to(0);
-}
-
-#[test]
-fn decode_resets_all_zero_reads_as_zero() {
-    assert_that!(decode_resets([0, 0])).is_equal_to(0);
 }

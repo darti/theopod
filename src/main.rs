@@ -31,7 +31,6 @@ extern crate alloc;
 mod device;
 mod input;
 mod slint_backend;
-mod storage;
 
 use alloc::boxed::Box;
 
@@ -105,10 +104,11 @@ async fn main(spawner: Spawner) {
         deep_sleep,
         touch,
         imu,
-        sd: _sd,
+        sd,
         sd_status,
         mut watchdog,
     } = Board::init().await;
+    device::spawn_storage(spawner, sd);
     input::spawn(spawner, button, deep_sleep, touch, imu);
     let size = display.size();
     let panel = PanelSize {

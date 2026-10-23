@@ -186,8 +186,24 @@ async fn watch_button(button: device::Button, deep_sleep: device::DeepSleep) {
     // `LongPressButton` requires.
     let now_ms: fn() -> u64 = || Instant::now().as_millis();
     let mut button = LongPressButton::new(button, LONG_PRESS_MS, Delay, now_ms);
+    #[cfg(feature = "sd-check")]
+    let automatic_stop_at = Instant::now() + Duration::from_secs(5);
     loop {
-        match button.next().await {
+        #[cfg(feature = "sd-check")]
+        let next = if device::diagnostic_sleep_requested() {
+            match select(button.next(), Timer::at(automatic_stop_at)).await {
+                Either::First(next) => next,
+                Either::Second(()) => {
+                    log::info!("SD check: requesting automatic deep sleep");
+                    break;
+                }
+            }
+        } else {
+            button.next().await
+        };
+        #[cfg(not(feature = "sd-check"))]
+        let next = button.next().await;
+        match next {
             // Never waits on the UI loop (t-54 review): a stalled loop with a
             // full queue would otherwise keep the long press from being seen.
             Ok(LongPressEvent::Changed(event)) => {
@@ -198,11 +214,13 @@ async fn watch_button(button: device::Button, deep_sleep: device::DeepSleep) {
                     log::warn!("button {event:?} dropped: the UI loop is not keeping up");
                 }
             }
-            Ok(LongPressEvent::Held) => break,
+            Ok(LongPressEvent::Held) => {
+                log::info!("BOOT held for {LONG_PRESS_MS} ms, stopping");
+                break;
+            }
             Err(error) => log::error!("button read failed: {error:?}"),
         }
     }
-    log::info!("BOOT held for {LONG_PRESS_MS} ms, stopping");
     // Bounded (t-54): a stalled UI loop, which may not even drain the
     // queue, must not keep the pod awake. The touch park below cuts the
     // panel rails anyway, so a panel left awake still goes dark.

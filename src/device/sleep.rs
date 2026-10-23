@@ -48,6 +48,8 @@ impl DeepSleep {
                 Err(never) => match never {},
             }
         }
+        log::info!("entering deep sleep until wakeup (BOOT released)");
+        super::flush_before_sleep().await;
         let (pin, _) = button.release();
         self.enter(pin)
     }
@@ -69,6 +71,12 @@ impl DeepSleep {
             esp_hal::system::software_reset();
         }
         log::info!("entering deep sleep until BOOT is pressed");
+        #[cfg(feature = "sd-check")]
+        if option_env!("THEO_SD_FAULT") == Some("sleep") {
+            self.low_power.set_wakeup_deadline(
+                esp_hal::time::Instant::now() + esp_hal::time::Duration::from_secs(2),
+            );
+        }
         #[cfg(feature = "sleep-check")]
         check::count_sleep();
         // The wake level is the listen trigger. Interrupts stay off from
@@ -79,6 +87,11 @@ impl DeepSleep {
             self.low_power.sleep_deep(RtcSleepConfig::deep())
         })
     }
+}
+
+#[cfg(feature = "sd-check")]
+pub fn diagnostic_sleep_requested() -> bool {
+    option_env!("THEO_SD_FAULT") == Some("sleep") && check::sleep_count() < 3
 }
 
 impl fmt::Debug for DeepSleep {
@@ -110,6 +123,11 @@ pub(super) mod check {
     /// The sleep count in a STORE0 value, or `None` if it holds none.
     fn decode(store: u32) -> Option<u32> {
         (store & !COUNT_MASK == MAGIC).then_some(store & COUNT_MASK)
+    }
+
+    #[cfg(feature = "sd-check")]
+    pub(super) fn sleep_count() -> u32 {
+        decode(LPWR::regs().store0().read().data().bits()).unwrap_or(0)
     }
 
     /// Counts the sleep about to start; call it just before entering it.

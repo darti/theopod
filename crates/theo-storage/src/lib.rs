@@ -1,8 +1,9 @@
 //! Bounded, recoverable persistent-log buffering.
 
+#![no_std]
+
 use core::fmt;
 
-#[cfg(test)]
 pub trait LogSink {
     type Error;
 
@@ -38,32 +39,34 @@ impl<const CAP: usize> LogBuffer<CAP> {
     }
 
     pub fn push_fmt(&mut self, args: fmt::Arguments<'_>) -> bool {
-        let start = self.len;
-        let mut writer = RecordWriter { buffer: self };
+        let mut record = Self::new();
+        let mut writer = RecordWriter {
+            buffer: &mut record,
+        };
         let result = fmt::write(&mut writer, args);
-        if result.is_err() {
-            self.len = start;
+        if result.is_err() || !writer.finish() {
             self.dropped += 1;
             return false;
         }
-        writer.finish()
+        self.push(record.pending())
     }
 
-    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.len
     }
 
-    #[cfg(test)]
     pub fn dropped(&self) -> usize {
         self.dropped
+    }
+
+    pub fn record_dropped(&mut self) {
+        self.dropped = self.dropped.saturating_add(1);
     }
 
     pub fn is_empty(&self) -> bool {
         self.len == 0
     }
 
-    #[cfg(test)]
     pub fn flush<S: LogSink>(&mut self, sink: &mut S, max_bytes: usize) -> Result<usize, S::Error> {
         let offered = self.len.min(max_bytes);
         if offered == 0 {
@@ -122,7 +125,12 @@ impl<const CAP: usize> fmt::Write for RecordWriter<'_, CAP> {
 impl<const CAP: usize> RecordWriter<'_, CAP> {
     fn finish(self) -> bool {
         if self.buffer.len == 0 || self.buffer.bytes[self.buffer.len - 1] != b'\n' {
-            self.buffer.push(b"\n")
+            if self.buffer.len == CAP {
+                return false;
+            }
+            self.buffer.bytes[self.buffer.len] = b'\n';
+            self.buffer.len += 1;
+            true
         } else {
             true
         }
@@ -131,3 +139,56 @@ impl<const CAP: usize> RecordWriter<'_, CAP> {
 
 #[cfg(test)]
 mod storage_tests;
+
+/// Match ESP_LOG's global and longest module-prefix filters. Levels use
+/// log's ordering: error=1 through trace=5; zero disables a target.
+pub fn log_enabled(filter: &str, target: &str, level: u8) -> bool {
+    let mut limit = 0;
+    let mut specificity = 0;
+    for directive in filter.split(',') {
+        let directive = directive.trim();
+        let (module, value) = directive.split_once('=').unwrap_or(("", directive));
+        let module = module.trim();
+        if !(module.is_empty()
+            || target == module
+            || target
+                .strip_prefix(module)
+                .is_some_and(|rest| rest.starts_with("::")))
+        {
+            continue;
+        }
+        let value = match value.trim() {
+            "off" => 0,
+            "error" => 1,
+            "warn" => 2,
+            "info" => 3,
+            "debug" => 4,
+            "trace" => 5,
+            _ => continue,
+        };
+        if module.len() >= specificity {
+            specificity = module.len();
+            limit = value;
+        }
+    }
+    level <= limit
+}
+
+pub const LOG_FILE_LIMIT: u64 = 128 * 1024;
+
+pub fn rotation_needed(current: u64, incoming: usize) -> bool {
+    current > 0 && current.saturating_add(incoming as u64) > LOG_FILE_LIMIT
+}
+
+/// Validate a sector-aligned request while allowing short (one-sector)
+/// progress through a larger read/write buffer.
+pub fn sector_index(position: u64, blocks: u64, len: usize) -> Option<u32> {
+    if !position.is_multiple_of(512) || len == 0 || !len.is_multiple_of(512) {
+        return None;
+    }
+    let block = position / 512;
+    if block.checked_add((len / 512) as u64)? > blocks {
+        return None;
+    }
+    u32::try_from(block).ok()
+}

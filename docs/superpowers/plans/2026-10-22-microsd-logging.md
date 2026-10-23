@@ -1,5 +1,9 @@
 # t-94 microSD logging Implementation Plan
 
+Historical plan: the implementation uses SPI3 rather than SDMMC. Final
+behavior and validation are recorded in ADR-0010 and `docs/sd-validation.md`;
+task status is tracked in Oku t-94 through t-97.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
 **Goal:** Bring up the V2 microSD slot over SDMMC and provide bounded, recoverable FAT-backed persistent logging.

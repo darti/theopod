@@ -52,7 +52,11 @@ the ESP toolchain and target are defined in `rust-toolchain.toml`.
 - `.cargo/config.toml` forces the xtensa target: host builds need
   `RUSTUP_TOOLCHAIN=stable cargo <cmd> --target $(rustc +stable -vV | sed -n 's/^host: //p')`.
 - Firmware `log` output is silent unless `ESP_LOG` (e.g. `info`) is set at
-  build time (`init_logger_from_env`).
+  build time. `src/device/logging.rs` installs the dual serial/SD logger
+  before HAL startup; normal build/flash recipes default to `info`.
+- SD logging uses a bounded queue and a separate async task. Never block on
+  the shared I2C expander to select the card: touch/IMU also use that bus.
+  A cancelled or failed storage operation disables that mount until reboot.
 - `IMU_AXES` is measured, not documented: `just imu-calibrate` keeps the
   view upright and logs raw accelerometer axes once a second. Calibrate from
   positions defined against gravity (vertical with text upright, a quarter
@@ -88,7 +92,7 @@ the ESP toolchain and target are defined in `rust-toolchain.toml`.
 
 - Run `just fmt` to format the code.
 - Run `just check` to verify compilation with the ESP toolchain.
-- Run `just test` to run the host unit tests (drivers, frame dump, frame-png).
+- Run `just test` to run the host unit tests (drivers, storage, frame dump, frame-png).
 - Run `just lint` to run clippy on the firmware and the host crates.
 - Run `just miri` after changing `unsafe` code in `crates/theo-drivers`
   (slow, about 5 minutes), and `just audit` after changing dependencies.

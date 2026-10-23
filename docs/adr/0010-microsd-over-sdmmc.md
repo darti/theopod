@@ -32,6 +32,22 @@ the existing board wiring documentation already names that signal `SD_CS`.
   recoverable runtime conditions; the display and UI must still boot.
 - Keep persistent logging buffered and bounded so SD I/O cannot exceed the
   main watchdog budget (ADR-0009).
+- Install a dual serial/SD `log::Log` before HAL startup. Preserve ESP_LOG
+  global/module filtering, buffer at most 4 KiB, and format records into at
+  most 1 KiB. Overflow drops/counts oldest lines or oversized records.
+- A dedicated Embassy task owns the mount and writes once a second, closing
+  and syncing each batch; no filesystem calls run in the UI loop. Before a
+  controlled deep sleep, request/acknowledge a final flush within 1.2 s.
+- Rotate `/theo.log` at 128 KiB to `/theo.1.log`, retaining one archive.
+- Bound identification/mount at 3 s/2 s and write batches at 500 ms. A failed
+  or cancelled mount is never reused until reboot; buffered unwritten bytes
+  stay in RAM and serial output remains available. Abrupt resets can lose
+  the current unflushed batch. Reinsertion requires reboot.
+- Await EXIO7 changes on the shared async I2C bus; never bridge them with
+  `block_on`, which would deadlock a concurrent touch/IMU transaction.
+- The stream transfers ownership of its HAL device into each pending future
+  and takes it back only on completion. Cancellation drops it, avoiding raw
+  pointer aliasing, a forged Send implementation, and leaked sector buffers.
 
 ## Evidence
 
@@ -52,12 +68,16 @@ the existing board wiring documentation already names that signal `SD_CS`.
   and appending and reading back `theo.log`. Two successive normal-firmware
   boots report 10 then 15 bytes, confirming persistence across reset.
   Captures: `target/sd-normal.log` and `target/sd-reboot.log`.
-- Deep-sleep persistence and card-absence/removal behavior still need
-  hardware validation.
+- Runtime log capture, physical removal, boot without a card, three actual
+  deep-sleep/timer wakes and a watchdog reset have passed on the board.
+  Full/read-only/timeout handling is verified using block-write fault
+  injection, without filling or reprotecting the real card. The real
+  128 KiB rotation is checked using separate fixture files. See
+  `docs/sd-validation.md` for the complete matrix and capture paths.
 
 ## Consequences
 
 - SD support is board-specific at initialization while the log sink can
   remain reusable and HAL-independent.
-- Exact electrical behavior and sustained write performance still require
-  hardware validation on the V2 board.
+- Measured bring-up and logging behavior are validated on the V2 board;
+  sustained write throughput is not a target of this bounded log service.

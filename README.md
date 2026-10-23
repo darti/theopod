@@ -45,6 +45,8 @@ for the V2 pinout and hardware resources.
   unit-tested on the host. See its `ARCHITECTURE.md`.
 - `crates/theo-frame-dump/`: `no_std` text format for dumping the framebuffer
   over the serial log (firmware writer, host parser).
+- `crates/theo-storage/`: `no_std` bounded log buffering, filtering and
+  rotation policy, tested on the host by `just test`.
 - `tools/frame-png/`: host tool turning a dump in a serial log into a PNG.
 - `tools/passive-monitor.py`: serial log recorder (macOS, `python3`) that
   does not reset the chip and follows it across deep-sleep wakes
@@ -78,8 +80,35 @@ just flash-monitor                 # flash, reset, then start the monitor
 
 The firmware renders the Slint UI from `ui/main.slint` on the AMOLED display.
 It logs heap usage (internal RAM and PSRAM) at start-up and after the first
-frame; `log` output only appears when the firmware is built with `ESP_LOG`
-set (for example `ESP_LOG=info just run`).
+frame. Normal build/flash recipes set `ESP_LOG=info`; direct Cargo builds
+must set it explicitly. Module filters such as `info,theo_pod::input=debug`
+are supported by the dual serial/SD logger.
+
+## Persistent logs
+
+An inserted FAT32 microSD is mounted at boot over SPI3 on the V2 board.
+The logger captures events from startup and appends level, target and message
+to `/theo.log`. Every second a dedicated async task drains a 4 KiB queue;
+producers never await filesystem I/O. Records larger than 1 KiB and oldest
+queued lines on overflow are dropped and counted. Serial diagnostics remain
+available independently of the card.
+
+The active file rotates at 128 KiB into `/theo.1.log` (one previous file is
+retained). Each batch is closed and synced. A controlled stop requests a final
+flush before deep sleep; a sudden reset can lose the current in-memory batch.
+Startup identification/mount waits are bounded at 3 s/2 s, and each write
+batch at 500 ms. A card/write/sync error or timeout disables SD logging until
+the next boot, preserves the unwritten batch in RAM, and leaves the UI and
+serial logging running. Reinsertion takes effect after reboot.
+
+`just flash-log target/serial.log` captures normal firmware logs from boot.
+`just sd-check full`, `readonly`, `removed` or `timeout` builds a diagnostic
+firmware that injects the corresponding block-write failure without filling
+or reformatting the card. `just sd-check rotate` exercises the real rotation
+path using isolated `sdtest2.log`/`sdtest2.1` fixtures; it refuses existing fixture
+files and leaves the generated files for inspection. `just sd-sleep-check`
+performs three actual deep-sleep/timer-wake cycles with a passive monitor.
+Restore normal firmware with `just flash` after diagnostic tests.
 
 ## Seeing what the firmware renders
 

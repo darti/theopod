@@ -9,10 +9,8 @@ use core::{
     task::{Context, Poll},
 };
 
-use crate::storage::LogBuffer;
 use aligned::{A4, Aligned};
 use embassy_time::Delay;
-use embedded_hal::digital::OutputPin;
 use embedded_hal_async::{delay::DelayNs, spi::SpiBus as AsyncSpiBus};
 use esp_hal::{
     Async,
@@ -32,6 +30,7 @@ use sdio::{
     BlockReadCommand, BlockWriteCommand, BusWidth, ByteReadCommand, ByteWriteCommand,
     ControlCommand, MmcBus, MmcError, Response, ResponseLen,
 };
+use theo_storage::LogBuffer;
 
 const BLOCK_SIZE: usize = 512;
 const CARD_FREQUENCY_HZ: u32 = 25_000_000;
@@ -63,7 +62,7 @@ pub enum SdInitError {
 
 pub const fn init_error_message(error: SdInitError) -> &'static str {
     match error {
-        SdInitError::Host => "SDHOST configuration failed",
+        SdInitError::Host => "SD SPI host configuration failed",
         SdInitError::Card(error) => match error {
             sdio::MmcError::Timeout => "SD card timeout",
             sdio::MmcError::Crc => "SD card CRC error",
@@ -88,7 +87,7 @@ pub struct SdError;
 
 impl fmt::Display for SdError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("SDMMC operation failed")
+        f.write_str("SD SPI operation failed")
     }
 }
 
@@ -98,52 +97,27 @@ type SpiBus = SdMmcBus;
 type HalDevice = sdio::DefaultBlockDevice<sdio::sd::Card, SpiBus, Delay>;
 type Scratch = Aligned<A4, [u8; BLOCK_SIZE]>;
 type Transfer =
-    Pin<Box<dyn Future<Output = (Result<(), SdError>, &'static mut Scratch)> + 'static>>;
+    Pin<Box<dyn Future<Output = (Result<(), SdError>, HalDevice, Box<Scratch>)> + 'static>>;
 
 #[derive(Default)]
 pub struct SdState {
     transfer: Option<Transfer>,
 }
 
-#[derive(Debug, Clone, Copy)]
-struct CsError;
-
-impl embedded_hal::digital::Error for CsError {
-    fn kind(&self) -> embedded_hal::digital::ErrorKind {
-        embedded_hal::digital::ErrorKind::Other
-    }
-}
-
-/// The V2 routes SDCS to TCA9554 EXIO7 rather than an ESP GPIO. The SDIO
-/// crate's SPI bus uses the synchronous `OutputPin` trait, so bridge the
-/// already-async shared expander access with Embassy's small local executor.
+/// The V2 routes SDCS to TCA9554 EXIO7. Always await the shared I2C bus:
+/// blocking a nested executor here would deadlock concurrent touch/IMU I/O.
 struct ExpanderCs {
     expander: &'static super::Expander,
 }
 
-impl embedded_hal::digital::ErrorType for ExpanderCs {
-    type Error = CsError;
-}
-
-impl OutputPin for ExpanderCs {
-    fn set_low(&mut self) -> Result<(), Self::Error> {
-        embassy_futures::block_on(async {
-            let mut expander = self.expander.lock().await;
-            expander
-                .set_level(super::SD_CARD_SELECT, embedded_hal::digital::PinState::Low)
-                .await
-                .map_err(|_| CsError)
-        })
-    }
-
-    fn set_high(&mut self) -> Result<(), Self::Error> {
-        embassy_futures::block_on(async {
-            let mut expander = self.expander.lock().await;
-            expander
-                .set_level(super::SD_CARD_SELECT, embedded_hal::digital::PinState::High)
-                .await
-                .map_err(|_| CsError)
-        })
+impl ExpanderCs {
+    async fn set(&mut self, level: embedded_hal::digital::PinState) -> Result<(), MmcError> {
+        self.expander
+            .lock()
+            .await
+            .set_level(super::SD_CARD_SELECT, level)
+            .await
+            .map_err(|_| MmcError::Io)
     }
 }
 
@@ -208,11 +182,11 @@ impl SdMmcBus {
     }
 
     async fn select(&mut self) -> Result<(), MmcError> {
-        self.cs.set_low().map_err(|_| MmcError::Io)
+        self.cs.set(embedded_hal::digital::PinState::Low).await
     }
 
     async fn deselect(&mut self) -> Result<(), MmcError> {
-        self.cs.set_high().map_err(|_| MmcError::Io)?;
+        self.cs.set(embedded_hal::digital::PinState::High).await?;
         self.spi.write(&[0xFF]).await.map_err(|_| MmcError::Io)
     }
 
@@ -458,7 +432,7 @@ impl MmcBus for SdMmcBus {
 
     async fn init_idle(&mut self, hz: u32) -> Result<(), MmcError> {
         self.spi.set_hz(hz);
-        self.cs.set_high().map_err(|_| MmcError::Io)?;
+        self.cs.set(embedded_hal::digital::PinState::High).await?;
         self.spi
             .write(&[0xFF; 10])
             .await
@@ -479,14 +453,10 @@ impl MmcBus for SdMmcBus {
 
 /// A stream over a 512-byte SD card.
 pub struct SdStream {
-    device: *mut HalDevice,
+    device: Option<HalDevice>,
     blocks: u64,
     position: u64,
 }
-
-// The stream is only exposed through the single mutable board service. Its
-// transfer state serializes every use of the leaked HAL device.
-unsafe impl Send for SdStream {}
 
 impl ErrorType for SdStream {
     type Error = SdError;
@@ -528,11 +498,21 @@ impl Stream for SdStream {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<Result<usize, IoError<Self::Error>>> {
-        if !self.position.is_multiple_of(BLOCK_SIZE as u64) || buf.len() != BLOCK_SIZE {
+        #[cfg(feature = "sd-check")]
+        match option_env!("THEO_SD_FAULT") {
+            Some("readonly") => return Poll::Ready(Err(ErrorKind::ReadOnly.into())),
+            Some("full") => return Poll::Ready(Err(ErrorKind::NoSpace.into())),
+            Some("removed") => {
+                return Poll::Ready(Err(IoError::device(SdError, "injected card removal")));
+            }
+            Some("timeout") => return Poll::Pending,
+            _ => {}
+        }
+        if theo_storage::sector_index(self.position, self.blocks, buf.len()).is_none() {
             return Poll::Ready(Err(ErrorKind::InvalidInput.into()));
         }
         let mut copy = [0u8; BLOCK_SIZE];
-        copy.copy_from_slice(buf);
+        copy.copy_from_slice(&buf[..BLOCK_SIZE]);
         self.poll_transfer(state, cx, &mut copy, true)
     }
 
@@ -557,23 +537,24 @@ impl SdStream {
         buf: &mut [u8],
         write: bool,
     ) -> Poll<Result<usize, IoError<SdError>>> {
-        if !self.position.is_multiple_of(BLOCK_SIZE as u64)
-            || buf.len() != BLOCK_SIZE
-            || self.position / BLOCK_SIZE as u64 >= self.blocks
-        {
+        let Some(block) = theo_storage::sector_index(self.position, self.blocks, buf.len()) else {
             return Poll::Ready(Err(ErrorKind::InvalidInput.into()));
-        }
+        };
         if state.transfer.is_none() {
-            let scratch = Box::leak(Box::new(Aligned::<A4, [u8; BLOCK_SIZE]>([0; BLOCK_SIZE])));
+            let mut scratch = Box::new(Aligned::<A4, [u8; BLOCK_SIZE]>([0; BLOCK_SIZE]));
             if write {
-                scratch.copy_from_slice(buf);
+                scratch.copy_from_slice(&buf[..BLOCK_SIZE]);
             }
-            let device = unsafe { &mut *self.device };
-            let block = (self.position / BLOCK_SIZE as u64) as u32;
+            let Some(mut device) = self.device.take() else {
+                return Poll::Ready(Err(IoError::device(
+                    SdError,
+                    "SD transfer cancelled; reboot to retry",
+                )));
+            };
             let transfer: Transfer = if write {
                 Box::pin(async move {
                     let result = block_device_driver::BlockDevice::write(
-                        device,
+                        &mut device,
                         block,
                         core::slice::from_ref(&*scratch),
                     )
@@ -582,34 +563,35 @@ impl SdStream {
                         log::error!("microSD block write error: {error:?}");
                         SdError
                     });
-                    (result, scratch)
+                    (result, device, scratch)
                 })
             } else {
                 Box::pin(async move {
                     let result = block_device_driver::BlockDevice::read(
-                        device,
+                        &mut device,
                         block,
-                        core::slice::from_mut(scratch),
+                        core::slice::from_mut(&mut *scratch),
                     )
                     .await
                     .map_err(|error| {
                         log::error!("microSD block read error: {error:?}");
                         SdError
                     });
-                    (result, scratch)
+                    (result, device, scratch)
                 })
             };
             state.transfer = Some(transfer);
         }
         match state.transfer.as_mut().unwrap().as_mut().poll(cx) {
             Poll::Pending => Poll::Pending,
-            Poll::Ready((result, scratch)) => {
+            Poll::Ready((result, device, scratch)) => {
                 state.transfer = None;
+                self.device = Some(device);
                 if let Err(error) = result {
                     return Poll::Ready(Err(IoError::device(error, "SD block transfer failed")));
                 }
                 if !write {
-                    buf.copy_from_slice(&scratch[..]);
+                    buf[..BLOCK_SIZE].copy_from_slice(&scratch[..]);
                 }
                 self.position += BLOCK_SIZE as u64;
                 Poll::Ready(Ok(BLOCK_SIZE))
@@ -652,7 +634,7 @@ pub async fn init(
         blocks,
         blocks / 2048
     );
-    let device = Box::leak(Box::new(device));
+    let device = Some(device);
     Ok(StreamDevice::with_block_count(
         SdStream {
             device,
@@ -715,45 +697,132 @@ pub async fn mount(device: SdBlockDevice) -> Result<SdStorage, ErrorKind> {
 }
 
 /// Appends the bounded buffer to the persistent log and makes it durable.
-pub async fn append_log(volume: &mut SdStorage, buffer: &mut LogBuffer<1024>) -> Result<(), ()> {
+pub async fn append_log<const N: usize>(
+    volume: &mut SdStorage,
+    buffer: &mut LogBuffer<N>,
+) -> Result<(), ErrorKind> {
+    append_named(volume, buffer, "theo.log", "theo.1.log").await
+}
+
+async fn append_named<const N: usize>(
+    volume: &mut SdStorage,
+    buffer: &mut LogBuffer<N>,
+    name: &str,
+    archive: &str,
+) -> Result<(), ErrorKind> {
+    let size = match volume.metadata(volume.root(), name).await {
+        Ok(metadata) => metadata.len(),
+        Err(error) if error.kind() == ErrorKind::NotFound => 0,
+        Err(error) => return Err(error.kind()),
+    };
+    if theo_storage::rotation_needed(size, buffer.len()) {
+        match volume.remove_file(volume.root(), archive).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => return Err(error.kind()),
+        }
+        volume
+            .rename(volume.root(), name, volume.root(), archive)
+            .await
+            .map_err(|error| error.kind())?;
+    }
     while !buffer.is_empty() {
         let file = volume
             .open(
                 volume.root(),
-                "theo.log",
+                name,
                 OpenOptions::new().write().create().append(),
             )
             .await
-            .map_err(|_| ())?;
-        let written = volume
-            .write(&file, buffer.pending())
-            .await
-            .map_err(|_| ())?;
-        volume.close(file).await.map_err(|_| ())?;
+            .map_err(|error| error.kind())?;
+        let result = volume.write(&file, buffer.pending()).await;
+        let closed = volume.close(file).await;
+        let written = result.map_err(|error| error.kind())?;
+        closed.map_err(|error| error.kind())?;
         if written == 0 {
-            return Err(());
+            return Err(ErrorKind::NoSpace);
         }
+        volume.sync().await.map_err(|error| error.kind())?;
         buffer.consume(written);
     }
-    volume.sync().await.map_err(|_| ())
+    volume.sync().await.map_err(|error| error.kind())
 }
 
-/// Reopens the boot log and verifies the appended record after sync.
-pub async fn verify_boot_log(volume: &mut SdStorage) -> Result<(), ()> {
+/// Exercise the real rotation path on separate files, preserving live logs.
+#[cfg(feature = "sd-check")]
+pub async fn test_rotation(volume: &mut SdStorage) -> Result<(), ErrorKind> {
+    for name in ["sdtest2.log", "sdtest2.1"] {
+        match volume.metadata(volume.root(), name).await {
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            _ => return Err(ErrorKind::AlreadyExists),
+        }
+    }
+    let mut payload = [b'R'; 2048];
+    payload[2047] = b'\n';
+    for _ in 0..66 {
+        let mut buffer = LogBuffer::<2048>::new();
+        buffer.push(&payload);
+        match embassy_time::with_timeout(
+            embassy_time::Duration::from_millis(500),
+            append_named(volume, &mut buffer, "sdtest2.log", "sdtest2.1"),
+        )
+        .await
+        {
+            Ok(result) => result?,
+            Err(_) => return Err(ErrorKind::Io),
+        }
+        embassy_time::Timer::after_millis(1).await;
+    }
+    let active = volume
+        .metadata(volume.root(), "sdtest2.log")
+        .await
+        .map_err(|error| error.kind())?
+        .len();
+    let archive = volume
+        .metadata(volume.root(), "sdtest2.1")
+        .await
+        .map_err(|error| error.kind())?
+        .len();
+    if active != 4096 || archive != theo_storage::LOG_FILE_LIMIT {
+        return Err(ErrorKind::Io);
+    }
+    esp_println::println!(
+        "INFO - SD rotation check passed: active={active} archive={archive} (isolated sdtest files retained)"
+    );
+    Ok(())
+}
+
+/// Read the prior log before this boot writes anything. Its tail proves
+/// persistence across reset/wake without creating a serial-to-SD feedback loop.
+pub async fn report_log_tail(volume: &mut SdStorage) -> Result<(), ()> {
+    let size = match volume.metadata(volume.root(), "theo.log").await {
+        Ok(metadata) => metadata.len(),
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            esp_println::println!("INFO - microSD previous theo.log: absent (first boot)");
+            return Ok(());
+        }
+        Err(_) => return Err(()),
+    };
     let file = volume
         .open(volume.root(), "theo.log", OpenOptions::new().read())
         .await
         .map_err(|_| ())?;
     let result = async {
-        let start = volume.seek(&file, SeekFrom::End(-5)).map_err(|_| ())?;
-        let mut tail = [0u8; 5];
-        let read = volume.read(&file, &mut tail).await.map_err(|_| ())?;
-        if read != tail.len() || &tail != b"boot\n" {
+        let mut tail = [0u8; 384];
+        let count = size.min(tail.len() as u64) as usize;
+        volume
+            .seek(&file, SeekFrom::End(-(count as i64)))
+            .map_err(|_| ())?;
+        let read = volume
+            .read(&file, &mut tail[..count])
+            .await
+            .map_err(|_| ())?;
+        if read != count {
             return Err(());
         }
-        log::info!(
-            "microSD theo.log: {} bytes, boot record read back",
-            start + read as u64
+        esp_println::println!(
+            "INFO - microSD previous theo.log: {size} bytes; tail:\n{}",
+            core::str::from_utf8(&tail[..read]).unwrap_or("<UTF-8 boundary>")
         );
         Ok(())
     }

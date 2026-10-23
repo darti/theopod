@@ -26,7 +26,8 @@ lint:
     LIBCLANG_PATH="{{libclang_path}}" PATH="{{gcc_path}}:${PATH}" RUSTUP_TOOLCHAIN=esp cargo clippy --features watchdog-check -- -D warnings
     LIBCLANG_PATH="{{libclang_path}}" PATH="{{gcc_path}}:${PATH}" RUSTUP_TOOLCHAIN=esp cargo clippy --features watchdog-loop -- -D warnings
     LIBCLANG_PATH="{{libclang_path}}" PATH="{{gcc_path}}:${PATH}" RUSTUP_TOOLCHAIN=esp cargo clippy --features sleep-check -- -D warnings
-    RUSTUP_TOOLCHAIN=stable cargo clippy -p theo-drivers -p theo-frame-dump -p frame-png --target {{host_target}} --all-targets -- -D warnings
+    LIBCLANG_PATH="{{libclang_path}}" PATH="{{gcc_path}}:${PATH}" RUSTUP_TOOLCHAIN=esp cargo clippy --features sd-check -- -D warnings
+    RUSTUP_TOOLCHAIN=stable cargo clippy -p theo-drivers -p theo-frame-dump -p theo-storage -p frame-png --target {{host_target}} --all-targets -- -D warnings
 
 build:
     ESP_LOG=info LIBCLANG_PATH="{{libclang_path}}" PATH="{{gcc_path}}:${PATH}" RUSTUP_TOOLCHAIN=esp cargo build --release
@@ -54,6 +55,15 @@ flash-dump log="target/frame.log" port="":
 # Flash normal firmware and capture serial logs from boot without a TTY.
 flash-log log="target/serial.log" port="":
     ESP_LOG=info LIBCLANG_PATH="{{libclang_path}}" PATH="{{gcc_path}}:${PATH}" RUSTUP_TOOLCHAIN=esp cargo espflash flash --release --monitor --non-interactive --chip {{chip}} {{ if port != "" { "--port " + port } else { "" } }} | tee {{log}}
+
+# Non-destructive block-write fault injection: full, readonly, removed, timeout.
+sd-check fault log="target/sd-check.log" port="":
+    THEO_SD_FAULT={{quote(fault)}} ESP_LOG=info LIBCLANG_PATH="{{libclang_path}}" PATH="{{gcc_path}}:${PATH}" RUSTUP_TOOLCHAIN=esp cargo espflash flash --release --features sd-check --monitor --non-interactive --chip {{chip}} {{ if port != "" { "--port " + port } else { "" } }} | tee {{quote(log)}}
+
+# Three real deep-sleep/timer-wake cycles; passive monitor preserves wake causes.
+sd-sleep-check log="target/sd-sleep.log" port="":
+    THEO_SD_FAULT=sleep ESP_LOG=info LIBCLANG_PATH="{{libclang_path}}" PATH="{{gcc_path}}:${PATH}" RUSTUP_TOOLCHAIN=esp cargo espflash flash --release --features sd-check --chip {{chip}} {{ if port != "" { "--port " + port } else { "" } }}
+    python3 -I tools/passive-monitor.py {{quote(log)}} {{ if port != "" { quote(port) } else { "" } }}
 
 # Flash a build that keeps the view upright and logs the raw accelerometer
 # axes once a second, to measure `IMU_AXES` in `src/device/mod.rs`.
@@ -96,7 +106,7 @@ frame-png log="target/frame.log" out="target/frame.png":
 
 # Run the HAL-independent unit tests on the host.
 test:
-    RUSTUP_TOOLCHAIN=stable cargo test -p theo-drivers -p theo-frame-dump -p frame-png --target {{host_target}}
+    RUSTUP_TOOLCHAIN=stable cargo test -p theo-drivers -p theo-frame-dump -p theo-storage -p frame-png --target {{host_target}}
 
 # Run the driver tests under Miri, to catch undefined behaviour in their
 # unsafe code (`rustup +nightly component add miri rust-src` once). Cargo

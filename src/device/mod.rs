@@ -31,6 +31,7 @@
 mod esp_qspi;
 mod expander;
 mod i2c_bus;
+mod logging;
 mod psram_tx_buf;
 mod restart;
 mod sd;
@@ -64,6 +65,7 @@ pub use self::expander::{Expander, Touch};
 )]
 pub use self::expander::{TouchError, TouchResetError};
 pub use self::i2c_bus::{I2cBus, I2cDevice};
+pub use self::logging::{flush_before_sleep, spawn as spawn_storage};
 pub use self::restart::{
     WATCHDOG_TIMEOUT_MS, Watchdog, clear_display_resets, clear_watchdog_resets_if_healthy,
     display_resets, log_start_cause, reset_for_display,
@@ -73,6 +75,8 @@ pub use self::sd::{
     status_message as sd_status_message,
 };
 pub use self::sleep::DeepSleep;
+#[cfg(feature = "sd-check")]
+pub use self::sleep::diagnostic_sleep_requested;
 use self::{esp_qspi::EspQspi, psram_tx_buf::PsramTxBuf};
 use embedded_hal::digital::PinState;
 use theo_drivers::{
@@ -224,7 +228,7 @@ impl Board {
     /// display and the BOOT button still work.
     pub async fn init() -> Self {
         esp_alloc::heap_allocator!(size: HEAP_SIZE);
-        esp_println::logger::init_logger_from_env();
+        logging::init();
         log::info!("firmware init");
         let peripherals = esp_hal::init(esp_hal::Config::default());
         // Registered after the internal heap, so general allocations only
@@ -291,38 +295,61 @@ impl Board {
         let expander = EXPANDER.init(Mutex::new(expander));
         let touch = Touch::new(controller, expander);
         let imu = start_imu(i2c).await;
-        let (mut sd, sd_status) = match sd::init(
-            peripherals.SPI3,
-            peripherals.GPIO2,
-            peripherals.GPIO1,
-            peripherals.GPIO3,
-            expander,
+        watchdog.feed();
+        let (mut sd, sd_status) = match embassy_time::with_timeout(
+            embassy_time::Duration::from_secs(3),
+            sd::init(
+                peripherals.SPI3,
+                peripherals.GPIO2,
+                peripherals.GPIO1,
+                peripherals.GPIO3,
+                expander,
+            ),
         )
         .await
         {
-            Ok(device) => match sd::mount(device).await {
-                Ok(volume) => {
-                    log::info!("microSD FAT volume mounted");
-                    (Some(volume), SdStatus::Mounted)
+            Ok(Ok(device)) => {
+                watchdog.feed();
+                match embassy_time::with_timeout(
+                    embassy_time::Duration::from_secs(2),
+                    sd::mount(device),
+                )
+                .await
+                {
+                    Ok(Ok(volume)) => {
+                        log::info!("microSD FAT volume mounted");
+                        (Some(volume), SdStatus::Mounted)
+                    }
+                    error => {
+                        log::warn!(
+                            "microSD FAT mount failed ({error:?}); continuing without storage"
+                        );
+                        (None, SdStatus::MountFailed)
+                    }
                 }
-                Err(error) => {
-                    log::warn!("microSD FAT mount failed ({error:?}); continuing without storage");
-                    (None, SdStatus::MountFailed)
-                }
-            },
-            Err(error) => {
+            }
+            error => {
                 log::info!("microSD unavailable; continuing without storage");
-                (None, SdStatus::InitFailed(error))
+                let cause = match error {
+                    Ok(Err(error)) => error,
+                    _ => sd::SdInitError::Card(sdio::MmcError::Timeout),
+                };
+                (None, SdStatus::InitFailed(cause))
             }
         };
-        let mut persistent_log = crate::storage::LogBuffer::<1024>::new();
-        persistent_log.push_fmt(format_args!("boot"));
-        if let Some(volume) = sd.as_mut() {
-            if sd::append_log(volume, &mut persistent_log).await.is_err() {
-                log::warn!("microSD log flush failed; continuing without persistence");
-            } else if sd::verify_boot_log(volume).await.is_err() {
-                log::warn!("microSD boot log read-back failed");
-            }
+        watchdog.feed();
+        if let Some(volume) = sd.as_mut()
+            && !matches!(
+                embassy_time::with_timeout(
+                    embassy_time::Duration::from_millis(500),
+                    sd::report_log_tail(volume)
+                )
+                .await,
+                Ok(Ok(()))
+            )
+        {
+            log::warn!("microSD previous log read failed; logging disabled until reboot");
+            sd = None;
         }
 
         let pixels = usize::from(DISPLAY_GEOMETRY.width) * usize::from(DISPLAY_GEOMETRY.height);

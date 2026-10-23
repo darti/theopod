@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/theo-drivers", "crates/theo-frame-dump", "tools/frame-png"]
+members = ["crates/theo-drivers", "crates/theo-frame-dump", "crates/theo-storage", "tools/frame-png"]
 
 [workspace.package]
 edition = "2024"
@@ -40,6 +40,7 @@ speculoos = "0.13"
 static_cell = "2.1"
 theo-drivers = { path = "crates/theo-drivers" }
 theo-frame-dump = { path = "crates/theo-frame-dump" }
+theo-storage = { path = "crates/theo-storage" }
 
 [package]
 name = "theo-pod"
@@ -76,9 +77,11 @@ sdio.workspace = true
 slint.workspace = true
 static_cell.workspace = true
 theo-drivers.workspace = true
+theo-storage.workspace = true
 theo-frame-dump = { workspace = true, optional = true }
 
 [features]
+sd-check = ["sleep-check"]
 # Prints the framebuffer to the serial log after the first frame and after
 # each BOOT press; `just frame-png` turns the log into a PNG.
 frame-dump = ["dep:theo-frame-dump"]

@@ -5299,7 +5299,12 @@ dependencies = [
  "static_cell",
  "theo-drivers",
  "theo-frame-dump",
+ "theo-storage",
 ]
+
+[[package]]
+name = "theo-storage"
+version = "0.1.0"
 
 [[package]]
 name = "thiserror"

@@ -1,5 +1,10 @@
 # t-94 microSD logging design
 
+Implementation update (2026-10-23): this initial proposal was superseded by
+SPI3 with asynchronous EXIO7 card select, a dual serial/SD logger and the
+single-owner storage task. See ADR-0010 and `docs/sd-validation.md` for the
+implemented architecture, limits and actual hardware evidence.
+
 ## Goal
 
 Initialize the V2 onboard microSD slot over the ESP32-S3 SDMMC peripheral,

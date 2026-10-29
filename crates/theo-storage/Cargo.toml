@@ -4,3 +4,14 @@ version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+
+[dependencies]
+ekv.workspace = true
+hadris-fat.workspace = true
+hadris-fs.workspace = true
+hadris-io.workspace = true
+hadris-storage.workspace = true
+
+[dev-dependencies]
+embassy-sync-06 = { package = "embassy-sync", version = "0.6" }
+futures = { version = "0.3", features = ["executor"] }

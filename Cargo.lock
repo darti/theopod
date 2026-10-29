@@ -1109,6 +1109,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0e9c71c2167ca323c882b99918929403426e2373ea17242ff5653e0d5e1058be"
 
 [[package]]
+name = "ekv"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ab888debca410aa6f2726fb363926ca73539378c5e8880c8f08f35ae4b24d938"
+dependencies = [
+ "embassy-sync 0.6.2",
+ "heapless 0.8.0",
+]
+
+[[package]]
 name = "embassy-embedded-hal"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5305,6 +5315,15 @@ dependencies = [
 [[package]]
 name = "theo-storage"
 version = "0.1.0"
+dependencies = [
+ "ekv",
+ "embassy-sync 0.6.2",
+ "futures",
+ "hadris-fat",
+ "hadris-fs",
+ "hadris-io",
+ "hadris-storage",
+]
 
 [[package]]
 name = "thiserror"

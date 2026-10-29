@@ -2,6 +2,11 @@
 
 #![no_std]
 
+extern crate alloc;
+
+pub mod fat_page_file;
+pub mod page_store;
+
 use core::fmt;
 
 pub trait LogSink {

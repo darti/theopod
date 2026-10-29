@@ -12,3 +12,4 @@
 | [0008](0008-stop-with-a-boot-long-press-into-deep-sleep.md) | Stop with a BOOT long press into deep sleep | Accepted |
 | [0009](0009-feed-the-main-watchdog-from-the-ui-loop.md) | Feed the main watchdog from the UI loop | Accepted |
 | [0010](0010-microsd-over-sdmmc.md) | Use the onboard microSD over SPI | Accepted |
+| [0011](0011-adapt-ekv-to-sector-storage-with-copy-on-write-pages.md) | Adapt EKV to sector storage with copy-on-write pages | Accepted direction; service integration pending |

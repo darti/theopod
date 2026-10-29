@@ -46,7 +46,8 @@ for the V2 pinout and hardware resources.
 - `crates/theo-frame-dump/`: `no_std` text format for dumping the framebuffer
   over the serial log (firmware writer, host parser).
 - `crates/theo-storage/`: `no_std` bounded log buffering, filtering and
-  rotation policy, tested on the host by `just test`.
+  rotation policy, plus the EKV copy-on-write sector store and async FAT file
+  transport (ADR-0011), tested on the host by `just test`.
 - `tools/frame-png/`: host tool turning a dump in a serial log into a PNG.
 - `tools/passive-monitor.py`: serial log recorder (macOS, `python3`) that
   does not reset the chip and follows it across deep-sleep wakes
@@ -109,6 +110,20 @@ path using isolated `sdtest2.log`/`sdtest2.1` fixtures; it refuses existing fixt
 files and leaves the generated files for inspection. `just sd-sleep-check`
 performs three actual deep-sleep/timer-wake cycles with a passive monitor.
 Restore normal firmware with `just flash` after diagnostic tests.
+
+## Podcast storage groundwork
+
+`theo-storage` provides an asynchronous EKV 1.0.0 backend for a preallocated
+FAT file. Two CRC-protected copies of each logical page preserve the previous
+copy while a replacement is written. Incompatible format/configuration headers
+are rejected; failed or cancelled I/O disables the backend until reopening
+after reboot. See [ADR-0011](docs/adr/0011-adapt-ekv-to-sector-storage-with-copy-on-write-pages.md).
+
+This backend is not initialized by the running firmware yet. Radio France
+subscription commands, feed synchronization, downloads and space reclamation
+remain planned in [the implementation plan](docs/superpowers/plans/2026-10-29-radio-france.md).
+It does not establish physical power-loss safety for consumer SD cards or FAT
+metadata; this still needs board validation. No wiring or audio playback is added.
 
 ## Seeing what the firmware renders
 

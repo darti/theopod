@@ -253,3 +253,30 @@ fn failed_sync_keeps_entire_log_batch_pending() {
     assert!(append_log(&fs, &mut buffer, "/theo.log", "/theo.1.log").is_err());
     assert_eq!(buffer.pending(), b"pending");
 }
+
+// Regression (t-103): exercise actual LittleFS allocator exhaustion, not an injected I/O error.
+#[test]
+fn full_littlefs_volume_keeps_failed_append_pending() {
+    let disk = Disk::new();
+    // A real 128 KiB filesystem fills before the 128 KiB log rotation limit.
+    let geometry = Geometry::new(256).unwrap();
+    let mut adapter = SectorStorage::new(disk, geometry);
+    Filesystem::format(&mut adapter, &geometry.config()).unwrap();
+    let fs = Filesystem::mount(adapter, geometry.config()).ok().unwrap();
+    fs.write_file("/theo.log", &vec![b'A'; 8192]).unwrap();
+    for _ in 0..64 {
+        let previous = fs.read_to_vec("/theo.log").unwrap();
+        let mut buffer = crate::LogBuffer::<4096>::new();
+        buffer.push(&[b'B'; 4096]);
+        match append_log(&fs, &mut buffer, "/theo.log", "/theo.1.log") {
+            Ok(()) => assert!(buffer.is_empty()),
+            Err(Error::NoSpace) => {
+                assert_eq!(buffer.pending(), &[b'B'; 4096]);
+                assert_eq!(fs.read_to_vec("/theo.log").unwrap(), previous);
+                return;
+            }
+            Err(error) => panic!("unexpected full-volume error: {error:?}"),
+        }
+    }
+    panic!("bounded filesystem should have filled");
+}

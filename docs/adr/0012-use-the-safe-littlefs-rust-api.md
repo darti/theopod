@@ -108,3 +108,12 @@ I/O failures never trigger format. The normal flashed firmware has no
 provisioning enabled. It remounted the card, read 1458 prior log bytes and
 synced new records; the UI reached its healthy watchdog checkpoint.
 See docs/sd-validation.md for captures and remaining physical tests.
+
+The t-103 follow-up subsequently verified real rotation and three real timed
+sleep/wake cycles, plus on-board injection of full/protected/removed/blocked/
+unresponsive media conditions. Mount service time was 19.553–24.963 ms;
+successful append service time reached 473.655 ms in the measured runs.
+Minimum sampled core-1 stack margin was 22019 bytes. These are sampled service
+measurements, not worst-case guarantees. Normal firmware was restored and
+remounted/read prior logs. Physical SD power interruption/removal remain
+unperformed; see the updated validation matrix for exact evidence and limits.

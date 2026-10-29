@@ -106,9 +106,11 @@ the next boot, preserves the unwritten batch in RAM, and leaves the UI and
 serial logging running. Reinsertion takes effect after reboot.
 
 `just flash-log target/serial.log` captures normal firmware logs from boot.
-`just sd-check full`, `readonly`, `removed` or `timeout` builds a diagnostic
-firmware that injects the corresponding block-write failure without filling
-or reformatting the card. `just sd-check rotate` exercises the real rotation
+`just sd-check full`, `readonly`, `removed`, `timeout` or `absent` builds a diagnostic
+firmware that injects the corresponding failure without filling or
+reformatting the card (`absent` simulates identification without a response).
+Diagnostics report worker operation times and sampled core-1 stack margin;
+this sample is not an exhaustive stack high-water measurement. `just sd-check rotate` exercises the real rotation
 path using isolated `sdtest2.log`/`sdtest2.1` fixtures; it refuses existing fixture
 files and leaves the generated files for inspection. `just sd-sleep-check`
 performs three actual deep-sleep/timer-wake cycles with a passive monitor.

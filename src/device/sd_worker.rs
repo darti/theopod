@@ -26,7 +26,8 @@ const IO_BUDGET: Duration = Duration::from_millis(500);
 pub(super) static SECTORS: SectorBus = SectorBus::new();
 static COMMANDS: Channel<CriticalSectionRawMutex, Request, 1> = Channel::new();
 static REPLY: Signal<CriticalSectionRawMutex, Result<Reply, Error>> = Signal::new();
-static STACK: ConstStaticCell<Stack<32768>> = ConstStaticCell::new(Stack::new());
+const STACK_SIZE: usize = 32768;
+static STACK: ConstStaticCell<Stack<STACK_SIZE>> = ConstStaticCell::new(Stack::new());
 
 enum Command {
     Mount,
@@ -111,12 +112,14 @@ pub async fn init(
         Geometry::new(sectors).map_err(|_| SdInitError::Card(sdio::MmcError::BlockSize))?;
     spawner.spawn(io::serve(device).expect("SD I/O once"));
     let (cpu, interrupt) = core;
-    esp_rtos::start_second_core(cpu, interrupt, STACK.take(), move || {
+    let stack = STACK.take();
+    let stack_bottom = stack.bottom() as usize;
+    esp_rtos::start_second_core(cpu, interrupt, stack, move || {
         static EXECUTOR: StaticCell<esp_rtos::embassy::Executor> = StaticCell::new();
         EXECUTOR
             .init(esp_rtos::embassy::Executor::new())
             .run(|spawner| {
-                spawner.spawn(worker(geometry).expect("SD owner once"));
+                spawner.spawn(worker(geometry, stack_bottom).expect("SD owner once"));
             });
     });
     guard.complete().map_err(|_| SdInitError::Host)?;
@@ -161,13 +164,40 @@ pub async fn report_log_tail(storage: &mut SdStorage) -> Result<(), Error> {
     Ok(())
 }
 
+#[cfg(feature = "sd-check")]
+struct Measurements {
+    stack_bottom: usize,
+    min_sampled_headroom: Cell<usize>,
+}
+
+#[cfg(feature = "sd-check")]
+impl Measurements {
+    // Sample a synchronous callback's stack address without reading memory
+    // owned by the running stack. This is sampled margin, not a high-water scan.
+    #[inline(never)]
+    fn sample(&self) {
+        let marker = 0u8;
+        let address = core::hint::black_box(&marker) as *const u8 as usize;
+        let margin = address
+            .checked_sub(self.stack_bottom)
+            .filter(|margin| *margin <= STACK_SIZE)
+            .unwrap_or(0);
+        self.min_sampled_headroom
+            .set(self.min_sampled_headroom.get().min(margin));
+    }
+}
+
 struct CardIo {
     client: SectorClient<'static>,
+    #[cfg(feature = "sd-check")]
+    measurements: Rc<Measurements>,
     deadline: Rc<Cell<Instant>>,
 }
 
 impl CardIo {
     fn check(&self) -> Result<(), Error> {
+        #[cfg(feature = "sd-check")]
+        self.measurements.sample();
         if SECTORS.is_disabled() || Instant::now() >= self.deadline.get() {
             SECTORS.disable();
             Err(Error::Io)
@@ -207,10 +237,17 @@ impl SectorIo for CardIo {
 }
 
 #[embassy_executor::task]
-async fn worker(geometry: Geometry) {
+async fn worker(geometry: Geometry, _stack_bottom: usize) {
+    #[cfg(feature = "sd-check")]
+    let measurements = Rc::new(Measurements {
+        stack_bottom: _stack_bottom,
+        min_sampled_headroom: Cell::new(STACK_SIZE),
+    });
     let deadline = Rc::new(Cell::new(Instant::now()));
     let mut card = Some(SectorStorage::new(
         CardIo {
+            #[cfg(feature = "sd-check")]
+            measurements: measurements.clone(),
             client: SECTORS.take_client().expect("one sector client"),
             deadline: deadline.clone(),
         },
@@ -220,6 +257,16 @@ async fn worker(geometry: Geometry) {
     loop {
         let request = COMMANDS.receive().await;
         deadline.set(request.deadline);
+        #[cfg(feature = "sd-check")]
+        let label = match &request.command {
+            Command::Mount => "mount",
+            Command::Append(..) => "append",
+            Command::Tail => "tail",
+            Command::RotationStart => "rotation-start",
+            Command::RotationFinish => "rotation-finish",
+        };
+        #[cfg(feature = "sd-check")]
+        let started = Instant::now();
         let result = if SECTORS.is_disabled() || Instant::now() >= request.deadline {
             Err(Error::Io)
         } else {
@@ -274,6 +321,14 @@ async fn worker(geometry: Geometry) {
             volume = None;
             card = None;
         }
+        #[cfg(feature = "sd-check")]
+        esp_println::println!(
+            "INFO - SD measurement: op={} elapsed_us={} sampled_stack_margin={} status={}",
+            label,
+            started.elapsed().as_micros(),
+            measurements.min_sampled_headroom.get(),
+            if result.is_ok() { "ok" } else { "error" }
+        );
         REPLY.signal(result);
     }
 }

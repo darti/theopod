@@ -426,6 +426,12 @@ async fn init_card(
     miso: GPIO3<'static>,
     expander: &'static super::Expander,
 ) -> Result<(HalDevice, u64), SdInitError> {
+    // Exercise the same bounded identification path as an absent/unresponsive
+    // card without requiring physical removal or altering the card contents.
+    #[cfg(feature = "sd-check")]
+    if option_env!("THEO_SD_FAULT") == Some("absent") {
+        core::future::pending::<()>().await;
+    }
     let spi = Spi::new(
         spi3,
         SpiConfig::default()

@@ -57,7 +57,7 @@ flash-dump log="target/frame.log" port="":
 flash-log log="target/serial.log" port="":
     ESP_LOG=info LIBCLANG_PATH="{{libclang_path}}" PATH="{{gcc_path}}:${PATH}" RUSTUP_TOOLCHAIN=esp cargo espflash flash --release --monitor --non-interactive --chip {{chip}} {{ if port != "" { "--port " + port } else { "" } }} | tee {{log}}
 
-# Non-destructive block-write fault injection: full, readonly, removed, timeout.
+# Non-destructive SD diagnostics: full, readonly, removed, timeout, absent, rotate.
 sd-check fault log="target/sd-check.log" port="":
     THEO_SD_FAULT={{quote(fault)}} ESP_LOG=info LIBCLANG_PATH="{{libclang_path}}" PATH="{{gcc_path}}:${PATH}" RUSTUP_TOOLCHAIN=esp cargo espflash flash --release --features sd-check --monitor --non-interactive --chip {{chip}} {{ if port != "" { "--port " + port } else { "" } }} | tee {{quote(log)}}
 

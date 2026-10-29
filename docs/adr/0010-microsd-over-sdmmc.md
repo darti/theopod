@@ -1,6 +1,6 @@
 # ADR-0010: Use the onboard microSD over SPI
 
-- Status: Accepted for the V2 board wiring; firmware implementation is tracked by `t-94`.
+- Status: Accepted for the V2 board wiring; firmware implementation is tracked by `t-94`. FAT filesystem selection and runtime replaced by ADR-0012. The validation below concerns the former FAT build.
 - Date: 2026-10-22
 
 ## Context

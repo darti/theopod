@@ -118,7 +118,7 @@ async fn persist(mut volume: Option<SdStorage>) {
                         esp_println::println!("INFO - microSD synced {count} log bytes");
                     }
                     result => {
-                        // Cancelling may leave FAT metadata or a command in an
+                        // Cancelling may leave filesystem metadata or a command in an
                         // unknown state. Never reuse that mount this boot.
                         volume = None;
                         log::error!(

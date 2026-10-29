@@ -6,12 +6,18 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+littlefs-rust.workspace = true
+embassy-sync.workspace = true
 ekv.workspace = true
-hadris-fat.workspace = true
-hadris-fs.workspace = true
-hadris-io.workspace = true
-hadris-storage.workspace = true
+hadris-fat = { workspace = true, optional = true }
+hadris-fs = { workspace = true, optional = true }
+hadris-io = { workspace = true, optional = true }
+hadris-storage = { workspace = true, optional = true }
+
+[features]
+legacy-fat = ["dep:hadris-fat", "dep:hadris-io", "dep:hadris-fs", "dep:hadris-storage"]
 
 [dev-dependencies]
+critical-section = { workspace = true, features = ["std"] }
 embassy-sync-06 = { package = "embassy-sync", version = "0.6" }
 futures = { version = "0.3", features = ["executor"] }

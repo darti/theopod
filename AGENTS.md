@@ -8,6 +8,12 @@ the ESP toolchain and target are defined in `rust-toolchain.toml`.
 
 ## Conventions
 
+- Before starting any work (code, tests, documentation or investigation),
+  create or reuse an Oku task and record its ID. Keep the task open through implementation, checks,
+  review and pull request submission. Close it only after the corresponding
+  changes have been merged into `main`; a local commit or passing tests do
+  not justify closing it.
+
 - Preserve the existing `no_std`/`no_main` model and ESP-HAL startup conventions.
 - Display pin assignments, panel geometry, the BOOT button, PSRAM mode and
   frequency, and the TCA9554 power-up values are defined in

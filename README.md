@@ -46,8 +46,8 @@ for the V2 pinout and hardware resources.
 - `crates/theo-frame-dump/`: `no_std` text format for dumping the framebuffer
   over the serial log (firmware writer, host parser).
 - `crates/theo-storage/`: `no_std` bounded log buffering, filtering and
-  rotation policy, plus the EKV copy-on-write sector store and async FAT file
-  transport (ADR-0011), tested on the host by `just test`.
+  rotation policy, LittleFS sector backing and owned-sector mailboxes, plus the
+  EKV copy-on-write store and optional legacy FAT transport; host-tested by `just test`.
 - `tools/frame-png/`: host tool turning a dump in a serial log into a PNG.
 - `tools/passive-monitor.py`: serial log recorder (macOS, `python3`) that
   does not reset the chip and follows it across deep-sleep wakes
@@ -87,7 +87,10 @@ are supported by the dual serial/SD logger.
 
 ## Persistent logs
 
-An inserted FAT32 microSD is mounted at boot over SPI3 on the V2 board.
+An inserted LittleFS microSD is mounted at boot over SPI3 on the V2 board.
+The public pure Rust `littlefs-rust` API runs on core 1; the non-Send async SD
+and I2C peripherals remain on core 0, reached through bounded owned-sector
+messages. A 32 KiB internal stack is reserved for core 1.
 The logger captures events from startup and appends level, target and message
 to `/theo.log`. Every second a dedicated async task drains a 4 KiB queue;
 producers never await filesystem I/O. Records larger than 1 KiB and oldest
@@ -111,15 +114,41 @@ files and leaves the generated files for inspection. `just sd-sleep-check`
 performs three actual deep-sleep/timer-wake cycles with a passive monitor.
 Restore normal firmware with `just flash` after diagnostic tests.
 
+### Initial card provisioning
+
+Boot never formats media. Existing FAT cards will report a mount failure and
+leave the UI and serial logs available. Back up and unmount a card before
+explicit provisioning: this replaces its filesystem and uses the whole card,
+starting at byte zero. Use its exact capacity in 512-byte sectors:
+
+```sh
+just sd-format /dev/rdiskN EXACT_SECTOR_COUNT
+```
+
+For an existing sized image, `just sd-format /path/card.img` derives capacity
+from the file length. Both firmware and formatter use 4096-byte blocks,
+512-byte reads/programs, a 4096-byte cache and 128-byte allocator lookahead.
+The firmware does not expose the volume as FAT to a desktop.
+
+Software tests cover reboot/reopen, rotation, sector tears, failed sync and
+cross-thread cancellation. These do not replace board validation; the earlier
+[SD validation matrix](docs/sd-validation.md) describes the previous FAT build.
+Upstream aliasing fixes in [PR #12](https://github.com/PhotomancerArt/littlefs-rust/pull/12)
+are still pending: the requested main dependency is locked to `732d038b`.
+See [ADR-0012](docs/adr/0012-use-the-safe-littlefs-rust-api.md).
+
 ## Podcast storage groundwork
 
 `theo-storage` provides an asynchronous EKV 1.0.0 backend for a preallocated
-FAT file. Two CRC-protected copies of each logical page preserve the previous
+FAT file (available with `theo-storage/legacy-fat`). Two CRC-protected copies of each logical page preserve the previous
 copy while a replacement is written. Incompatible format/configuration headers
 are rejected; failed or cancelled I/O disables the backend until reopening
 after reboot. See [ADR-0011](docs/adr/0011-adapt-ekv-to-sector-storage-with-copy-on-write-pages.md).
 
-This backend is not initialized by the running firmware yet. Radio France
+This backend is not initialized by the running firmware. Its FAT-file transport
+is retained for host tests, not used by the LittleFS runtime. EKV placement on
+a separate raw region remains to be designed; a large random-access database
+file would cause costly LittleFS tail rewrites. Radio France
 subscription commands, feed synchronization, downloads and space reclamation
 remain planned in [the implementation plan](docs/superpowers/plans/2026-10-29-radio-france.md).
 It does not establish physical power-loss safety for consumer SD cards or FAT

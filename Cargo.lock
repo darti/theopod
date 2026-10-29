@@ -3282,6 +3282,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
 
 [[package]]
+name = "littlefs-rust"
+version = "0.1.1"
+source = "git+https://github.com/light-player/littlefs-rust?branch=main#732d038b684803edb713a0f87d00b6878674276a"
+dependencies = [
+ "bitflags 2.13.2",
+ "littlefs-rust-core",
+]
+
+[[package]]
+name = "littlefs-rust-core"
+version = "0.1.1"
+source = "git+https://github.com/light-player/littlefs-rust?branch=main#732d038b684803edb713a0f87d00b6878674276a"
+
+[[package]]
 name = "lock_api"
 version = "0.4.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5298,10 +5312,7 @@ dependencies = [
  "esp-hal",
  "esp-println",
  "esp-rtos",
- "hadris-fat",
- "hadris-fs",
- "hadris-io",
- "hadris-storage",
+ "littlefs-rust",
  "log",
  "sdio",
  "slint",
@@ -5316,13 +5327,16 @@ dependencies = [
 name = "theo-storage"
 version = "0.1.0"
 dependencies = [
+ "critical-section",
  "ekv",
  "embassy-sync 0.6.2",
+ "embassy-sync 0.8.0",
  "futures",
  "hadris-fat",
  "hadris-fs",
  "hadris-io",
  "hadris-storage",
+ "littlefs-rust",
 ]
 
 [[package]]

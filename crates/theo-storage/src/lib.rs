@@ -4,8 +4,11 @@
 
 extern crate alloc;
 
+#[cfg(feature = "legacy-fat")]
 pub mod fat_page_file;
+pub mod littlefs;
 pub mod page_store;
+pub mod sector_bus;
 
 use core::fmt;
 
@@ -144,6 +147,9 @@ impl<const CAP: usize> RecordWriter<'_, CAP> {
 
 #[cfg(test)]
 mod storage_tests;
+
+#[cfg(test)]
+mod littlefs_tests;
 
 /// Match ESP_LOG's global and longest module-prefix filters. Levels use
 /// log's ordering: error=1 through trace=5; zero disables a target.

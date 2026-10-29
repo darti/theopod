@@ -27,7 +27,7 @@ lint:
     LIBCLANG_PATH="{{libclang_path}}" PATH="{{gcc_path}}:${PATH}" RUSTUP_TOOLCHAIN=esp cargo clippy --features watchdog-loop -- -D warnings
     LIBCLANG_PATH="{{libclang_path}}" PATH="{{gcc_path}}:${PATH}" RUSTUP_TOOLCHAIN=esp cargo clippy --features sleep-check -- -D warnings
     LIBCLANG_PATH="{{libclang_path}}" PATH="{{gcc_path}}:${PATH}" RUSTUP_TOOLCHAIN=esp cargo clippy --features sd-check -- -D warnings
-    RUSTUP_TOOLCHAIN=stable cargo clippy -p theo-drivers -p theo-frame-dump -p theo-storage -p frame-png --target {{host_target}} --all-targets -- -D warnings
+    RUSTUP_TOOLCHAIN=stable cargo clippy -p theo-drivers -p theo-frame-dump -p theo-storage -p frame-png --target {{host_target}} --all-targets --features theo-storage/legacy-fat -- -D warnings
 
 build:
     ESP_LOG=info LIBCLANG_PATH="{{libclang_path}}" PATH="{{gcc_path}}:${PATH}" RUSTUP_TOOLCHAIN=esp cargo build --release
@@ -104,9 +104,14 @@ monitor-log log="target/frame.log" port="":
 frame-png log="target/frame.log" out="target/frame.png":
     RUSTUP_TOOLCHAIN=stable cargo run -q -p frame-png --target {{host_target}} -- {{log}} {{out}}
 
+# Explicit destructive host provisioning; never called by boot/build/flash.
+# For a raw device supply its exact 512-byte sector count. Unmount it first.
+sd-format device sectors="":
+    RUSTUP_TOOLCHAIN=stable cargo run -p theo-storage --example format_littlefs --target {{host_target}} -- --format {{quote(device)}} {{ if sectors != "" { "--sectors " + quote(sectors) } else { "" } }}
+
 # Run the HAL-independent unit tests on the host.
 test:
-    RUSTUP_TOOLCHAIN=stable cargo test -p theo-drivers -p theo-frame-dump -p theo-storage -p frame-png --target {{host_target}}
+    RUSTUP_TOOLCHAIN=stable cargo test -p theo-drivers -p theo-frame-dump -p theo-storage -p frame-png --target {{host_target}} --features theo-storage/legacy-fat
 
 # Run the driver tests under Miri, to catch undefined behaviour in their
 # unsafe code (`rustup +nightly component add miri rust-src` once). Cargo

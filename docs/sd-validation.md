@@ -1,5 +1,10 @@
 # t-94 microSD validation
 
+> Historical FAT implementation evidence. Since ADR-0012, the firmware uses
+> LittleFS; these hardware results do not validate the new filesystem, core 1
+> worker or provisioning format. No LittleFS board flashing or formatting has
+> been performed. Host and build verification is recorded in ADR-0012.
+
 Board: Waveshare ESP32-S3-Touch-AMOLED-1.8 V2, ESP32-S3 revision 0.2.
 Inserted card: FAT32 in an MBR type 0x0b partition, start LBA 32768,
 122,232,832 partition sectors; physical capacity 122,265,600 sectors

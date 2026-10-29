@@ -114,7 +114,7 @@ async fn main(spawner: Spawner) {
         sd,
         sd_status,
         mut watchdog,
-    } = Board::init().await;
+    } = Board::init(spawner).await;
     device::spawn_storage(spawner, sd);
     input::spawn(spawner, button, deep_sleep, touch, imu);
     let size = display.size();

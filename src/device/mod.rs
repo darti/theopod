@@ -226,7 +226,7 @@ impl Board {
     /// Panics if a bring-up step fails: the board cannot run without it.
     /// A touch controller or IMU that fails to start is only logged: the
     /// display and the BOOT button still work.
-    pub async fn init() -> Self {
+    pub async fn init(spawner: embassy_executor::Spawner) -> Self {
         esp_alloc::heap_allocator!(size: HEAP_SIZE);
         logging::init();
         log::info!("firmware init");
@@ -299,6 +299,8 @@ impl Board {
         let (mut sd, sd_status) = match embassy_time::with_timeout(
             embassy_time::Duration::from_secs(3),
             sd::init(
+                spawner,
+                (peripherals.CPU_CTRL, peripherals.FROM_CPU_INTR1),
                 peripherals.SPI3,
                 peripherals.GPIO2,
                 peripherals.GPIO1,
@@ -317,12 +319,12 @@ impl Board {
                 .await
                 {
                     Ok(Ok(volume)) => {
-                        log::info!("microSD FAT volume mounted");
+                        log::info!("microSD LittleFS volume mounted");
                         (Some(volume), SdStatus::Mounted)
                     }
                     error => {
                         log::warn!(
-                            "microSD FAT mount failed ({error:?}); continuing without storage"
+                            "microSD LittleFS mount failed ({error:?}); continuing without storage"
                         );
                         (None, SdStatus::MountFailed)
                     }

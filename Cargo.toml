@@ -33,6 +33,7 @@ esp-hal = { version = "~1.2", features = ["esp32s3", "unstable"] }
 esp-println = { version = "0.18", features = ["esp32s3", "log-04"] }
 esp-rtos = { version = "0.4", features = ["embassy", "esp32s3"] }
 log = "0.4"
+littlefs-rust = { git = "https://github.com/light-player/littlefs-rust", branch = "main", default-features = false, features = ["alloc"] }
 sdio = "0.5.1"
 png = "0.18"
 slint = { version = "1.18", default-features = false, features = ["compat-1-2", "unsafe-single-threaded", "libm", "renderer-software"] }
@@ -61,10 +62,6 @@ embassy-executor.workspace = true
 embassy-futures.workspace = true
 embassy-sync.workspace = true
 embassy-time.workspace = true
-hadris-fat.workspace = true
-hadris-io.workspace = true
-hadris-fs.workspace = true
-hadris-storage.workspace = true
 embedded-hal.workspace = true
 embedded-hal-async.workspace = true
 esp-alloc.workspace = true
@@ -74,6 +71,7 @@ esp-hal.workspace = true
 esp-println.workspace = true
 esp-rtos.workspace = true
 log.workspace = true
+littlefs-rust.workspace = true
 sdio.workspace = true
 slint.workspace = true
 static_cell.workspace = true

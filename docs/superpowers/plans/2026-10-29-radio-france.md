@@ -1,5 +1,12 @@
 # Radio France Offline Podcasts Implementation Plan
 
+> Oku: t-105, with stages t-106 through t-110. Feasibility remains in progress.
+> Storage update: ADR-0012 and t-99 replace the FAT runtime assumptions below
+> with LittleFS on core 1 and a core-0 async sector service. Revise dependent
+> database/download interfaces before continuing this plan. No tasks are closed
+> before their corresponding changes merge into main.
+
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Download the complete available history of followed Radio France podcasts, synchronize metadata changes, and recycle read audio only when space is needed.

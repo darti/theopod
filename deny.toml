@@ -57,3 +57,6 @@ allow = ["GPL-3.0-only"]
 [[licenses.exceptions]]
 crate = "i-slint-renderer-software"
 allow = ["GPL-3.0-only"]
+
+[sources]
+allow-git = ["https://github.com/light-player/littlefs-rust"]

@@ -168,6 +168,59 @@ across a stop and wake without resetting it, use `just monitor-passive`
 (`tools/passive-monitor.py`: macOS, needs `python3`, standard library
 only).
 
+## Commits and releases
+
+Use [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/) for
+commit messages and PR titles: `feat(display): add brightness control`,
+`fix(storage): handle a full card`, or `ci: update release tooling`.
+Accepted types are `feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`,
+`build`, `ci`, `chore`, and `revert`. Mark incompatible changes with `!` before
+the colon, or a `BREAKING CHANGE:` footer. Features and fixes drive automatic
+versioning; while below 1.0, release-plz follows Cargo's pre-1.0 SemVer rules.
+
+Use **squash merge**, keeping the validated PR title as the resulting commit
+subject. Configure GitHub's default squash commit message to use the PR title,
+disable other merge methods, and require `Conventional PR title` and
+`Cargo audit` in the `main` branch rules. These repository settings must be
+enabled by a maintainer; workflow files alone do not enforce merge rules.
+
+On pushes to `main`, the release workflow runs a fresh cargo audit, then
+release-plz maintains a PR containing the next firmware version and
+`CHANGELOG.md`. Review that PR and squash merge it to create a `vX.Y.Z` tag and
+a GitHub release whose notes come from git-cliff. Workspace package versions
+are synchronized; only `theo-pod` creates a tag and release. Notes include the
+drivers, storage and host tools, including changes confined to a component.
+There is no crates.io
+publication and no registry token is needed. The first release uses the
+manifest version if no release tag exists. Releases currently contain source
+archives and notes; compiled firmware binaries are not attached.
+
+### GitHub setup
+
+In **Settings → Actions → General**, allow GitHub Actions to create pull
+requests. For automatic checks on generated release PRs, add a fine-grained
+PAT as the repository secret `RELEASE_PLZ_TOKEN`, restricted to this repository
+with **Contents: read/write** and **Pull requests: read/write**. The token's
+owner must have write access. Otherwise the workflow falls back to
+`GITHUB_TOKEN`: it can open the PR, but GitHub will not automatically run its
+PR checks; manually close and reopen that PR to trigger checks before merging.
+See the [release-plz token documentation](https://release-plz.dev/docs/github/token).
+
+The release workflow runs only on `darti/theopod`'s `main` branch, including
+manual dispatch. Audit also runs on PRs and every Monday. A security failure
+blocks both release publication and release PR updates until addressed.
+
+For local previews and the same security check:
+
+```sh
+cargo +stable install git-cliff cargo-audit --locked
+just changelog
+just security-audit
+```
+
+`just audit` continues to run cargo-deny for advisories, licenses and sources.
+See [ADR-0013](docs/adr/0013-automate-github-firmware-releases.md).
+
 ## License
 
 The source code is licensed under either of

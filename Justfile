@@ -132,6 +132,14 @@ miri:
 audit:
     RUSTUP_TOOLCHAIN=stable cargo deny check advisories licenses sources
 
+# Run the same RustSec security gate as the release workflow.
+security-audit:
+    RUSTUP_TOOLCHAIN=stable cargo audit --file Cargo.lock
+
+# Preview unreleased notes; release-plz owns the versioned CHANGELOG.md.
+changelog:
+    git-cliff --config cliff.toml --unreleased
+
 fmt:
     cargo fmt --all
 

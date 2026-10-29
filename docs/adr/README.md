@@ -14,3 +14,4 @@
 | [0010](0010-microsd-over-sdmmc.md) | Use the onboard microSD over SPI | Accepted |
 | [0011](0011-adapt-ekv-to-sector-storage-with-copy-on-write-pages.md) | Adapt EKV to sector storage with copy-on-write pages | FAT backing direction superseded by ADR-0012 |
 | [0012](0012-use-the-safe-littlefs-rust-api.md) | Use the safe littlefs-rust API for SD files | Implemented; hardware validation pending |
+| [0013](0013-automate-github-firmware-releases.md) | Automate GitHub firmware releases | Accepted |

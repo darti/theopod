@@ -1,0 +1,40 @@
+[workspace]
+git_only = true
+release_always = false
+semver_check = false
+dependencies_update = false
+changelog_config = "cliff.toml"
+pr_name = "chore(release): release v{{ version }}"
+# All components use the firmware tag as their release baseline. Only the root
+# creates that tag and release; processing children is needed for change detection.
+git_tag_name = "v{{ version }}"
+git_tag_enable = false
+git_release_enable = false
+changelog_update = false
+
+[[package]]
+name = "theo-pod"
+version_group = "firmware"
+git_tag_enable = true
+git_release_enable = true
+changelog_update = true
+git_release_name = "Theo Pod v{{ version }}"
+git_release_body = "{{ changelog }}"
+changelog_path = "CHANGELOG.md"
+changelog_include = ["theo-drivers", "theo-frame-dump", "theo-storage", "frame-png"]
+
+[[package]]
+name = "theo-drivers"
+version_group = "firmware"
+
+[[package]]
+name = "theo-frame-dump"
+version_group = "firmware"
+
+[[package]]
+name = "theo-storage"
+version_group = "firmware"
+
+[[package]]
+name = "frame-png"
+version_group = "firmware"

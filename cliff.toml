@@ -1,0 +1,41 @@
+[changelog]
+header = """
+# Changelog
+
+All notable changes to Theo Pod are documented here.
+Generated from Conventional Commits by git-cliff and release-plz.
+
+"""
+body = """
+{% if version %}\
+## [{{ version | trim_start_matches(pat="v") }}] - {{ timestamp | date(format="%Y-%m-%d") }}
+{% else %}\
+## [Unreleased]
+{% endif %}\
+{% for group, commits in commits | group_by(attribute="group") %}
+### {{ group | striptags | trim }}
+{% for commit in commits %}\
+- {% if commit.breaking %}**BREAKING** {% endif %}{% if commit.scope %}**{{ commit.scope }}:** {% endif %}{{ commit.message }} ([{{ commit.id | truncate(length=7, end="") }}](https://github.com/darti/theopod/commit/{{ commit.id }}))
+{% endfor %}\
+{% endfor %}
+"""
+trim = true
+
+[git]
+conventional_commits = true
+# Preserve older non-conventional commits in the initial release notes.
+filter_unconventional = false
+protect_breaking_commits = true
+commit_parsers = [
+  { message = "^feat", group = "<!-- 0 -->Features" },
+  { message = "^fix", group = "<!-- 1 -->Fixes" },
+  { message = "^perf", group = "<!-- 2 -->Performance" },
+  { message = "^refactor", group = "<!-- 3 -->Refactoring" },
+  { message = "^docs", group = "<!-- 4 -->Documentation" },
+  { message = "^test", group = "<!-- 5 -->Tests" },
+  { message = "^chore(\\([^)]*\\))?: release", skip = true },
+  { message = "^(build|ci|chore|style|revert)", group = "<!-- 6 -->Maintenance" },
+  { message = ".*", group = "<!-- 7 -->Other" },
+]
+tag_pattern = "^v[0-9]+\\.[0-9]+\\.[0-9]+.*$"
+sort_commits = "oldest"

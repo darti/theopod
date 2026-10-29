@@ -169,3 +169,74 @@ fn sync_state_pin_failure_returns_pin_error_and_keeps_state() {
     assert_that!(result.err()).is_equal_to(Some(ErrorKind::Other));
     assert_that!(button.is_pressed()).is_true();
 }
+
+// Regression (t-83): progress follows completed debounce samples.
+#[test]
+fn changed_progress_reports_sample_and_error() {
+    let mut button = button(&[HIGH, LOW]);
+    let mut checkpoints = 0;
+    assert_eq!(
+        block_on(button.changed_with_progress(|| checkpoints += 1)),
+        Ok(ButtonEvent::Pressed)
+    );
+    assert_eq!(checkpoints, 2);
+    let pin = ScriptedPin {
+        fail_when_exhausted: true,
+        ..ScriptedPin::new(&[])
+    };
+    let mut button =
+        DebouncedButton::new(pin, RecordingDelay::default(), PinState::Low, DEBOUNCE_MS);
+    assert!(block_on(button.changed_with_progress(|| checkpoints += 1)).is_err());
+    assert_eq!(checkpoints, 3);
+}
+
+// Regression (t-83): idle timer samples GPIO before reporting progress.
+#[test]
+fn changed_progress_idle_samples_level_then_preserves_debounce() {
+    let pin = ScriptedPin {
+        pend_wait: Some(0),
+        ..ScriptedPin::new(&[HIGH, LOW])
+    };
+    let mut button = DebouncedButton::new(pin, RecordingDelay::default(), PinState::Low, 400);
+    let mut checkpoints = 0;
+    assert_eq!(
+        block_on(button.changed_with_progress(|| checkpoints += 1)),
+        Ok(ButtonEvent::Pressed)
+    );
+    assert_eq!(checkpoints, 2);
+    assert_eq!(button.release().1.delays_ms, vec![250, 400]);
+}
+
+// Regression (t-83): even a debounce longer than the heartbeat is uninterrupted.
+#[test]
+fn changed_progress_does_not_interrupt_debounce() {
+    let mut button = DebouncedButton::new(
+        ScriptedPin::new(&[LOW]),
+        RecordingDelay::default(),
+        PinState::Low,
+        400,
+    );
+    let mut checkpoints = 0;
+    assert_eq!(
+        block_on(button.changed_with_progress(|| checkpoints += 1)),
+        Ok(ButtonEvent::Pressed)
+    );
+    assert_eq!(checkpoints, 1);
+    assert_eq!(button.release().1.delays_ms, vec![400]);
+}
+
+// Regression (t-83): polling an unfinished debounce is not progress.
+#[test]
+fn changed_progress_pending_debounce_does_not_checkpoint() {
+    let delay = RecordingDelay {
+        pend_next: true,
+        ..RecordingDelay::default()
+    };
+    let mut button = DebouncedButton::new(ScriptedPin::new(&[LOW]), delay, PinState::Low, 400);
+    let mut checkpoints = 0;
+    assert!(!poll_once(
+        button.changed_with_progress(|| checkpoints += 1)
+    ));
+    assert_eq!(checkpoints, 0);
+    assert!(!button.is_pressed());
+}

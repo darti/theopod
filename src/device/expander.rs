@@ -74,8 +74,11 @@ impl Touch {
     /// # Errors
     ///
     /// Returns the controller's error; see [`Cst820::changed`].
-    pub async fn changed(&mut self) -> Result<TouchEvent, TouchError> {
-        self.controller.changed().await
+    pub async fn changed_with_progress(
+        &mut self,
+        progress: impl FnMut(),
+    ) -> Result<TouchEvent, TouchError> {
+        self.controller.changed_with_progress(progress).await
     }
 
     /// Pulses the controller's reset and enables its interrupts again.

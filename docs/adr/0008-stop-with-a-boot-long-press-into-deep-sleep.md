@@ -103,3 +103,18 @@ leaves deep sleep.
   sleep current is not measured yet (t-59).
 - Plugging the board in still boots it directly; BOOT only matters once
   the firmware has stopped.
+
+## Revalidation (2026-10-29, t-93 / t-85)
+
+After sharing RTC counter access and the touch-then-rails parking sequence,
+MWDT0 retained display reboot count 1; the watchdog cap entered early deep
+sleep at count 3. Three automatic stops through the normal handshake woke
+with timer causes and RTC counts 1/2/3. A manual two-second BOOT hold and
+release entered deep sleep; a brief BOOT press woke with Ext1. The user
+confirmed screen off/on, touch and rotation. Normal firmware was restored.
+Evidence and limits: `docs/input-watchdog-validation.md`, serial logs
+`target/t93-watchdog.log`, `target/t93-watchdog-loop.log`,
+`target/t93-sleep.log`, `target/t93-normal.log`.
+
+Supply current is still unmeasured (t-59): the user has no instrument.
+The successful wake/stop checks do not substitute for that measurement.

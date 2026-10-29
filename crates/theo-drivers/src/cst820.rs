@@ -225,6 +225,22 @@ impl<I: I2c, P: Wait, D: DelayNs> Cst820<I, P, D> {
     /// [`TouchEvent::Cancelled`] at its last point, and the next touch
     /// starts with a press.
     pub async fn changed(&mut self) -> Result<TouchEvent, Error<I::Error, P::Error>> {
+        self.changed_with_progress(|| {}).await
+    }
+
+    /// Waits like [`Self::changed`], reporting each completed register read.
+    ///
+    /// Calls `progress` after successful reads, including idle and unmoved
+    /// reports, and after returned read errors. A pending I2C operation
+    /// never reports progress. Buffered cancellations do not read registers.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`Self::changed`].
+    pub async fn changed_with_progress(
+        &mut self,
+        mut progress: impl FnMut(),
+    ) -> Result<TouchEvent, Error<I::Error, P::Error>> {
         if let Some(point) = self.cancelled.take() {
             return Ok(TouchEvent::Cancelled(point));
         }
@@ -234,7 +250,9 @@ impl<I: I2c, P: Wait, D: DelayNs> Cst820<I, P, D> {
             } else {
                 self.wait_for_edge_or_probe().await?;
             }
-            let point = match self.read_point().await {
+            let result = self.read_point().await;
+            progress();
+            let point = match result {
                 Ok(point) => point,
                 Err(error) => {
                     self.cancelled = self.touched.take();

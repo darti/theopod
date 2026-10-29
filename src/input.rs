@@ -13,18 +13,46 @@
 //! [`TOUCH_PARK`]), then waits for the release and puts the chip in deep
 //! sleep.
 
+use core::cell::RefCell;
+
 use embassy_executor::Spawner;
 use embassy_futures::select::{Either, select};
 use embassy_sync::{
-    blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel, signal::Signal,
+    blocking_mutex::{Mutex, raw::CriticalSectionRawMutex},
+    channel::Channel,
+    signal::Signal,
 };
 use embassy_time::{Delay, Duration, Instant, Ticker, Timer, with_timeout};
 use theo_drivers::{
-    ButtonEvent, LongPressButton, LongPressEvent, OrientationDetector, Rotation, TouchEvent,
-    reset_due,
+    ButtonEvent, InputTask, InputWatch, LongPressButton, LongPressEvent, OrientationDetector,
+    Rotation, TouchEvent, reset_due,
 };
 
 use crate::device;
+
+/// Maximum interval without a completed input operation (t-83).
+pub const INPUT_STALE_MS: u64 = 3000;
+static INPUT_WATCH: Mutex<CriticalSectionRawMutex, RefCell<InputWatch>> =
+    Mutex::new(RefCell::new(InputWatch::new(INPUT_STALE_MS)));
+
+fn progress(task: InputTask) {
+    INPUT_WATCH.lock(|watch| {
+        watch
+            .borrow_mut()
+            .progress(task, Instant::now().as_millis())
+    });
+}
+
+/// Checks before feeding MWDT0; a failure remains latched until reboot.
+pub fn stalled_input() -> Option<InputTask> {
+    INPUT_WATCH.lock(|watch| watch.borrow_mut().check(Instant::now().as_millis()))
+}
+
+/// Gives inputs a fresh grace interval after an executor-blocking frame dump.
+#[cfg(feature = "frame-dump")]
+pub fn resume_after_dump() {
+    INPUT_WATCH.lock(|watch| watch.borrow_mut().rebase(Instant::now().as_millis()));
+}
 
 /// How long BOOT is held to stop the pod, from the debounced press.
 pub const LONG_PRESS_MS: u32 = 2000;
@@ -100,6 +128,15 @@ pub fn spawn(
     touch: device::Touch,
     imu: Option<device::Imu>,
 ) {
+    INPUT_WATCH.lock(|watch| {
+        let mut watch = watch.borrow_mut();
+        let now = Instant::now().as_millis();
+        watch.enable(InputTask::Button, now);
+        watch.enable(InputTask::Touch, now);
+        if imu.is_some() {
+            watch.enable(InputTask::Orientation, now);
+        }
+    });
     spawner.spawn(watch_button(button, deep_sleep).unwrap());
     spawner.spawn(watch_touch(touch).unwrap());
     if let Some(imu) = imu {
@@ -191,7 +228,12 @@ async fn watch_button(button: device::Button, deep_sleep: device::DeepSleep) {
     loop {
         #[cfg(feature = "sd-check")]
         let next = if device::diagnostic_sleep_requested() {
-            match select(button.next(), Timer::at(automatic_stop_at)).await {
+            match select(
+                button.next_with_progress(|| progress(InputTask::Button)),
+                Timer::at(automatic_stop_at),
+            )
+            .await
+            {
                 Either::First(next) => next,
                 Either::Second(()) => {
                     log::info!("SD check: requesting automatic deep sleep");
@@ -199,10 +241,14 @@ async fn watch_button(button: device::Button, deep_sleep: device::DeepSleep) {
                 }
             }
         } else {
-            button.next().await
+            button
+                .next_with_progress(|| progress(InputTask::Button))
+                .await
         };
         #[cfg(not(feature = "sd-check"))]
-        let next = button.next().await;
+        let next = button
+            .next_with_progress(|| progress(InputTask::Button))
+            .await;
         match next {
             // Never waits on the UI loop (t-54 review): a stalled loop with a
             // full queue would otherwise keep the long press from being seen.
@@ -221,6 +267,7 @@ async fn watch_button(button: device::Button, deep_sleep: device::DeepSleep) {
             Err(error) => log::error!("button read failed: {error:?}"),
         }
     }
+    INPUT_WATCH.lock(|watch| watch.borrow_mut().stop());
     // Bounded (t-54): a stalled UI loop, which may not even drain the
     // queue, must not keep the pod awake. The touch park below cuts the
     // panel rails anyway, so a panel left awake still goes dark.
@@ -270,7 +317,10 @@ async fn report_touches(touch: &mut device::Touch) -> ! {
     // Consecutive failed reads.
     let mut failures: u32 = 0;
     loop {
-        match touch.changed().await {
+        match touch
+            .changed_with_progress(|| progress(InputTask::Touch))
+            .await
+        {
             Ok(event) => {
                 // A cancellation follows the failure it reports.
                 if failures > 0 && !matches!(event, TouchEvent::Cancelled(_)) {
@@ -299,7 +349,12 @@ async fn report_touches(touch: &mut device::Touch) -> ! {
 async fn reset_touch(touch: &mut device::Touch) {
     let mut pause = TOUCH_RETRY;
     let mut attempts: u32 = 0;
-    while let Err(error) = touch.reset().await {
+    loop {
+        let result = touch.reset().await;
+        progress(InputTask::Touch);
+        let Err(error) = result else {
+            break;
+        };
         if attempts == 0 {
             log::error!("touch controller reset failed, retrying: {error}");
         }
@@ -344,7 +399,9 @@ async fn report_orientation(imu: &mut device::Imu) -> ! {
     let mut failures: u32 = 0;
     loop {
         ticker.next().await;
-        match imu.acceleration().await {
+        let sample = imu.acceleration().await;
+        progress(InputTask::Orientation);
+        match sample {
             Ok(sample) => {
                 if failures > 0 {
                     log::info!("IMU reads recovered after {failures} failures");

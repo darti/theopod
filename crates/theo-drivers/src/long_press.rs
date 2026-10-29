@@ -126,12 +126,37 @@ where
     /// (both live in the button and in [`LongPress`], which a failed read
     /// leaves alone).
     pub async fn next(&mut self) -> Result<LongPressEvent, P::Error> {
+        self.next_inner(None).await
+    }
+
+    /// Like [`Self::next`], with progress after button samples and errors,
+    /// including a level check every 250 ms while idle.
+    ///
+    /// # Errors
+    /// Returns the pin error, preserving the state and absolute deadline.
+    pub async fn next_with_progress(
+        &mut self,
+        mut progress: impl FnMut(),
+    ) -> Result<LongPressEvent, P::Error> {
+        self.next_inner(Some(&mut progress)).await
+    }
+
+    async fn next_inner(
+        &mut self,
+        mut progress: Option<&mut dyn FnMut()>,
+    ) -> Result<LongPressEvent, P::Error> {
         loop {
             let changed = match self.press.deadline_ms() {
                 Some(at) => {
                     let left = at.saturating_sub((self.now_ms)());
                     let left = u32::try_from(left).unwrap_or(u32::MAX);
-                    let mut changed = pin!(self.button.changed());
+                    let mut changed = pin!(
+                        self.button.changed_inner(
+                            progress
+                                .as_mut()
+                                .map(|callback| &mut **callback as &mut dyn FnMut())
+                        )
+                    );
                     let mut deadline = pin!(self.timer.delay_ms(left));
                     // The change is polled first: one that is ready wins a
                     // tie with the deadline. Both waits are cancel-safe.
@@ -150,7 +175,15 @@ where
                         }
                     }
                 }
-                None => self.button.changed().await,
+                None => {
+                    self.button
+                        .changed_inner(
+                            progress
+                                .as_mut()
+                                .map(|callback| &mut **callback as &mut dyn FnMut()),
+                        )
+                        .await
+                }
             };
             if let Some(event) = self.press.changed(changed?, (self.now_ms)()) {
                 return Ok(LongPressEvent::Changed(event));

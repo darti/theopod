@@ -617,3 +617,85 @@ fn hold_in_reset_failed_expander_still_cancels_touch_in_progress() {
     assert_that!(result).is_equal_to(Err(ErrorKind::Bus));
     assert_that!(cancelled).is_equal_to(Ok(TouchEvent::Cancelled(point(1, 2))));
 }
+
+// Regression (t-83): idle probes must prove progress without producing events.
+#[test]
+fn changed_with_progress_counts_idle_probes() {
+    let mut touch = silent_touch([FakeCst820::no_touch(), FakeCst820::touch(5, 6, 0)]);
+    let mut progress = 0;
+    let event = block_on(touch.changed_with_progress(|| progress += 1));
+    assert_eq!(event, Ok(TouchEvent::Pressed(point(5, 6))));
+    assert_eq!(progress, 2);
+}
+
+// Regression (t-83): a held stationary finger remains a live input task.
+#[test]
+fn changed_with_progress_counts_unmoved_finger() {
+    let mut touch = touch([
+        FakeCst820::touch(5, 6, 0),
+        FakeCst820::touch(5, 6, 2),
+        FakeCst820::touch(7, 6, 2),
+    ]);
+    block_on(touch.changed()).unwrap();
+    let mut progress = 0;
+    let event = block_on(touch.changed_with_progress(|| progress += 1));
+    assert_eq!(event, Ok(TouchEvent::Moved(point(7, 6))));
+    assert_eq!(progress, 2);
+}
+
+// Regression (t-83): returned errors prove progress, including invalid reports.
+#[test]
+fn changed_with_progress_counts_completed_read_errors() {
+    let mut touch = touch([Err(ErrorKind::Bus), Ok([2, 0, 0, 0, 0])]);
+    let mut progress = 0;
+    assert_eq!(
+        block_on(touch.changed_with_progress(|| progress += 1)),
+        Err(Error::Bus(ErrorKind::Bus))
+    );
+    assert_eq!(progress, 1);
+    assert!(matches!(
+        block_on(touch.changed_with_progress(|| progress += 1)),
+        Err(Error::InvalidReport { .. })
+    ));
+    assert_eq!(progress, 2);
+}
+
+struct PendingBus;
+
+impl ErrorType for PendingBus {
+    type Error = ErrorKind;
+}
+
+impl I2c for PendingBus {
+    async fn transaction(
+        &mut self,
+        _address: u8,
+        _operations: &mut [Operation<'_>],
+    ) -> Result<(), Self::Error> {
+        core::future::pending().await
+    }
+}
+
+// Regression (t-83): a pending bus read must never receive timer heartbeats.
+#[test]
+fn changed_with_progress_does_not_count_pending_read() {
+    use core::{
+        future::Future,
+        pin::pin,
+        task::{Context, Poll, Waker},
+    };
+    let mut touch = Cst820::new(
+        PendingBus,
+        ADDRESS,
+        EdgePin::default(),
+        RecordingDelay::default(),
+        SIZE,
+    );
+    let progress = std::cell::Cell::new(0);
+    let mut future = pin!(touch.changed_with_progress(|| progress.set(progress.get() + 1)));
+    let mut context = Context::from_waker(Waker::noop());
+    for _ in 0..10 {
+        assert_eq!(future.as_mut().poll(&mut context), Poll::Pending);
+        assert_eq!(progress.get(), 0);
+    }
+}

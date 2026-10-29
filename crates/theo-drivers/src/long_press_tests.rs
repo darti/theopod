@@ -316,3 +316,22 @@ fn next_after_held_drops_release_and_times_next_press_afresh() {
     // The second hold runs from the second press, at 2000 ms.
     assert_that!(clock.delays_ms()).is_equal_to(vec![HOLD_MS, HOLD_MS - 300]);
 }
+
+// Regression (t-83): progress preserves release-first ordering at the deadline.
+#[test]
+fn next_progress_release_at_deadline_wins() {
+    let clock = FakeClock::default();
+    let mut button = long_press_button(debounced(&[LOW, HIGH]), &clock);
+    let mut checkpoints = 0;
+    assert_eq!(
+        block_on(button.next_with_progress(|| checkpoints += 1)),
+        Ok(LongPressEvent::Changed(ButtonEvent::Pressed))
+    );
+    clock.advance(u64::from(HOLD_MS));
+    assert_eq!(
+        block_on(button.next_with_progress(|| checkpoints += 1)),
+        Ok(LongPressEvent::Changed(ButtonEvent::Released))
+    );
+    assert_eq!(checkpoints, 2);
+    assert!(clock.delays_ms().is_empty());
+}

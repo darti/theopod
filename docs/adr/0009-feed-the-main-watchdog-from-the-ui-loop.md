@@ -3,6 +3,7 @@
 - Status: Accepted
 - Date: 2026-10-16
 - Amended: 2026-10-16, why the start cause is logged late (t-67)
+- Amended: 2026-10-29, bounded input task progress before feeding (t-83)
 - Amended: 2026-10-17, watchdog reboots capped by a stop (t-66), I2C bus
   freed at every start (t-84), start cause logged after 500 ms (t-76)
 
@@ -92,8 +93,22 @@ holding.
 - Checked on the board (t-66): BOOT held through a MWDT0 reset does not
   re-sample the GPIO0 strapping pin; the chip boots the firmware
   (`SPI_FAST_FLASH_BOOT`), never download mode.
-- Negative: only the UI task and the executor are watched; a stuck input
-  task goes unnoticed (t-83), and nothing watches the stop once disarmed.
+- Extended 2026-10-29 (t-83): the UI feeds MWDT0 only while all enabled
+  input tasks have completed an operation within 3000 ms (inclusive stale
+  boundary). Button checks the actual GPIO at least every 250 ms at idle;
+  touch reports every completed read, including stationary/absent fingers
+  and errors; orientation reports every completed sample attempt. Touch
+  reset attempts report completion too. A pending I2C operation or shared
+  mutex never gets health from an independent timer. An absent IMU is not
+  enabled. The first stale input is logged once and latched until reboot;
+  late progress cannot resume feeding or clear watchdog reboot counters.
+  A long press suspends new checks before the bounded stop handshake;
+  the existing watchdog disarm and BOOT release behavior stays unchanged.
+  Known blocking frame dumps rebase the input timestamps after resume;
+  dumps are skipped after a latched fault. Detection takes 3 s plus at
+  most one UI pass; reset follows within 5 s of the last hardware feed,
+  not necessarily within 5 s of the original input stall.
+- Negative: nothing watches the stop once the watchdog is disarmed.
 - Neutral: a loop stalled for 5 s reboots the chip, stop or not. The
   `PANEL_SLEEP_TIMEOUT` path of ADR-0008 (the loop never reports the panel
   asleep, so it never disarms the watchdog) therefore ends in deep sleep

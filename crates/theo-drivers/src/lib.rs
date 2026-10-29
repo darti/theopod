@@ -123,3 +123,9 @@ pub use reset_count::{decode_resets, encode_resets};
 pub use retry::{FlushRetry, Retry, Transient, reset_due};
 pub use stale_watch::{StaleWatch, WatchAction};
 pub use tca9554::{Pin as ExpanderPin, Tca9554};
+
+#[cfg(test)]
+mod input_watch_tests;
+
+pub mod input_watch;
+pub use input_watch::{InputTask, InputWatch};

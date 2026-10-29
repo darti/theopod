@@ -3,6 +3,8 @@
 //! - [`DebouncedButton`]: waits for a debounced press or release.
 //! - [`ButtonEvent`]: what changed.
 
+use core::{future::poll_fn, pin::pin, task::Poll};
+
 use embedded_hal::digital::{InputPin, PinState};
 use embedded_hal_async::{delay::DelayNs, digital::Wait};
 
@@ -81,13 +83,68 @@ impl<P: InputPin + Wait, D: DelayNs> DebouncedButton<P, D> {
     ///
     /// Returns the pin error; the debounced state is kept.
     pub async fn changed(&mut self) -> Result<ButtonEvent, P::Error> {
+        self.changed_inner(None).await
+    }
+
+    /// Waits for a change while checking the actual level every 250 ms at rest.
+    /// Calls `progress` after completed samples and pin errors. Debounce runs
+    /// uninterrupted; a pending pin operation never counts as progress.
+    ///
+    /// # Errors
+    /// Returns the pin error, preserving the debounced state.
+    pub async fn changed_with_progress(
+        &mut self,
+        mut progress: impl FnMut(),
+    ) -> Result<ButtonEvent, P::Error> {
+        self.changed_inner(Some(&mut progress)).await
+    }
+
+    pub(crate) async fn changed_inner(
+        &mut self,
+        mut progress: Option<&mut dyn FnMut()>,
+    ) -> Result<ButtonEvent, P::Error> {
         loop {
-            match self.level_when(!self.pressed) {
-                PinState::High => self.pin.wait_for_high().await?,
-                PinState::Low => self.pin.wait_for_low().await?,
+            let level = self.level_when(!self.pressed);
+            let wait = async {
+                match level {
+                    PinState::High => self.pin.wait_for_high().await,
+                    PinState::Low => self.pin.wait_for_low().await,
+                }
+            };
+            let waited = if progress.is_some() {
+                let mut wait = pin!(wait);
+                let mut idle = pin!(self.delay.delay_ms(250));
+                poll_fn(|cx| {
+                    if let Poll::Ready(result) = wait.as_mut().poll(cx) {
+                        return Poll::Ready(Some(result));
+                    }
+                    idle.as_mut().poll(cx).map(|()| None)
+                })
+                .await
+            } else {
+                Some(wait.await)
+            };
+            if let Some(Err(error)) = waited {
+                if let Some(callback) = progress.as_mut() {
+                    callback();
+                }
+                return Err(error);
+            }
+            if waited.is_none() {
+                let sampled = self.read_pressed();
+                if let Some(callback) = progress.as_mut() {
+                    callback();
+                }
+                if sampled? == self.pressed {
+                    continue;
+                }
             }
             self.delay.delay_ms(self.debounce_ms).await;
-            let pressed = self.read_pressed()?;
+            let sampled = self.read_pressed();
+            if let Some(callback) = progress.as_mut() {
+                callback();
+            }
+            let pressed = sampled?;
             if pressed != self.pressed {
                 self.pressed = pressed;
                 return Ok(if pressed {

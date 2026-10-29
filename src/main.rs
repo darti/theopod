@@ -19,9 +19,10 @@
 //! firmware; that press never reaches Slint.
 //!
 //! Each wake-up of the loop dispatches every queued input event before the
-//! next frame, so a drag never trails the finger. Each pass also feeds the
-//! main watchdog ([`device::Watchdog`], ADR-0009), which reboots a loop that
-//! hangs; the third such reboot in a row stops the pod instead (t-66).
+//! next frame, so a drag never trails the finger. Each pass feeds the main
+//! watchdog only while the input tasks keep progressing (t-83, ADR-0009).
+//! A hung loop or input task reboots; the third watchdog reboot in a row
+//! stops the pod instead (t-66).
 
 #![no_std]
 #![no_main]
@@ -81,6 +82,12 @@ const FLUSH_TIMEOUT: Duration = Duration::from_millis(500);
 const _: () = assert!(
     MAX_IDLE.as_millis() + 2 * FLUSH_TIMEOUT.as_millis() <= device::WATCHDOG_TIMEOUT_MS / 2,
     "a UI loop pass must fit well within the watchdog timeout"
+);
+// A full touch queue waits for the UI to drain it. Normal bounded waits
+// must leave room for rendering below the input progress threshold (t-83).
+const _: () = assert!(
+    MAX_IDLE.as_millis() + FLUSH_TIMEOUT.as_millis() < input::INPUT_STALE_MS,
+    "touch queue backpressure must fit within the input progress grace interval"
 );
 /// Time since start-up after which the start cause is logged (t-51).
 ///
@@ -142,6 +149,7 @@ async fn main(spawner: Spawner) {
     let mut deferred_rotation: Option<Rotation> = None;
     let mut finger_down = false;
     let mut stop = false;
+    let mut input_failed = false;
     // Dump the first frame, then the frame after each BOOT press.
     #[cfg(feature = "frame-dump")]
     let mut dump_pending = true;
@@ -149,7 +157,14 @@ async fn main(spawner: Spawner) {
         // Every pass ends within a few seconds (bounded waits, flushes and
         // sleep-in), so a missed feed means the loop or the executor hung.
         // Fed even once `DisplayWatch` gave up: the loop still runs then.
-        watchdog.feed();
+        if let Some(task) = input::stalled_input() {
+            if !input_failed {
+                log::error!("input task {task:?} stopped progressing: waiting for watchdog reset");
+                input_failed = true;
+            }
+        } else {
+            watchdog.feed();
+        }
         let frame_start = Instant::now();
         slint::platform::update_timers_and_animations();
         let mut dirty = FrameRows::new(size.1);
@@ -209,7 +224,11 @@ async fn main(spawner: Spawner) {
                     if dump_pending {
                         dump_pending = false;
                         // Seconds on the serial port: past the watchdog.
-                        watchdog.paused(|| device::dump_frame(size, display.frame()));
+                        // Never grant a new watchdog interval after a latched input failure.
+                        if !input_failed {
+                            watchdog.paused(|| device::dump_frame(size, display.frame()));
+                            input::resume_after_dump();
+                        }
                     }
                 }
                 Ok(Err(error)) => {
@@ -245,7 +264,9 @@ async fn main(spawner: Spawner) {
         }
         // The loop got this far for a while: past watchdog reboots were
         // not a hang that comes back at every boot (t-66).
-        device::clear_watchdog_resets_if_healthy(frame_start.as_millis());
+        if !input_failed && input::stalled_input().is_none() {
+            device::clear_watchdog_resets_if_healthy(frame_start.as_millis());
+        }
 
         let wake_up = Timer::at(next_wake_up(&window, frame_start, resend_at));
         let mut on_button = |message| match message {

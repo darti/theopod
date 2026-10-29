@@ -47,3 +47,18 @@ Side-by-side `*_tests.rs` files use the fakes in `test_support/`
 (recording `FrameBus` and `Panel`, delays, one async I2C fake per chip).
 Hardware-only: QSPI phases and DMA of `src/device/` (their arithmetic is
 `dma_layout.rs`), CST820 timing, and the IMU axis map.
+
+## Input progress (t-83)
+
+`input_watch.rs` tracks the button, touch and optional orientation task with
+caller-provided millisecond timestamps. `InputWatch` latches the first stale
+task; stopping suspends new checks, and diagnostic rebasing never clears a
+latched fault. It owns no clock or synchronization.
+
+`DebouncedButton::changed_with_progress` probes the GPIO every 250 ms when
+idle without interrupting debounce. `LongPressButton::next_with_progress`
+keeps absolute hold deadlines. `Cst820::changed_with_progress` reports each
+completed register read, including errors and unchanged points. Original
+methods remain compatible wrappers; callbacks are synchronous, with no HAL,
+executor or logging dependency. Firmware checkpoints follow sensor/reset
+completion, never a timer raced alongside a pending bus operation.

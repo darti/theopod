@@ -44,6 +44,24 @@ pub const SECTOR_SIZE: usize = 512;
 pub const BLOCK_SIZE: u32 = 4096;
 const SECTORS_PER_BLOCK: u32 = BLOCK_SIZE / SECTOR_SIZE as u32;
 
+/// Explicit provisioning only: a valid existing LittleFS is preserved. An I/O
+/// failure never becomes permission to format. Normal boot must use mount.
+pub fn provision_once<S: Storage>(
+    storage: S,
+    geometry: Geometry,
+) -> Result<(Filesystem<S>, bool), Error> {
+    match Filesystem::mount(storage, geometry.config()) {
+        Ok(fs) => Ok((fs, false)),
+        Err((Error::Corrupt, mut storage)) => {
+            Filesystem::format(&mut storage, &geometry.config())?;
+            Filesystem::mount(storage, geometry.config())
+                .map(|fs| (fs, true))
+                .map_err(|(error, _)| error)
+        }
+        Err((error, _)) => Err(error),
+    }
+}
+
 #[derive(Clone, Copy)]
 pub struct Geometry {
     blocks: u32,

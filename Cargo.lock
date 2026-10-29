@@ -5329,6 +5329,7 @@ version = "0.1.0"
 dependencies = [
  "critical-section",
  "ekv",
+ "embassy-futures",
  "embassy-sync 0.6.2",
  "embassy-sync 0.8.0",
  "futures",

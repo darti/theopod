@@ -92,6 +92,27 @@ fn failed_mount_does_not_format_existing_media() {
     assert_eq!(disk.0.borrow().bytes, before);
 }
 
+// Regression (t-103): explicit provisioning preserves an existing LittleFS volume.
+#[test]
+fn provision_once_preserves_existing_files_and_refuses_io_errors() {
+    use crate::littlefs::provision_once;
+    let disk = Disk::new();
+    let geometry = Geometry::new(512).unwrap();
+    let (fs, formatted) = provision_once(disk.adapter(), geometry).ok().unwrap();
+    assert!(formatted);
+    fs.write_file("/keep", b"existing").unwrap();
+    drop(fs.unmount().unwrap());
+    let writes = disk.0.borrow().writes;
+    let (fs, formatted) = provision_once(disk.adapter(), geometry).ok().unwrap();
+    assert!(!formatted);
+    assert_eq!(fs.read_to_vec("/keep").unwrap(), b"existing");
+    assert_eq!(disk.0.borrow().writes, writes);
+    drop(fs.unmount().unwrap());
+    disk.0.borrow_mut().fail = true;
+    assert!(provision_once(disk.adapter(), geometry).is_err());
+    assert_eq!(disk.0.borrow().writes, writes);
+}
+
 // Regression (t-100): log append reopen and rotation preserve bytes.
 #[test]
 fn log_append_reopen_and_rotation_preserve_bytes() {

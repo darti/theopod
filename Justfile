@@ -27,6 +27,7 @@ lint:
     LIBCLANG_PATH="{{libclang_path}}" PATH="{{gcc_path}}:${PATH}" RUSTUP_TOOLCHAIN=esp cargo clippy --features watchdog-loop -- -D warnings
     LIBCLANG_PATH="{{libclang_path}}" PATH="{{gcc_path}}:${PATH}" RUSTUP_TOOLCHAIN=esp cargo clippy --features sleep-check -- -D warnings
     LIBCLANG_PATH="{{libclang_path}}" PATH="{{gcc_path}}:${PATH}" RUSTUP_TOOLCHAIN=esp cargo clippy --features sd-check -- -D warnings
+    LIBCLANG_PATH="{{libclang_path}}" PATH="{{gcc_path}}:${PATH}" RUSTUP_TOOLCHAIN=esp cargo clippy --features sd-provision -- -D warnings
     RUSTUP_TOOLCHAIN=stable cargo clippy -p theo-drivers -p theo-frame-dump -p theo-storage -p frame-png --target {{host_target}} --all-targets --features theo-storage/legacy-fat -- -D warnings
 
 build:
@@ -145,3 +146,7 @@ fmt:
 
 clean:
     cargo clean
+
+# Explicitly provision the SD card inside the board, preserving an existing LittleFS.
+sd-provision log="target/sd-provision.log" port="":
+    THEO_SD_PROVISION=format ESP_LOG=info LIBCLANG_PATH="{{libclang_path}}" PATH="{{gcc_path}}:${PATH}" RUSTUP_TOOLCHAIN=esp cargo espflash flash --release --features sd-provision --monitor --non-interactive --chip {{chip}} {{ if port != "" { "--port " + port } else { "" } }} | tee {{quote(log)}}

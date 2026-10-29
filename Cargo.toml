@@ -80,6 +80,8 @@ theo-storage.workspace = true
 theo-frame-dump = { workspace = true, optional = true }
 
 [features]
+# Explicit one-time provisioning build only; never enabled by normal flash.
+sd-provision = []
 sd-check = ["sleep-check"]
 # Prints the framebuffer to the serial log after the first frame and after
 # each BOOT press; `just frame-png` turns the log into a PNG.

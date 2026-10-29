@@ -73,6 +73,35 @@ pub struct SectorClient<'a> {
     bus: &'a SectorBus,
 }
 impl SectorClient<'_> {
+    /// For a dedicated synchronous core only. Poll the supplied clock instead
+    /// of registering embassy_time::Timer with block_on's non-Embassy waker.
+    /// Dropping the timed-out exchange still poisons the session.
+    pub fn exchange_blocking(
+        &mut self,
+        request: Request,
+        mut expired: impl FnMut() -> bool,
+    ) -> Result<[u8; 512], Error> {
+        use core::{
+            future::{Future, poll_fn},
+            pin::pin,
+            task::Poll,
+        };
+        let result = {
+            let mut exchange = pin!(self.exchange(request));
+            embassy_futures::block_on(poll_fn(|cx| {
+                if expired() {
+                    Poll::Ready(Err(Error::Io))
+                } else {
+                    exchange.as_mut().poll(cx)
+                }
+            }))
+        };
+        if result.is_err() {
+            self.bus.disable();
+        }
+        result
+    }
+
     pub async fn exchange(&mut self, request: Request) -> Result<[u8; 512], Error> {
         let guard = RequestGuard::begin(self.bus.poison_flag())?;
         self.bus.requests.send(request).await;

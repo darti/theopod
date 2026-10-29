@@ -4,7 +4,6 @@
 
 use alloc::{rc::Rc, vec::Vec};
 use core::cell::Cell;
-use embassy_futures::block_on;
 use embassy_sync::{
     blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel, signal::Signal,
 };
@@ -184,23 +183,13 @@ impl CardIo {
         let deadline = self.deadline.get();
         // Core 0's executor runs the async SD/I2C service while this core
         // waits. Its channels carry owned buffers only.
-        match block_on(with_deadline(
-            deadline,
-            self.client.exchange(SectorRequest {
+        self.client.exchange_blocking(
+            SectorRequest {
                 operation,
                 deadline_ticks: deadline.as_ticks(),
-            }),
-        )) {
-            Ok(Ok(bytes)) => Ok(bytes),
-            Ok(Err(error)) => {
-                SECTORS.disable();
-                Err(error)
-            }
-            Err(_) => {
-                SECTORS.disable();
-                Err(Error::Io)
-            }
-        }
+            },
+            || SECTORS.is_disabled() || Instant::now() >= deadline,
+        )
     }
 }
 
@@ -236,7 +225,7 @@ async fn worker(geometry: Geometry) {
         } else {
             match request.command {
                 Command::Mount => match card.take() {
-                    Some(card) => match Filesystem::mount(card, geometry.config()) {
+                    Some(card) => match mount_card(card, geometry) {
                         Ok(fs) => {
                             volume = Some(fs);
                             Ok(Reply::Done)
@@ -322,4 +311,27 @@ pub async fn test_rotation(storage: &mut SdStorage) -> Result<(), Error> {
         "INFO - SD rotation check passed: active=4096 archive=131072 (isolated sdtest files retained)"
     );
     Ok(())
+}
+
+fn mount_card(
+    card: SectorStorage<CardIo>,
+    geometry: Geometry,
+) -> Result<Filesystem<SectorStorage<CardIo>>, (Error, ())> {
+    #[cfg(feature = "sd-provision")]
+    if option_env!("THEO_SD_PROVISION") == Some("format") {
+        return littlefs::provision_once(card, geometry)
+            .map(|(fs, formatted)| {
+                esp_println::println!(
+                    "INFO - microSD provisioning: {}",
+                    if formatted {
+                        "formatted LittleFS"
+                    } else {
+                        "existing LittleFS preserved"
+                    }
+                );
+                fs
+            })
+            .map_err(|error| (error, ()));
+    }
+    Filesystem::mount(card, geometry.config()).map_err(|(error, _)| (error, ()))
 }

@@ -1,6 +1,6 @@
 # ADR-0012: Use the safe littlefs-rust API for SD files
 
-- Status: Implemented; host/build validation passed, hardware validation pending.
+- Status: Implemented; initial board format/mount/reopen verified, full hardware matrix pending.
 - Date: 2026-10-29
 - Supersedes: the FAT filesystem selection in ADR-0010 and the FAT backing-file direction in ADR-0011. The legacy FAT file adapter remains available behind theo-storage/legacy-fat for host tests.
 
@@ -94,3 +94,17 @@ only on a temporary 4 MiB image. The board has not been flashed or formatted.
 Oku t-99 tracks this migration; implementation subtasks stay open until merge
 into main. Board tests and the pending upstream aliasing fix remain separate
 follow-ups.
+
+## Hardware follow-up (t-103)
+
+Explicit user-authorized provisioning and normal firmware restoration succeeded
+on 2026-10-29. The first real bring-up exposed an Embassy timer/waker mismatch
+in the synchronous callback: its blocking wait now polls the deadline clock
+without registering a timer. Core 0 retains normal Embassy timeouts.
+
+`just sd-provision` requires both a dedicated feature and compile-time
+`THEO_SD_PROVISION=format`. Existing mountable LittleFS volumes are preserved;
+I/O failures never trigger format. The normal flashed firmware has no
+provisioning enabled. It remounted the card, read 1458 prior log bytes and
+synced new records; the UI reached its healthy watchdog checkpoint.
+See docs/sd-validation.md for captures and remaining physical tests.

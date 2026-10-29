@@ -125,6 +125,18 @@ starting at byte zero. Use its exact capacity in 512-byte sectors:
 just sd-format /dev/rdiskN EXACT_SECTOR_COUNT
 ```
 
+When the card stays inside the board, use the explicit provisioning firmware:
+
+```sh
+just sd-provision target/sd-provision.log /dev/cu.usbmodem101
+# After "formatted LittleFS", stop the monitor and restore normal firmware:
+just flash-log target/serial.log /dev/cu.usbmodem101
+```
+
+Provisioning requires both its dedicated feature and `THEO_SD_PROVISION=format`,
+set only by that recipe. It preserves an already mountable LittleFS and refuses
+to format after an I/O error. Normal firmware never formats the card.
+
 For an existing sized image, `just sd-format /path/card.img` derives capacity
 from the file length. Both firmware and formatter use 4096-byte blocks,
 512-byte reads/programs, a 4096-byte cache and 128-byte allocator lookahead.

@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 littlefs-rust.workspace = true
 embassy-sync.workspace = true
+embassy-futures.workspace = true
 ekv.workspace = true
 hadris-fat = { workspace = true, optional = true }
 hadris-fs = { workspace = true, optional = true }

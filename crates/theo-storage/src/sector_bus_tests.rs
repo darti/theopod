@@ -14,6 +14,40 @@ use futures::{executor::block_on, task::noop_waker_ref};
 use littlefs_rust::{Error, Filesystem};
 
 struct Proxy(SectorClient<'static>);
+
+// Regression (t-103): synchronous core callbacks must not register an Embassy timer.
+#[test]
+fn blocking_sector_deadline_cancels_the_inflight_exchange() {
+    let bus = SectorBus::new();
+    let mut client = bus.take_client().unwrap();
+    let mut polls = 0;
+    let result = client.exchange_blocking(
+        Request {
+            operation: Operation::Read(0),
+            deadline_ticks: 1,
+        },
+        || {
+            polls += 1;
+            polls >= 3
+        },
+    );
+    assert_eq!(result, Err(Error::Io));
+    assert!(bus.is_disabled());
+    assert_eq!(polls, 3);
+    let bus = SectorBus::new();
+    let mut client = bus.take_client().unwrap();
+    assert_eq!(
+        client.exchange_blocking(
+            Request {
+                operation: Operation::Sync,
+                deadline_ticks: 0
+            },
+            || true
+        ),
+        Err(Error::Io)
+    );
+    assert!(bus.is_disabled());
+}
 impl Proxy {
     fn call(&mut self, operation: Operation) -> Result<[u8; 512], Error> {
         block_on(self.0.exchange(Request {

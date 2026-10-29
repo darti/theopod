@@ -1,0 +1,47 @@
+running 43 tests
+test webpki::algorithms::tests::rsa_key_that_does_not_parse_is_rejected ... ok
+test webpki::cert_verifier_tests::not_before_reads_a_certificate_with_and_without_the_version ... ok
+test webpki::cert_verifier_tests::host_name_that_is_not_a_dns_name_or_ip_address_is_refused_before_the_handshake ... ok
+test webpki::cert_verifier_tests::a_missing_server_name_is_reported_before_a_bad_chain ... ok
+test webpki::cert_verifier_tests::a_certificate_is_refused_when_no_server_name_is_set ... ok
+test webpki::cert_verifier_tests::ed25519::server_cert_with_a_changed_ed25519_signature_is_rejected ... ok
+test webpki::cert_verifier_tests::ed25519::server_cert_signed_with_ed25519_is_accepted ... ok
+test webpki::cert_verifier_tests::not_before_reads_utc_time_and_generalized_time ... ok
+test webpki::cert_verifier_tests::ed25519::certificate_verify_with_ed25519_is_accepted ... ok
+test webpki::cert_verifier_tests::p256::chain_that_does_not_reach_the_ca_is_rejected ... ok
+test webpki::cert_verifier_tests::p256::certificate_verify_claiming_rsa_for_an_ecdsa_key_is_rejected ... ok
+test webpki::cert_verifier_tests::p256::chain_with_the_intermediate_first_is_rejected ... ok
+test webpki::cert_verifier_tests::p256::expired_server_cert_is_rejected ... ok
+test webpki::cert_verifier_tests::p256::expired_server_cert_is_accepted_by_any_clock_without_the_time ... ok
+test webpki::cert_verifier_tests::p256::expired_server_cert_is_accepted_when_dates_are_ignored ... ok
+test webpki::cert_verifier_tests::p256::chain_whose_validity_periods_do_not_overlap_is_rejected_when_dates_are_ignored ... ok
+test webpki::cert_verifier_tests::p256::certificate_verify_with_a_wrong_signature_is_rejected ... ok
+test webpki::cert_verifier_tests::p256::certificate_verify_with_p256_is_accepted ... ok
+test webpki::cert_verifier_tests::p256::server_cert_signed_with_p256_and_sha384_is_rejected ... ok
+test webpki::cert_verifier_tests::p256::not_yet_valid_server_cert_is_accepted_when_dates_are_ignored ... ok
+test webpki::cert_verifier_tests::p256::server_cert_for_another_name_is_rejected ... ok
+test webpki::cert_verifier_tests::p256::ignoring_dates_keeps_the_name_check ... ok
+test webpki::cert_verifier_tests::p384::server_cert_signed_with_p384_and_sha256_is_rejected ... ok
+test webpki::cert_verifier_tests::p256::cert_size_needs_to_hold_only_the_server_certificate ... ok
+test webpki::cert_verifier_tests::p256::server_cert_signed_by_the_ca_is_accepted ... ok
+test webpki::cert_verifier_tests::p256::server_cert_and_intermediate_are_accepted ... ok
+test webpki::cert_verifier_tests::p256::intermediate_issued_after_the_server_cert_is_accepted_when_dates_are_ignored ... ok
+test webpki::cert_verifier_tests::raw_public_key_among_the_intermediates_is_rejected ... ok
+test webpki::cert_verifier_tests::p384::server_cert_signed_with_p384_and_sha384_is_accepted ... ok
+test webpki::cert_verifier_tests::p384::server_cert_with_a_changed_p384_signature_is_rejected ... ok
+test webpki::cert_verifier_tests::raw_public_key_as_the_server_certificate_is_rejected ... ok
+test webpki::cert_verifier_tests::rsa::a_server_certificate_larger_than_cert_size_is_refused ... ok
+test webpki::cert_verifier_tests::p256::an_ip_address_server_name_is_checked_against_the_certificate ... ok
+test webpki::cert_verifier_tests::server_cert_whose_dates_cannot_be_read_is_rejected_when_dates_are_ignored ... ok
+test webpki::cert_verifier_tests::p384::certificate_verify_with_p384_is_accepted ... ok
+test webpki::cert_verifier_tests::rsa::certificate_verify_with_rsa_pkcs1_is_rejected ... ok
+test webpki::cert_verifier_tests::rsa::server_cert_signed_with_rsa_is_accepted ... ok
+test webpki::cert_verifier_tests::rsa::server_cert_with_a_changed_rsa_signature_is_rejected ... ok
+test webpki::cert_verifier_tests::rsa::certificate_verify_with_a_1024_bit_rsa_key_is_rejected ... ok
+test webpki::cert_verifier_tests::rsa::certificate_verify_claiming_another_hash_than_it_used_is_rejected ... ok
+test webpki::cert_verifier_tests::rsa::certificate_verify_with_rsa_pss_and_sha256_is_accepted ... ok
+test webpki::cert_verifier_tests::rsa::certificate_verify_with_rsa_pss_and_sha384_is_accepted ... ok
+test webpki::cert_verifier_tests::rsa::certificate_verify_with_rsa_pss_and_sha512_is_accepted ... ok
+
+test result: ok. 43 passed; 0 failed; 0 ignored; 0 measured; 50 filtered out; finished in 0.06s
+

@@ -1,0 +1,16 @@
+HTTP/2 206 
+accept-ranges: bytes
+content-type: audio/mp4
+etag: "820876596acd1d5f907c62f322010c6a:1787677707.892406"
+last-modified: Tue, 25 Aug 2026 17:08:27 GMT
+server: AkamaiNetStorage
+date: Thu, 29 Oct 2026 17:30:06 GMT
+content-range: bytes 0-1023/56678816
+content-length: 1024
+access-control-max-age: 600
+access-control-allow-methods: GET
+access-control-allow-headers: *
+access-control-allow-credentials: false
+access-control-allow-origin: *
+cache-control: public, max-age=2592000
+

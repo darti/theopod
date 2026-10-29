@@ -3,3 +3,6 @@
 .DS_Store
 CLAUDE.local.md
 __pycache__/
+
+# Local Wi-Fi setup input; never part of a distributable release.
+/config/wifi.local.toml

@@ -1,19 +1,20 @@
 # Radio France Offline Podcasts Implementation Plan
 
-> Oku: t-105, with stages t-106 through t-110. Feasibility remains in progress.
-> Storage update: ADR-0012 and t-99 replace the FAT runtime assumptions below
-> with LittleFS on core 1 and a core-0 async sector service. Revise dependent
-> database/download interfaces before continuing this plan. No tasks are closed
-> before their corresponding changes merge into main.
-
+> Oku: t-105, stages t-106–t-110. **t-106 outcome: negative persistence gate.**
+> Original EKV 1.0.0 loses committed keys during metadata rollover even through PageStore.
+> t-116 now supplies a reviewed local correction, retained recovery tests, checked
+> region descriptors and explicit allocator support (ADR-0015). The remaining
+> shared-owner runtime and combined memory/latency gate is still incomplete. Live complete feeds
+> and a verified TLS candidate are now evidenced in docs/radio-france-feasibility.md.
+> No tasks close before their corresponding changes merge into main.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Download the complete available history of followed Radio France podcasts, synchronize metadata changes, and recycle read audio only when space is needed.
 
-**Architecture:** A host-testable no_std podcast crate owns catalogue and download rules. One firmware storage service owns the existing FAT mount, database and audio files; background network tasks access it through bounded requests. Radio France rules remain isolated for future providers, without implementing generic feed support now.
+**Architecture:** A host-testable no_std podcast crate owns catalogue and download rules. One firmware storage service owns LittleFS and any future separately bounded database region; background network tasks access it through bounded requests. Radio France rules remain isolated for future providers, without implementing generic feed support now.
 
-**Tech Stack:** Rust no_std, ESP32-S3, Embassy, existing hadris-fat async FAT32 stack; database and HTTPS dependencies selected by compatibility experiments in Task 1.
+**Tech Stack:** Rust no_std, ESP32-S3, Embassy, littlefs-rust on core 1 with the core-0 async sector service (ADR-0012); database and HTTPS dependencies selected by compatibility experiments in Task 1.
 
 **Spec:** `docs/superpowers/specs/2026-10-29-radio-france-design.md`
 
@@ -24,7 +25,7 @@
 - Follow imports all available history. Local state survives feed changes and audio recycling.
 - Read means reclaimable, not immediately unavailable. No scheduled purge or age threshold.
 - Recycle oldest eligible audio only for a download needing space; never unread or active audio.
-- Keep a single FAT owner, bounded memory and waits, responsive UI and existing sleep handshake.
+- Keep a single storage owner, bounded memory and waits, responsive UI and existing sleep handshake.
 - A failed/cancelled storage operation invalidates the mount until reboot; expected capacity exhaustion must be handled before writes where possible, with a full-write failure stopping storage safely.
 - No flash or serial monitoring without explicit user authorization.
 - Regression tests are side-by-side `*_tests.rs` with `Regression guard` comments.
@@ -39,13 +40,16 @@
 
 ## Delivery sequence
 
-Execution update (2026-10-29): the user authorized EKV and revising the SD
-transport. The copy-on-write PageStore and async FatPageFile are implemented
-and have host tests (ADR-0011). Database boot/service integration is not yet
-implemented. Task 1 remains in progress: live feed capture and a verified
-HTTPS dependency combination are still unresolved; see
-`docs/radio-france-feasibility.md`. Do not treat this storage deliverable as
-completion of Tasks 2–5.
+Execution update (2026-10-29): t-106 has a negative persistence outcome, not a
+working podcast backend. PageStore protects logical page replacements, but a
+metadata-rollover interruption still yields KeyNotFound after mount. t-116 must
+resolve this before later stages. A real two-page feed and verified TLS/HTTP
+adapter are retained; negative page numbers are no longer an all-history API.
+Original FAT directions below are historical implementation proposals only:
+ADR-0012 replaces them with LittleFS and the existing unique sector service.
+A large random-access LittleFS database file is unsuitable, and a raw database
+region is unallocated; design its versioned layout only after recovery is sound.
+No existing whole-card mount may be overwritten to implement that proposal.
 
 Storage feasibility, domain rules, feed reconciliation, downloads/recycling and
 firmware integration are sequential deliverables. Task 1 resolves dependencies
@@ -54,6 +58,11 @@ or HTTPS stack in the plan. If it fails, report the measured limitation and
 revise the affected tasks before implementation continues.
 
 ### Task 1: Prove database, transport and feed compatibility
+
+**Outcome:** stop condition exercised; see ADR-0014. The checkboxes below are
+the original positive-gate criteria, not a claim that every one passed. Successful
+feed/transport checks and the failing recovery case are recorded in the
+feasibility report. t-116 precedes resuming the remaining positive gate.
 
 **Files:** create `docs/radio-france-feasibility.md`; extend the approved spec with measured limits; add an ADR under the next free number in `docs/adr/` only after selection. Use disposable experiments outside the workspace for candidate APIs, without product scaffolding.
 
@@ -121,3 +130,22 @@ touch/display/logging, full-card reclamation, offline reboot, deep sleep during
 download and recovery after power loss. Host and compilation results do not
 establish board throughput or FAT power-loss integrity. Do not flash to obtain
 these results without a separate explicit request.
+
+## t-116 recovery investigation continuation
+
+See `docs/experiments/t116/README.md` for the isolated EKV 1.0.0 candidate:
+commit replacement metadata records before publishing its higher-sequence page
+header, and propagate rollover flash errors instead of panicking. This does not
+change the firmware dependency or lift Task 1's stop condition. Retain the
+expanded fault-injection result and revalidate broader histories, combined
+memory/latency and the separate database region before resuming Task 2.
+
+## t-116 source adoption
+
+The recovery correction is now adopted through `vendor/ekv` (same version,
+API and format), with side-by-side regressions and `just test-storage-recovery`.
+The original recovery stop reason is corrected; the overall t-106 positive
+runtime gate remains incomplete. `card_layout` validates a future immutable
+region descriptor without writing the card. PageStore's explicit allocator
+constructors compile with PSRAM on Xtensa. See ADR-0015 for measured sizes and
+remaining internal heap, shared-owner region I/O and latency requirements.

@@ -1,0 +1,25 @@
+--- a/src/file.rs
++++ b/src/file.rs
+@@ -699,7 +699,10 @@
+                     // Since we're writing a new page from scratch, no need to
+                     // write metas for empty files.
+                     if self.m.files[file_id as usize].last_page.is_some() {
+-                        self.write_file_meta(&mut w, file_id).await.unwrap();
++                        self.write_file_meta(&mut w, file_id).await.map_err(|e| match e {
++                            WriteError::Flash(e) => Error::Flash(e),
++                            WriteError::Full | WriteError::Corrupted => Error::Corrupted,
++                        })?;
+                     }
+                 }
+ 
+@@ -708,8 +711,9 @@
+                     page_count: self.m.page_count() as _,
+                     seq: self.m.meta_seq,
+                 };
++                // Publish the higher sequence only after its metadata chunk is durable.
++                w.commit(&mut self.m.flash).await?;
+                 w.write_header(&mut self.m.flash, h).await.map_err(Error::Flash)?;
+-                w.commit(&mut self.m.flash).await?;
+ 
+                 // free the old one.
+                 self.m.free_page(self.m.meta_page_id)?;

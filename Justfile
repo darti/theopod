@@ -150,3 +150,8 @@ clean:
 # Explicitly provision the SD card inside the board, preserving an existing LittleFS.
 sd-provision log="target/sd-provision.log" port="":
     THEO_SD_PROVISION=format ESP_LOG=info LIBCLANG_PATH="{{libclang_path}}" PATH="{{gcc_path}}:${PATH}" RUSTUP_TOOLCHAIN=esp cargo espflash flash --release --features sd-provision --monitor --non-interactive --chip {{chip}} {{ if port != "" { "--port " + port } else { "" } }} | tee {{quote(log)}}
+
+# Full engine recovery sweeps, including mixed histories and sector cancellation.
+# Release mode keeps the exhaustive model tests practical; no board access.
+test-storage-recovery:
+    RUSTUP_TOOLCHAIN=stable cargo test -p theo-storage --release --target {{host_target}} page_store_rollover_tests -- --include-ignored --nocapture

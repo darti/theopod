@@ -15,3 +15,5 @@
 | [0011](0011-adapt-ekv-to-sector-storage-with-copy-on-write-pages.md) | Adapt EKV to sector storage with copy-on-write pages | FAT backing direction superseded by ADR-0012 |
 | [0012](0012-use-the-safe-littlefs-rust-api.md) | Use the safe littlefs-rust API for SD files | Implemented; hardware validation pending |
 | [0013](0013-automate-github-firmware-releases.md) | Automate GitHub firmware releases | Accepted |
+| [0014](0014-gate-podcast-persistence-on-recovery.md) | Gate podcast persistence on interruption recovery | Recovery corrected by ADR-0015; integration gate remains |
+| [0015](0015-correct-ekv-publication-and-describe-sd-regions.md) | Correct EKV publication and describe checked SD regions | Local correction and descriptor API accepted; runtime integration pending |

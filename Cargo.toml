@@ -1,4 +1,5 @@
 [workspace]
+exclude = ["vendor/ekv"]
 members = ["crates/theo-drivers", "crates/theo-frame-dump", "crates/theo-storage", "tools/frame-png"]
 
 [workspace.package]
@@ -114,3 +115,7 @@ debug = 2
 [profile.dev]
 debug = 2
 opt-level = "s"
+
+# EKV 1.0.0 recovery correction; provenance and removal criteria in vendor/ekv/THEO-PATCH.md.
+[patch.crates-io]
+ekv = { path = "vendor/ekv" }

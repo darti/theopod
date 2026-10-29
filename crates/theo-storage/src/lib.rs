@@ -4,6 +4,7 @@
 
 extern crate alloc;
 
+pub mod card_layout;
 #[cfg(feature = "legacy-fat")]
 pub mod fat_page_file;
 pub mod littlefs;
@@ -203,3 +204,7 @@ pub fn sector_index(position: u64, blocks: u64, len: usize) -> Option<u32> {
     }
     u32::try_from(block).ok()
 }
+
+#[cfg(test)]
+#[path = "page_store_rollover_tests.rs"]
+mod page_store_rollover_tests;

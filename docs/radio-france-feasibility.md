@@ -1,11 +1,10 @@
 # Radio France implementation feasibility — t-106
 
-Current t-116 follow-up: the reviewed local EKV correction is adopted through
-`vendor/ekv`; broader history tests and the default publication guard are in
-`theo-storage`. Checked layout descriptors and explicit PSRAM allocator support
-are implemented without enabling firmware DB/networking. ADR-0015 supersedes
-the recovery defect as the stop reason; combined resource/runtime integration
-still needs validation. Earlier negative-gate evidence below is historical.
+Current update (2026-10-30): t-106's software compatibility gate is verified in
+ADR-0016 and `docs/experiments/t106-runtime/`. Corrected engine recovery, actual
+shared-owner/publication models, combined linked placement and verified feed/audio
+TLS permit host catalogue work. Earlier negative-gate evidence below remains
+historical. Firmware activation and physical validation are separate requirements.
 
 
 Date: 2026-10-29. **Decision: stop dependent podcast persistence work.** The
@@ -312,3 +311,17 @@ allocator and OOM fails before storage writes. Xtensa compilation proves
 `&esp_alloc::ExternalMemory` for both constructors. ADR-0015 documents exact
 regions, descriptor validation, measured fixed sizes and the unresolved
 internal-RAM/radio allocation issue. No DB region has been reserved on the card.
+
+## 2026-10-30 shared-owner and full-link continuation
+
+See ADR-0016 and the reproducible t106-runtime evidence for twelve passing
+shared-owner/publication tests, 1875 initialization fault cases, joined real
+engine/network candidate linkage and a bounded verified audio-CDN range request.
+The main future pool is23520 bytes and the remaining linker stack section120988;
+these are reservations, not measured runtime margins. Ordinary64KiB plus a
+separate reclaimed64KiB heap link successfully. The byte buffers/cache have
+143616 bytes of known PSRAM payload; the previous transport total also contains
+internal objects and must not be double-counted. Actual boot still has none of
+these experimental network/region changes. Host catalogue work may proceed;
+runtime wiring, trusted setup, queue/bounds/failure handling and device profiling
+remain separate required work before activation.

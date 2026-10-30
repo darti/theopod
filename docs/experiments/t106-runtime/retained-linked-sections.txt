@@ -1,0 +1,42 @@
+/tmp/theo-t106-retained-linked/base/target/xtensa-esp32s3-none-elf/release/theo-pod  :
+section                    size         addr
+.vectors                   1024   1077379072
+.rwtext                   14888   1077380096
+.rwtext.wifi              34644   1077394984
+.rwdata_dummy             50556   1070104576
+.data                     18892   1070155136
+.data.wifi                  492   1070174028
+.bss                     150820   1070174528
+.noinit                       0   1070325348
+.flash.appdesc              256   1006632992
+.rodata_merge                 0   1006633248
+.rodata                  286784   1006633248
+.rodata.wifi              33808   1006920032
+.rotext_dummy            327680   1107296288
+.text                   1315581   1107623968
+.rtc_fast.text                0   1611653120
+.rtc_fast.data                0   1611653120
+.rtc_fast.bss                 0   1611653120
+.rtc_fast.persistent         16   1611653120
+.rtc_slow.text                0   1342177280
+.rtc_slow.data                0   1342177280
+.rtc_slow.bss                 0   1342177280
+.rtc_slow.persistent          0   1342177280
+.stack                   120988   1070325348
+.dram2_uninit             65536   1070446336
+.espressif.metadata          21            0
+.comment                    311            0
+.debug_loc              3785816            0
+.debug_abbrev            179114            0
+.debug_info             7844575            0
+.debug_aranges            60592            0
+.debug_ranges            963584            0
+.debug_str              8146903            0
+.debug_frame             133772            0
+.debug_line             1820559            0
+.xtensa.info              10192            0
+.xt.lit                   29448            0
+.xt.prop                 458364            0
+Total                  25855216
+
+

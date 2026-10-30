@@ -59,3 +59,11 @@ checked region descriptors and explicit allocator support. These supersede the
 engine-recovery stop reason above. Runtime provisioning, shared-owner region I/O
 and combined memory/latency validation remain open; they are not implied by
 correcting the engine.
+
+## 2026-10-30 software feasibility follow-up
+
+ADR-0016 now verifies the remaining software compatibility questions through
+pinned disposable shared-owner/publication tests, a full linked candidate and
+verified audio TLS. Host catalogue implementation may proceed. The historical
+stop reasons above do not require an unrequested board connection before host
+work; production activation and physical validation remain separate requirements.

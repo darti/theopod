@@ -1,0 +1,20 @@
+depth=3 C=US, O=Internet Security Research Group, CN=ISRG Root X1
+depth=2 C=US, O=ISRG, CN=Root YR
+depth=1 C=US, O=Let's Encrypt, CN=YR1
+depth=0 CN=media.radiofrance-podcast.net
+ 0 s:CN=media.radiofrance-podcast.net
+   i:C=US, O=Let's Encrypt, CN=YR1
+   a:PKEY: RSA, 2048 (bit); sigalg: sha256WithRSAEncryption
+   v:NotBefore: Oct  6 12:54:18 2026 GMT; NotAfter: Jan  4 12:54:17 2027 GMT
+ 1 s:C=US, O=Let's Encrypt, CN=YR1
+   i:C=US, O=ISRG, CN=Root YR
+   a:PKEY: RSA, 2048 (bit); sigalg: sha256WithRSAEncryption
+   v:NotBefore: Sep  3 00:00:00 2025 GMT; NotAfter: Sep  2 23:59:59 2028 GMT
+ 2 s:C=US, O=ISRG, CN=Root YR
+   i:C=US, O=Internet Security Research Group, CN=ISRG Root X1
+   a:PKEY: RSA, 4096 (bit); sigalg: sha256WithRSAEncryption
+   v:NotBefore: May 13 00:00:00 2026 GMT; NotAfter: Sep  2 23:59:59 2032 GMT
+subject=CN=media.radiofrance-podcast.net
+issuer=C=US, O=Let's Encrypt, CN=YR1
+Verification: OK
+Verify return code: 0 (ok)

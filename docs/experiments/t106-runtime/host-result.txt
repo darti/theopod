@@ -1,0 +1,28 @@
+   Compiling theo-t106-runtime v0.0.0 (/tmp/theo-t106-runtime)
+    Finished `release` profile [optimized] target(s) in 2.16s
+     Running unittests src/lib.rs (/Volumes/narf-space/cargo-build/26/4778347d72a070/aarch64-apple-darwin/release/deps/theo_t106_runtime-22ffc7e2d477bc69)
+
+running 12 tests
+test regions_tests::error_on_one_region_disables_all_regions ... ok
+test regions_tests::cancelled_sector_future_disables_both_regions ... ok
+test regions_tests::async_sector_yields_only_after_releasing_the_shared_owner ... ok
+test regions_tests::late_database_completion_after_media_failure_is_rejected ... ok
+test regions_tests::deadline_hook_runs_before_every_sector_and_its_failure_poisons_session ... ok
+test regions_tests::image_preparation_rejects_existing_legacy_data_before_writing ... ok
+test regions_tests::legacy_mount_does_not_create_regions_or_write_descriptors ... ok
+test regions_tests::translates_disjoint_regions_and_rejects_out_of_bounds_before_io ... ok
+test regions_tests::explicit_image_preparation_publishes_both_real_engines_last ... ok
+preparation cancellation: 6 selected yield points out of 1203
+test regions_tests::cancelled_preparation_never_publishes_a_descriptor ... ok
+test regions_tests::actual_ekv_and_littlefs_share_one_device_and_reopen ... ok
+preparation publication: 625 write/sync boundaries x 3 persisted prefixes
+test regions_tests::every_preparation_write_and_sync_failure_keeps_unready_images_unpublished ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.06s
+
+   Doc-tests theo_t106_runtime
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

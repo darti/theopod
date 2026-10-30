@@ -1,0 +1,4 @@
+    Finished `release` profile [optimized] target(s) in 1.08s
+     Running `/tmp/theo-t106-cdn-host/target/aarch64-apple-darwin/release/theo-t106-probe`
+CDN case=0: Ok(Ok(1024))
+CDN case=1: Ok(Err(Tls(InvalidCertificate)))

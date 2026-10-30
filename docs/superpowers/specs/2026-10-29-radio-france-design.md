@@ -143,3 +143,14 @@ storage. Checked immutable region descriptors and explicit page-buffer
 allocation are implemented building blocks. Existing whole-card storage is
 unchanged. Combined memory/latency and runtime region integration remain part
 of t-106's positive gate; no hardware operation is authorized by this update.
+
+## 2026-10-30 software feasibility gate
+
+ADR-0016 records passing shared-owner/publication experiments, full linked
+placement and verified audio-CDN TLS in addition to the corrected engine and
+feed evidence. This permits the host catalogue stages of the approved design;
+it does not enable networking/database initialization on the existing card or
+claim runtime/hardware certification. The optional description cap is now1024
+UTF-8 bytes, so GUID256 + title512 + enclosure2048 + description1024 plus at
+most256 bytes overhead fits the4096-byte engine value limit. Caller-owned
+bounded record buffers allow the eventual service to select PSRAM allocation.

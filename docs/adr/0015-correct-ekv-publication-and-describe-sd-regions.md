@@ -139,3 +139,11 @@ sources) and `just build` pass. The explicit allocator constructors compile
 with `&esp_alloc::ExternalMemory` on Xtensa. A separate final read-only review
 found no actionable issue. No driver unsafe code changed, and no hardware
 operation was performed. Tasks remain open until merge into main.
+
+## 2026-10-30 software feasibility follow-up
+
+ADR-0016 now verifies the remaining software compatibility questions through
+pinned disposable shared-owner/publication tests, a full linked candidate and
+verified audio TLS. Host catalogue implementation may proceed. The historical
+stop reasons above do not require an unrequested board connection before host
+work; production activation and physical validation remain separate requirements.

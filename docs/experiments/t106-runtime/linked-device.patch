@@ -1,0 +1,20 @@
+--- a/src/device/mod.rs
++++ b/src/device/mod.rs
+@@ -29,6 +29,8 @@
+ //! implements [`theo_drivers::Panel`].
+ 
+ mod esp_qspi;
++#[path = "t106_probe.rs"]
++mod t106_probe;
+ mod expander;
+ mod i2c_bus;
+ mod logging;
+@@ -247,6 +249,8 @@
+         // stop itself waits for the expander, below (t-66).
+         let start = restart::count_watchdog_start();
+         esp_rtos::start(timg0.timer0, peripherals.FROM_CPU_INTR0);
++        // Link-only probe: never flash this disposable image.
++        if core::hint::black_box(false) { t106_probe::run(peripherals.WIFI).await; }
+ 
+         // I2C0: SCL on GPIO14, SDA on GPIO15 (Waveshare `pin_config.h`),
+         // freed first (t-84).

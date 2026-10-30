@@ -1,11 +1,10 @@
 # Radio France Offline Podcasts Implementation Plan
 
-> Oku: t-105, stages t-106–t-110. **t-106 outcome: negative persistence gate.**
-> Original EKV 1.0.0 loses committed keys during metadata rollover even through PageStore.
-> t-116 now supplies a reviewed local correction, retained recovery tests, checked
-> region descriptors and explicit allocator support (ADR-0015). The remaining
-> shared-owner runtime and combined memory/latency gate is still incomplete. Live complete feeds
-> and a verified TLS candidate are now evidenced in docs/radio-france-feasibility.md.
+> Oku: t-105, stages t-106–t-110. **t-106 software compatibility gate passed 2026-10-30** (ADR-0016).
+> Corrected engine recovery, shared-owner/publication model, full linked placement
+> and verified feed/audio TLS have retained evidence. Host catalogue work may
+> proceed. Production activation, bounds/scheduling and hardware validation remain
+> Task 5 / explicitly authorized follow-up work, not claims of these experiments.
 > No tasks close before their corresponding changes merge into main.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
@@ -59,7 +58,10 @@ revise the affected tasks before implementation continues.
 
 ### Task 1: Prove database, transport and feed compatibility
 
-**Outcome:** stop condition exercised; see ADR-0014. The checkboxes below are
+**Current outcome:** software feasibility verified (ADR-0016). The original
+negative outcome below is historical. Host Task 2 may proceed.
+
+**Original outcome:** stop condition exercised; see ADR-0014. The checkboxes below are
 the original positive-gate criteria, not a claim that every one passed. Successful
 feed/transport checks and the failing recovery case are recorded in the
 feasibility report. t-116 precedes resuming the remaining positive gate.
@@ -68,12 +70,12 @@ feasibility report. t-116 precedes resuming the remaining positive gate.
 
 **Interfaces:** produces a documented database adapter contract (`get`, `put`, bounded ordered scan, durable batch commit, reopen/recover), its exact Rust types and the selected engine; produces selected HTTPS adapter types and Radio France fixture provenance.
 
-- [ ] Read Aerion's current worker and source modules, record commit SHA, exact feed route and pagination behaviour. Retrieve a representative complete RSS and a small fixture; verify GUID, publication dates, enclosures, redirects, validators and content lengths. Save sanitized fixtures under `crates/theo-podcasts/fixtures/` when Task 2 creates the crate, with source/commit provenance.
-- [ ] Compare available embedded database engines using primary documentation and code. Reject engines requiring std, unavailable filesystem APIs or incompatible existing dependencies. Exercise an on-file database through an adapter resembling async FAT; measure memory and bounded I/O requirements. Determine whether bounded synchronous engine calls can safely run on the existing async executor without blocking it.
-- [ ] Prove insert/reopen, update/reopen, interrupted commit recovery, deletion and schema-version rejection on the host. Compile the chosen dependency and adapter for Xtensa using the ESP environment through a temporary just recipe. Record expected crash guarantees and remaining FAT power-loss limits.
-- [ ] Prove the Wi-Fi/DNS/TLS/HTTP dependency combination compiles with existing esp-hal/esp-rtos versions. Define credential provisioning (local ignored configuration), certificate roots, trusted time bootstrap and certificate failure behaviour. No actual board connection is required.
-- [ ] Record exact dependency versions, adapter signatures, queue/chunk/field limits, timeouts, storage reserve, sync trigger and retry schedule. Values must fit measured internal RAM/PSRAM constraints. Resolve missing HTTP features explicitly rather than assuming remote delta or range support.
-- [ ] If no engine/transport fits, stop dependent implementation and present evidence and alternatives. Otherwise add the architecture ADR and update this plan with verified signatures and limits before Task 2.
+- [x] Read Aerion's current worker and source modules, record commit SHA, exact feed route and pagination behaviour. Retrieve a representative complete RSS and a small fixture; verify GUID, publication dates, enclosures, redirects, validators and content lengths. Save sanitized fixtures under `crates/theo-podcasts/fixtures/` when Task 2 creates the crate, with source/commit provenance.
+- [x] Compare available embedded database engines using primary documentation and code. Reject engines requiring std, unavailable filesystem APIs or incompatible existing dependencies. Exercise an on-file database through an adapter resembling async FAT; measure memory and bounded I/O requirements. Determine whether bounded synchronous engine calls can safely run on the existing async executor without blocking it.
+- [x] Prove insert/reopen, update/reopen, interrupted commit recovery, deletion and schema-version rejection on the host. Compile the chosen dependency and adapter for Xtensa using the ESP environment through a temporary just recipe. Record expected crash guarantees and remaining FAT power-loss limits.
+- [x] Prove the Wi-Fi/DNS/TLS/HTTP dependency combination compiles with existing esp-hal/esp-rtos versions. Define credential provisioning (local ignored configuration), certificate roots, trusted time bootstrap and certificate failure behaviour. No actual board connection is required.
+- [x] Record exact dependency versions, adapter signatures, queue/chunk/field limits, timeouts, storage reserve, sync trigger and retry schedule. Values must fit measured internal RAM/PSRAM constraints. Resolve missing HTTP features explicitly rather than assuming remote delta or range support.
+- [x] If no engine/transport fits, stop dependent implementation and present evidence and alternatives. Otherwise add the architecture ADR and update this plan with verified signatures and limits before Task 2.
 
 ### Task 2: Implement persistent episode lifecycle rules
 
@@ -149,3 +151,22 @@ runtime gate remains incomplete. `card_layout` validates a future immutable
 region descriptor without writing the card. PageStore's explicit allocator
 constructors compile with PSRAM on Xtensa. See ADR-0015 for measured sizes and
 remaining internal heap, shared-owner region I/O and latency requirements.
+
+## 2026-10-30 software gate and next task
+
+ADR-0016 and `docs/experiments/t106-runtime/` supersede the remaining software
+stop reasons from t-106. Twelve shared-owner/publication tests pass, including
+1875 preparation fault cases; the full candidate links with joined database /
+network futures, a separately placed64KiB reclaimed heap and a120988-byte
+linker stack section. The real audio CDN passes a bounded verified range request
+and rejects the wrong root. These are software feasibility results, not runtime
+heap/stack/latency or physical durability certification.
+
+Proceed to t-107 on the proven host-file engine/adapter. Keep both t-106 and
+later tasks open until their corresponding changes merge. The next crate must
+use GUID256/title512/URL2048/description1024 byte caps, keeping encoded episode
+values within4096 bytes. Batch and scan count caps also have16KiB byte caps.
+Prefer caller-supplied bounded catalogue scratch buffers so firmware can choose
+PSRAM placement; do not silently spend the driver's internal heap on records.
+Actual owner wiring, offline allocation failure, trusted setup, queue fairness
+and bounded sleep remain t-110 implementation/validation requirements.

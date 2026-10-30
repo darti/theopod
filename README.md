@@ -257,3 +257,16 @@ retains the short metadata-publication guard. Neither recipe accesses the board.
 The local EKV correction and future checked card layout are recorded in
 [ADR-0015](docs/adr/0015-correct-ekv-publication-and-describe-sd-regions.md);
 podcast storage and networking are still disabled.
+
+### Podcast catalogue foundation
+
+`theo-podcasts` contains the host-tested Radio France catalogue: stable local
+identities, read/audio state, bounded records and paged scans. Marking read
+preserves available audio; reclaimed read episodes are not automatically queued.
+RSS synchronization and downloads are not wired into firmware yet. See
+[ADR-0017](docs/adr/0017-store-bounded-podcast-identity-and-state.md).
+
+`just test-catalogue-recovery` runs the longer file-backed interruption model
+for atomic episode/index/ID-counter commits. Run it when changing catalogue
+persistence or its schema. Normal `just test` retains real-file sync/reopen
+coverage. `just check`/`just lint` also check the standalone crate for Xtensa.

@@ -18,3 +18,4 @@
 | [0014](0014-gate-podcast-persistence-on-recovery.md) | Gate podcast persistence on interruption recovery | Recovery corrected by ADR-0015; integration gate remains |
 | [0015](0015-correct-ekv-publication-and-describe-sd-regions.md) | Correct EKV publication and describe checked SD regions | Local correction and descriptor API accepted; runtime integration pending |
 | [0016](0016-prove-shared-storage-and-linked-network-feasibility.md) | Prove shared storage and linked network feasibility | Software feasibility verified; firmware activation pending |
+| [0017](0017-store-bounded-podcast-identity-and-state.md) | Store bounded podcast identity and local state in EKV | Host catalogue implemented; firmware activation pending |

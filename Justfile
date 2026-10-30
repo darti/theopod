@@ -17,10 +17,12 @@ install:
 
 check:
     LIBCLANG_PATH="{{libclang_path}}" PATH="{{gcc_path}}:${PATH}" RUSTUP_TOOLCHAIN=esp cargo check
+    LIBCLANG_PATH="{{libclang_path}}" PATH="{{gcc_path}}:${PATH}" RUSTUP_TOOLCHAIN=esp cargo check -p theo-podcasts
 
 # Clippy on the firmware (ESP toolchain) and the host crates.
 lint:
     LIBCLANG_PATH="{{libclang_path}}" PATH="{{gcc_path}}:${PATH}" RUSTUP_TOOLCHAIN=esp cargo clippy -- -D warnings
+    LIBCLANG_PATH="{{libclang_path}}" PATH="{{gcc_path}}:${PATH}" RUSTUP_TOOLCHAIN=esp cargo clippy -p theo-podcasts -- -D warnings
     LIBCLANG_PATH="{{libclang_path}}" PATH="{{gcc_path}}:${PATH}" RUSTUP_TOOLCHAIN=esp cargo clippy --features frame-dump -- -D warnings
     LIBCLANG_PATH="{{libclang_path}}" PATH="{{gcc_path}}:${PATH}" RUSTUP_TOOLCHAIN=esp cargo clippy --features imu-calibration -- -D warnings
     LIBCLANG_PATH="{{libclang_path}}" PATH="{{gcc_path}}:${PATH}" RUSTUP_TOOLCHAIN=esp cargo clippy --features watchdog-check -- -D warnings
@@ -28,7 +30,7 @@ lint:
     LIBCLANG_PATH="{{libclang_path}}" PATH="{{gcc_path}}:${PATH}" RUSTUP_TOOLCHAIN=esp cargo clippy --features sleep-check -- -D warnings
     LIBCLANG_PATH="{{libclang_path}}" PATH="{{gcc_path}}:${PATH}" RUSTUP_TOOLCHAIN=esp cargo clippy --features sd-check -- -D warnings
     LIBCLANG_PATH="{{libclang_path}}" PATH="{{gcc_path}}:${PATH}" RUSTUP_TOOLCHAIN=esp cargo clippy --features sd-provision -- -D warnings
-    RUSTUP_TOOLCHAIN=stable cargo clippy -p theo-drivers -p theo-frame-dump -p theo-storage -p frame-png --target {{host_target}} --all-targets --features theo-storage/legacy-fat -- -D warnings
+    RUSTUP_TOOLCHAIN=stable cargo clippy -p theo-drivers -p theo-frame-dump -p theo-storage -p theo-podcasts -p frame-png --target {{host_target}} --all-targets --features theo-storage/legacy-fat -- -D warnings
 
 build:
     ESP_LOG=info LIBCLANG_PATH="{{libclang_path}}" PATH="{{gcc_path}}:${PATH}" RUSTUP_TOOLCHAIN=esp cargo build --release
@@ -112,7 +114,7 @@ sd-format device sectors="":
 
 # Run the HAL-independent unit tests on the host.
 test:
-    RUSTUP_TOOLCHAIN=stable cargo test -p theo-drivers -p theo-frame-dump -p theo-storage -p frame-png --target {{host_target}} --features theo-storage/legacy-fat
+    RUSTUP_TOOLCHAIN=stable cargo test -p theo-drivers -p theo-frame-dump -p theo-storage -p theo-podcasts -p frame-png --target {{host_target}} --features theo-storage/legacy-fat
 
 # Run the driver tests under Miri, to catch undefined behaviour in their
 # unsafe code (`rustup +nightly component add miri rust-src` once). Cargo
@@ -155,3 +157,7 @@ sd-provision log="target/sd-provision.log" port="":
 # Release mode keeps the exhaustive model tests practical; no board access.
 test-storage-recovery:
     RUSTUP_TOOLCHAIN=stable cargo test -p theo-storage --release --target {{host_target}} page_store_rollover_tests -- --include-ignored --nocapture
+
+# File-backed immediate-durability fault model; normal reopen tests use sync_all.
+test-catalogue-recovery:
+    RUSTUP_TOOLCHAIN=stable cargo test -p theo-podcasts --release --target {{host_target}} atomic_catalogue_commit -- --include-ignored --nocapture

@@ -5322,6 +5322,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "theo-podcasts"
+version = "0.1.0"
+dependencies = [
+ "ekv",
+ "embassy-sync 0.6.2",
+ "futures",
+ "sha2",
+ "theo-storage",
+]
+
+[[package]]
 name = "theo-storage"
 version = "0.1.0"
 dependencies = [

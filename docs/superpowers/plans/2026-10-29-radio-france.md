@@ -5,7 +5,8 @@
 > and verified feed/audio TLS have retained evidence. Host catalogue work may
 > proceed. Production activation, bounds/scheduling and hardware validation remain
 > Task 5 / explicitly authorized follow-up work, not claims of these experiments.
-> No tasks close before their corresponding changes merge into main.
+> Default lifecycle: close after main merge. Explicit user exception on2026-10-30:
+> commit and close completed t-106/t-107/t-116 checkpoints; parent and unfinished stages remain open.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -83,10 +84,10 @@ feasibility report. t-116 precedes resuming the remaining positive gate.
 
 **Interfaces:** `SubscriptionId(u64)`, `EpisodeId(u64)`; `Source::RadioFrance`; `AudioState::{Missing,Queued,Downloading,Available,Deleting,Reclaimed}`. Define `EpisodeState { read: bool, audio: AudioState }`, `mark_read(&mut EpisodeState)`, `should_queue(&EpisodeState) -> bool`. Database adapter uses Task 1's proven contract; domain IDs never derive from a mutable title or URL filename.
 
-- [ ] Add failing tests: `read_audio_stays_available` asserts marking Available read preserves Available; `reclaimed_read_is_not_queued` asserts read+Reclaimed never queues; `metadata_update_preserves_state` asserts local ID/read/audio unchanged after metadata updates; `subscription_identity_scopes_guid` asserts identical GUIDs across subscriptions remain distinct.
-- [ ] Run `just test`; confirm new assertions fail because the lifecycle is not implemented, then implement the minimal state transitions and persistent key/schema encoding.
-- [ ] Add tests for GUID-less enclosure fallback, GUID retained with changed enclosure, duplicate GUID upsert, schema rejection and reopen after state changes. Reuse the selected database adapter on a host file; do not claim persistence from an in-memory mock alone.
-- [ ] Run `just fmt`, `just test`, `just check` and `just audit` for added dependencies. Commit the independently testable crate and recipe updates.
+- [x] Add failing tests: `read_audio_stays_available` asserts marking Available read preserves Available; `reclaimed_read_is_not_queued` asserts read+Reclaimed never queues; `metadata_update_preserves_state` asserts local ID/read/audio unchanged after metadata updates; `subscription_identity_scopes_guid` asserts identical GUIDs across subscriptions remain distinct.
+- [x] Run `just test`; confirm new assertions fail because the lifecycle is not implemented, then implement the minimal state transitions and persistent key/schema encoding.
+- [x] Add tests for GUID-less enclosure fallback, GUID retained with changed enclosure, duplicate GUID upsert, schema rejection and reopen after state changes. Reuse the selected database adapter on a host file; do not claim persistence from an in-memory mock alone.
+- [x] Run `just fmt`, `just test`, `just check` and `just audit` for added dependencies. Commit the independently testable crate and recipe updates.
 
 ### Task 3: Reconcile complete Radio France feeds
 
@@ -170,3 +171,19 @@ Prefer caller-supplied bounded catalogue scratch buffers so firmware can choose
 PSRAM placement; do not silently spend the driver's internal heap on records.
 Actual owner wiring, offline allocation failure, trusted setup, queue fairness
 and bounded sleep remain t-110 implementation/validation requirements.
+
+## t-107 implementation checkpoint (2026-10-30)
+
+The no_std catalogue now owns the corrected EKV instance, persists local IDs /
+identity indexes / read and audio state atomically, rejects unknown schemas,
+and exposes bounded record-buffer views and16-row/16KiB scans with continuations.
+Required identity/title/URL limits fail before writes; optional descriptions
+above1024bytes are omitted. Repeated metadata and state no-ops do not rewrite
+storage. Normal tests use real sync_all files; the510-cut file fault model is
+explicitly immediate-durability. Twenty catalogue tests pass plus its separate
+fault sweep; all normal host tests total394 passing. Xtensa check/lint, audit
+and release build pass; separate review clean. ADR-0017 specifies the schema.
+RSS/provider reconciliation remains t-108, audio/reclaim t-109, and actual
+runtime service/activation t-110. The user explicitly requested committing and
+closing completed tasks on2026-10-30; closure follows that request while the
+parent feature and incomplete stages stay open.

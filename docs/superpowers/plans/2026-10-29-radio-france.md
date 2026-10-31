@@ -107,11 +107,11 @@ feasibility report. t-116 precedes resuming the remaining positive gate.
 
 **Interfaces:** `DownloadJob` carries episode ID, enclosure URL and optional expected bytes; `DownloadOutcome::{Complete,WaitingForSpace,RetryLater}`. `ReclaimCandidate` carries episode ID, read flag, availability, publication/import order and active-use state. `choose_reclaim` yields oldest eligible candidates until the requested deficit is met. Missing timestamps use import order.
 
-- [ ] Write failing tests proving no reclamation with sufficient space, oldest-first selection for a deficit, read audio playable before deletion, exclusion of unread/active files, waiting when candidates are exhausted, and no automatic requeue of reclaimed read episodes.
-- [ ] Run `just test`, confirm failures, implement the selection policy and durable deletion intent → unlink → Reclaimed transition. No clock-driven purge job exists.
-- [ ] Test temporary download publication after sync only, short HTTP body, unknown length with reserve intact, connection failure, Range ignored (200), stale validator and invalid Content-Range. Restart partial downloads unless safe resume is proven.
-- [ ] Inject failure before/after every deletion and completion step, reopen storage and assert no unread deletion, no false Available state and preserved read tombstones. Recover orphan temporary files by persisted identity, never remote-provided paths.
-- [ ] Run `just fmt`, `just test` and `just check`; commit lifecycle and recovery logic.
+- [x] Write failing tests proving no reclamation with sufficient space, oldest-first selection for a deficit, read audio playable before deletion, exclusion of unread/active files, waiting when candidates are exhausted, and no automatic requeue of reclaimed read episodes.
+- [x] Run `just test`, confirm failures, implement the selection policy and durable deletion intent → unlink → Reclaimed transition. No clock-driven purge job exists.
+- [x] Test temporary download publication after sync only, short HTTP body, unknown length with reserve intact, connection failure, Range ignored (200), stale validator and invalid Content-Range. Restart partial downloads unless safe resume is proven.
+- [x] Inject failure before/after every deletion and completion step, reopen storage and assert no unread deletion, no false Available state and preserved read tombstones. Recover orphan temporary files by persisted identity, never remote-provided paths.
+- [x] Run `just fmt`, `just test` and `just check`; commit lifecycle and recovery logic.
 
 ### Task 5: Integrate background services with the existing firmware
 
@@ -206,3 +206,20 @@ fmt/check/lint/audit/release build pass. Separate review found three XML/paginat
 issues, corrected with regression coverage. No transport or firmware activation,
 no card operation. t-108 and parent t-105 stay open until merge; t-109 and t-110
 remain required for downloads, pressure reclamation and runtime integration.
+
+## t-109 lifecycle checkpoint (2026-10-31)
+
+Restart-only download sessions now enforce complete HTTP bodies, exact known
+lengths, metadata snapshot checks and reserve-preserving appends. Durable
+file publication precedes atomic actual-size/Available facts. Pressure-only
+reclamation persists Deleting before unlink and retains read tombstones after
+recovery. Old partials are removed before preflight; ordinary network failures
+clean up and requeue without reboot. Failed/cancelled storage stays poisoned.
+MediaStore is the ID-only integration contract, not an implemented firmware mount.
+
+Validation:427normal host tests pass (six existing long-sweep ignores),
+fmt/check/lint/release build pass; dependency set unchanged since passing t-108
+audit. Separate review's four Important findings reproduced RED and corrected
+GREEN. A scheduling note carries into t-110: whole-library scans/recovery need
+cooperative admission, absolute deadlines and sleep/control cancellation.
+No hardware operation or network activation; t-109 remains open until merge.

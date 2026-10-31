@@ -264,8 +264,9 @@ podcast storage and networking are still disabled.
 identities, read/audio state, bounded records and paged scans. Marking read
 preserves available audio; reclaimed read episodes are not automatically queued.
 The crate also streams Radio France RSS history, reconciles duplicate/changed
-episodes and persists validators only after every page succeeds. Downloads and
-RSS transport are not wired into firmware yet. See
+episodes and persists validators only after every page succeeds. It also defines restart-only audio downloads, durable publication/recovery and
+pressure-only reclamation of read, inactive files. Media I/O and RSS transport
+are not wired into firmware yet. See
 [ADR-0017](docs/adr/0017-store-bounded-podcast-identity-and-state.md).
 
 `just test-catalogue-recovery` runs the longer file-backed interruption model

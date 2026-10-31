@@ -867,3 +867,49 @@ fn unchanged_metadata_and_repeated_read_flag_do_not_rewrite_storage() {
         assert_eq!(image.writes.get(), before);
     });
 }
+#[test]
+fn completed_audio_length_commits_with_available_and_clears_after_reclaim() {
+    // Regression (t-109): unknown-length audio needs a durable completed-size fact.
+    block_on(async {
+        let image = Image::new();
+        let mut cat = image.create().await;
+        let mut scratch = [0; MAX_RECORD_BYTES];
+        let id = cat
+            .upsert(
+                SubscriptionId(1),
+                metadata(Some("a"), "a", "https://cdn.example/a"),
+                &mut scratch,
+            )
+            .await
+            .unwrap()
+            .id;
+        cat.transition_audio(id, AudioState::Downloading, &mut scratch)
+            .await
+            .unwrap();
+        cat.finish_download(id, 3, &mut scratch).await.unwrap();
+        drop(cat);
+        let mut cat = image.reopen().await;
+        assert_eq!(cat.completed_audio_len(id).await.unwrap(), Some(3));
+        assert_eq!(
+            cat.get(id, &mut scratch)
+                .await
+                .unwrap()
+                .unwrap()
+                .state
+                .audio,
+            AudioState::Available
+        );
+        cat.mark_read(id, &mut scratch).await.unwrap();
+        cat.transition_audio(id, AudioState::Deleting, &mut scratch)
+            .await
+            .unwrap();
+        assert_eq!(cat.completed_audio_len(id).await.unwrap(), Some(3));
+        cat.transition_audio(id, AudioState::Reclaimed, &mut scratch)
+            .await
+            .unwrap();
+        drop(cat);
+        let mut cat = image.reopen().await;
+        assert_eq!(cat.completed_audio_len(id).await.unwrap(), None);
+        assert!(cat.get(id, &mut scratch).await.unwrap().unwrap().state.read);
+    });
+}

@@ -49,7 +49,7 @@ theo-podcasts = { path = "crates/theo-podcasts" }
 
 [package]
 name = "theo-pod"
-version = "0.1.0"
+version = "0.1.1"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

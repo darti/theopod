@@ -3,6 +3,19 @@
 All notable changes to Theo Pod are documented here.
 Generated from Conventional Commits by git-cliff and release-plz.
 
+## [0.1.1] - 2026-10-31
+
+### Features
+- **podcasts:** persist bounded episode identity and lifecycle (t-107) ([2addb14](https://github.com/darti/theopod/commit/2addb140d920c08d5b2f08f2b0550be6ba414b66))
+- **podcasts:** reconcile complete Radio France history (t-108) ([9be57a2](https://github.com/darti/theopod/commit/9be57a27b661ff51cd1b78d964af39ef729264b3))
+
+### Fixes
+- **storage:** recover EKV metadata rollover and bound future SD regions (t-116) ([acca56f](https://github.com/darti/theopod/commit/acca56f68ca927ad8eae5d8baf6f6a312b409408))
+- **release:** give new podcast crate its own baseline (t-117) ([#2](https://github.com/darti/theopod/pull/2)) ([95a8143](https://github.com/darti/theopod/commit/95a8143796d39b2e76dff67b93de483b0f78dc36))
+
+### Documentation
+- **podcasts:** verify shared storage and linked TLS feasibility (t-106) ([08cfbfa](https://github.com/darti/theopod/commit/08cfbfa241495a000ef421a2bae18a6b4f1bed2e))
+
 ## [0.1.0] - 2026-10-29
 
 ### Features

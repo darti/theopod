@@ -1951,7 +1951,7 @@ dependencies = [
 
 [[package]]
 name = "frame-png"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "png",
  "speculoos",
@@ -5274,7 +5274,7 @@ checksum = "f18aa187839b2bdb1ad2fa35ead8c4c2976b64e4363c386d45ac0f7ee85c9233"
 
 [[package]]
 name = "theo-drivers"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "embedded-hal 1.0.0",
  "embedded-hal-async",
@@ -5283,14 +5283,14 @@ dependencies = [
 
 [[package]]
 name = "theo-frame-dump"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "speculoos",
 ]
 
 [[package]]
 name = "theo-pod"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "aligned",
  "allocator-api2 0.3.1",
@@ -5323,7 +5323,7 @@ dependencies = [
 
 [[package]]
 name = "theo-podcasts"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ekv",
  "embassy-sync 0.6.2",
@@ -5335,7 +5335,7 @@ dependencies = [
 
 [[package]]
 name = "theo-storage"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "allocator-api2 0.3.1",
  "critical-section",

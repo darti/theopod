@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+heapless = { version = "0.9", default-features = false }
 ekv.workspace = true
 sha2.workspace = true
 embassy-sync-06 = { package = "embassy-sync", version = "0.6" }

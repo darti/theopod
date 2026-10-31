@@ -117,3 +117,64 @@ on Xtensa), `just test` (394 passing, six explicit long-sweep ignores),
 and `just build` pass. A separate read-only review found no actionable issue.
 Firmware networking/database initialization remains unchanged and no board
 operation was performed.
+
+## 2026-10-31: bounded Radio France reconciliation (t-108)
+
+`RadioFranceFeed` consumes UTF-8 bytes incrementally and emits one owned,
+size-bounded item at a time. It keeps no page or history buffer. Required
+GUID/title/enclosure caps match the catalogue; descriptions beyond1024bytes
+are omitted, including when the boundary falls within a Unicode scalar.
+XML declarations, matching element names, scoped namespaces, predefined /
+numeric references, comments and CDATA are checked. DTDs and custom/external
+entities are rejected, with no resolver or external I/O. This is a bounded
+RSS-specific XML subset: ASCII element/attribute names,16 nested elements,
+16 namespace bindings,32 attributes per element,4096byte markup tokens and
+128byte namespace URIs. Unsupported constructs fail synchronization rather
+than asserting an incomplete import succeeded. Optional malformed dates or
+durations become absent; valid RFC822-style dates normalize to Unix seconds.
+
+Subscription URLs must use the measured HTTPS Aerion `/rss/{show UUID}` route.
+Root requests are page0; each Atom next link must have the same show/origin
+and the immediately following nonnegative page number. Namespace aliases and
+scoped/default Atom declarations are resolved. At most4096pages are reconciled;
+reaching the cap with a next link is an error, never a completed history.
+Audio enclosure HTTPS URLs are independent of the subscription boundary;
+TLS and redirect authority validation remain the transport's responsibility.
+
+`SyncSession` admits one HTTP200 body at a time in chunks of at most4096bytes.
+Each emitted item commits through the existing idempotent catalogue upsert:
+a one-record batch is within both the16row and16KiB ceilings, and network
+consumption pauses while storage commits. Previously imported episodes absent
+from later responses remain untouched. A malformed, truncated, oversized,
+failed or cancelled operation permanently poisons that session, so its caller
+cannot bypass an error by continuing with another chunk or page. Committed
+partial upserts survive and are replayable; the existing catalogue storage
+failure/cancellation policy remains unchanged.
+
+Only after every required page ends validly does `complete` commit a version1
+checkpoint under `s` plus subscription ID big-endian8. Its bounded encoding
+contains first-page ETag512 / Last-Modified128 byte strings, feed URL256,
+page count and completion generation. The optional new key leaves existing
+schema1 catalogue data readable without destructive migration. Missing
+validators clear old validators after a successful unconditional import.
+There is no complete marker on failed final commit; old checkpoints remain.
+
+An unchanged first page cannot certify unchanged historical pages. Conditional
+requests and HTTP304 are therefore allowed only for a previously completed
+single-page history with a supplied validator. Paginated histories are always
+reconciled unconditionally. A valid304 is a no-op, including storage writes.
+The caller must request the session's URL/conditions and enforce transport
+framing, TLS, deadlines and cancellation; firmware service wiring remains t-110.
+
+The retained real134item/129identity fixture exercises full history, repeat
+import and changed/new metadata against actual host-file EKV. That larger
+scenario uses the explicit immediate-durability file model to avoid thousands
+of physical host flushes; small checkpoint, failure, cancellation and reopen
+tests retain actual sync_all. Neither model certifies card-controller power
+loss, runtime memory/latency or end-to-end networking. Parser/session placement
+and the bounded storage owner remain integration requirements.
+
+`t-108` verification: `just fmt`, `just check`, `just test` (410passing,
+six pre-existing explicit long-sweep ignores), `just lint`, `just audit` and
+`just build` pass. Independent review findings for declaration/reference grammar
+and namespace-aware pagination were corrected and covered by regressions.

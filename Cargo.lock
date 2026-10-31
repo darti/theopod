@@ -5328,6 +5328,7 @@ dependencies = [
  "ekv",
  "embassy-sync 0.6.2",
  "futures",
+ "heapless 0.9.3",
  "sha2",
  "theo-storage",
 ]

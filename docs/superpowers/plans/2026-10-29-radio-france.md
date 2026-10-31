@@ -95,11 +95,11 @@ feasibility report. t-116 precedes resuming the remaining positive gate.
 
 **Interfaces:** incremental `RadioFranceFeed` parser emits owned, size-bounded `EpisodeMetadata`; `SyncSession` stages upserts and commits response validators only after valid end-of-document and all required pages. Transport supplies chunks and HTTP response metadata, never an unbounded full body.
 
-- [ ] Write failing fixture tests for full-history import and repeat import: first run queues every unique episode; second run adds zero download jobs. A third fixture changes a title and adds one GUID: update one entry and queue exactly one new episode.
-- [ ] Run `just test` and observe the intended failures. Implement source validation, incremental RSS parsing, entity/CDATA handling and feed identity reconciliation with bounded batch commits.
-- [ ] Test HTTP 304 as a no-op, missing validators, absent old entries, missing GUID, malformed dates, XML split across chunks, truncated XML, oversized fields and failed final commit. Assert no completed sync/validator advance on partial failure and idempotent replay after reopening.
-- [ ] Test source boundary: unsupported subscription source is rejected; enclosure redirects use transport validation rather than treating audio CDN URLs as subscription URLs. Explicitly disable XML external entity resolution.
-- [ ] Run `just fmt`, `just test` and `just check`; commit feed reconciliation and fixtures.
+- [x] Write failing fixture tests for full-history import and repeat import: first run queues every unique episode; second run adds zero download jobs. A third fixture changes a title and adds one GUID: update one entry and queue exactly one new episode.
+- [x] Run `just test` and observe the intended failures. Implement source validation, incremental RSS parsing, entity/CDATA handling and feed identity reconciliation with bounded batch commits.
+- [x] Test HTTP 304 as a no-op, missing validators, absent old entries, missing GUID, malformed dates, XML split across chunks, truncated XML, oversized fields and failed final commit. Assert no completed sync/validator advance on partial failure and idempotent replay after reopening.
+- [x] Test source boundary: unsupported subscription source is rejected; enclosure redirects use transport validation rather than treating audio CDN URLs as subscription URLs. Explicitly disable XML external entity resolution.
+- [x] Run `just fmt`, `just test` and `just check`; commit feed reconciliation and fixtures.
 
 ### Task 4: Download audio and reclaim only under pressure
 
@@ -187,3 +187,22 @@ RSS/provider reconciliation remains t-108, audio/reclaim t-109, and actual
 runtime service/activation t-110. The user explicitly requested committing and
 closing completed tasks on2026-10-30; closure follows that request while the
 parent feature and incomplete stages stay open.
+
+## t-108 reconciliation checkpoint (2026-10-31)
+
+Bounded UTF8 XML parsing now streams the retained100+34item real history,
+resolves Atom namespace aliases, reconciles129unique identities and preserves
+local read/audio state across repeats and metadata changes. Sync checkpoints
+commit only after every page ends validly. Invalid XML, limits, source/pagination
+changes, failures and cancellation cannot advance validators. Multi-page histories
+are fetched unconditionally because a root304 cannot certify historical pages.
+One-record durable upserts are bounded batches within16rows/16KiB. The large
+real-file history test uses the explicit immediate-durability file model;
+small persistence/failure/reopen tests keep sync_all. See the t-108 extension
+in ADR-0017 for syntax/resource limits and remaining transport responsibilities.
+
+Validation:410normal host tests pass (six existing explicit long-sweep ignores),
+fmt/check/lint/audit/release build pass. Separate review found three XML/pagination
+issues, corrected with regression coverage. No transport or firmware activation,
+no card operation. t-108 and parent t-105 stay open until merge; t-109 and t-110
+remain required for downloads, pressure reclamation and runtime integration.

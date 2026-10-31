@@ -160,6 +160,55 @@ impl<F: Flash> Catalogue<F> {
             enabled: true,
         })
     }
+    /// Last completely reconciled history. Partial imports never replace this.
+    pub async fn sync_checkpoint(
+        &mut self,
+        id: SubscriptionId,
+        scratch: &mut [u8],
+    ) -> Result<Option<crate::sync::Checkpoint>, Error<F::Error>> {
+        self.check(scratch)?;
+        if id.0 == 0 {
+            return Err(Error::InvalidMetadata);
+        }
+        self.begin()?;
+        let result = async {
+            let tx = self.db.read_transaction().await;
+            match tx
+                .read(&sync_key(id), &mut scratch[..MAX_RECORD_BYTES])
+                .await
+            {
+                Ok(n) => crate::sync::Checkpoint::decode(&scratch[..n])
+                    .map(Some)
+                    .ok_or(Error::Corrupt),
+                Err(ekv::ReadError::KeyNotFound) => Ok(None),
+                Err(e) => Err(read_error(e)),
+            }
+        }
+        .await;
+        self.finish(result)
+    }
+    pub(crate) async fn save_sync_checkpoint(
+        &mut self,
+        id: SubscriptionId,
+        checkpoint: &crate::sync::Checkpoint,
+        scratch: &mut [u8],
+    ) -> Result<(), Error<F::Error>> {
+        self.check(scratch)?;
+        if id.0 == 0 {
+            return Err(Error::InvalidMetadata);
+        }
+        let n = checkpoint.encode(scratch).ok_or(Error::InvalidMetadata)?;
+        self.begin()?;
+        let result = async {
+            let mut tx = self.db.write_transaction().await;
+            tx.write(&sync_key(id), &scratch[..n])
+                .await
+                .map_err(write_error)?;
+            tx.commit().await.map_err(commit_error)
+        }
+        .await;
+        self.finish(result)
+    }
     fn begin(&mut self) -> Result<(), Error<F::Error>> {
         if !self.enabled {
             return Err(Error::Disabled);
@@ -675,3 +724,10 @@ fn decode(bytes: &[u8]) -> Option<Episode<'_>> {
 #[cfg(test)]
 #[path = "catalogue_tests.rs"]
 mod tests;
+
+fn sync_key(id: SubscriptionId) -> [u8; 9] {
+    let mut key = [0; 9];
+    key[0] = b's';
+    key[1..].copy_from_slice(&id.0.to_be_bytes());
+    key
+}

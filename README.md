@@ -263,7 +263,9 @@ podcast storage and networking are still disabled.
 `theo-podcasts` contains the host-tested Radio France catalogue: stable local
 identities, read/audio state, bounded records and paged scans. Marking read
 preserves available audio; reclaimed read episodes are not automatically queued.
-RSS synchronization and downloads are not wired into firmware yet. See
+The crate also streams Radio France RSS history, reconciles duplicate/changed
+episodes and persists validators only after every page succeeds. Downloads and
+RSS transport are not wired into firmware yet. See
 [ADR-0017](docs/adr/0017-store-bounded-podcast-identity-and-state.md).
 
 `just test-catalogue-recovery` runs the longer file-backed interruption model

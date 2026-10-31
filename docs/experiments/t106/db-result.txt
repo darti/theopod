@@ -1,0 +1,152 @@
+   Compiling theo-t106-db v0.0.0 (/private/tmp/theo-t106-db)
+warning: unused imports: `ALIGN` and `MAX_PAGE_COUNT`
+ --> src/rollover.rs:9:14
+  |
+9 |     config::{ALIGN, CRC, ERASE_VALUE, MAX_PAGE_COUNT, PAGE_SIZE},
+  |              ^^^^^                    ^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `theo-t106-db` (lib test) generated 1 warning (run `cargo fix --lib -p theo-t106-db --tests` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.05s
+     Running unittests src/lib.rs (/Volumes/narf-space/cargo-build/ce/3a236bf79a165b/aarch64-apple-darwin/debug/deps/theo_t106_db-79443b06250c1fbe)
+
+running 12 tests
+test page_store::page_store_tests::cancelled_write_disables_instance ... ok
+test page_store::page_store_tests::wrong_schema_is_rejected_without_writes ... ok
+test page_store::page_store_tests::failed_sync_disables_instance ... ok
+test page_store::page_store_tests::corrupt_pages_are_not_implicitly_formatted ... ok
+test page_store::page_store_tests::erase_and_slot_reuse_preserve_other_pages ... ok
+test page_store::page_store_tests::power_loss_at_each_sync_barrier_preserves_previous_bytes ... ok
+test page_store::page_store_tests::interrupted_page_replacement_keeps_previous_page ... ok
+write 1: page=2 offset=48 len=4 working=[0, 4] failing=[]
+write 2: page=2 offset=52 len=8 working=[0, 8] failing=[]
+write 3: page=2 offset=60 len=4 working=[0, 4] failing=[]
+write 4: page=2 offset=64 len=8 working=[0, 8] failing=[]
+write 5: page=2 offset=0 len=40 working=[0, 40] failing=[]
+write 6: page=2 offset=40 len=8 working=[0, 8] failing=[]
+write 7: page=0 offset=44 len=8 working=[0, 8] failing=[]
+write 8: page=0 offset=36 len=8 working=[0, 8] failing=[]
+test rollover::mount_survives_each_interrupted_write_during_commit ... ok
+test page_store::page_store_tests::ekv_roundtrip_on_disk ... ok
+test page_store::page_store_tests::interrupted_ekv_commit_is_atomic ... ok
+write 1: page=11 offset=48 len=4 working=[0, 4] failing=[]
+write 2: page=11 offset=52 len=8 working=[0, 8] failing=[]
+write 3: page=11 offset=60 len=4 working=[0, 4] failing=[]
+write 4: page=11 offset=64 len=8 working=[0, 8] failing=[]
+write 5: page=11 offset=0 len=40 working=[0, 40] failing=[]
+write 6: page=11 offset=40 len=8 working=[0, 8] failing=[]
+write 7: page=0 offset=4028 len=8 working=[0, 8] failing=[]
+write 8: page=0 offset=4036 len=8 working=[0, 8] failing=[]
+write 9: page=0 offset=4044 len=8 working=[0, 8] failing=[]
+write 10: page=0 offset=4020 len=8 working=[0, 8] failing=[]
+write 12: page=12 offset=48 len=4 working=[0, 4] failing=[]
+write 13: page=12 offset=52 len=8 working=[0, 8] failing=[]
+write 14: page=12 offset=60 len=4 working=[0, 4] failing=[]
+write 15: page=12 offset=64 len=8 working=[0, 8] failing=[]
+write 16: page=12 offset=0 len=40 working=[0, 40] failing=[]
+write 17: page=12 offset=40 len=8 working=[0, 8] failing=[]
+write 18: page=0 offset=4060 len=8 working=[0, 8] failing=[]
+write 19: page=0 offset=4068 len=8 working=[0, 8] failing=[]
+write 20: page=0 offset=4076 len=8 working=[0, 8] failing=[]
+raw host file: 90 sector interruption points + successful endpoint
+write 21: page=0 offset=4084 len=8 working=[0, 8] failing=[]
+Database inline bytes 10328
+test raw_tests::raw_file_interruptions_and_adapter ... ok
+write 22: page=0 offset=4092 len=4 working=[0, 4] failing=[]
+write 24: page=13 offset=28 len=8 working=[0, 8] failing=[]
+write 25: page=13 offset=36 len=8 working=[0, 8] failing=[]
+write 26: page=13 offset=44 len=8 working=[0, 8] failing=[]
+write 27: page=13 offset=52 len=8 working=[0, 8] failing=[]
+write 28: page=13 offset=60 len=8 working=[0, 8] failing=[]
+write 29: page=13 offset=68 len=8 working=[0, 8] failing=[]
+write 30: page=13 offset=76 len=8 working=[0, 8] failing=[]
+write 31: page=13 offset=84 len=8 working=[0, 8] failing=[]
+write 32: page=13 offset=0 len=20 working=[0] failing=["20 (KeyNotFound)"]
+write 33: page=13 offset=20 len=8 working=[8] failing=["0 (KeyNotFound)"]
+write 35: page=14 offset=48 len=4 working=[0, 4] failing=[]
+write 36: page=14 offset=52 len=8 working=[0, 8] failing=[]
+write 37: page=14 offset=60 len=4 working=[0, 4] failing=[]
+write 38: page=14 offset=64 len=8 working=[0, 8] failing=[]
+write 39: page=14 offset=0 len=40 working=[0, 40] failing=[]
+write 40: page=14 offset=40 len=8 working=[0, 8] failing=[]
+write 41: page=13 offset=100 len=8 working=[0, 8] failing=[]
+write 42: page=13 offset=108 len=8 working=[0, 8] failing=[]
+write 43: page=13 offset=116 len=8 working=[0, 8] failing=[]
+write 44: page=13 offset=124 len=8 working=[0, 8] failing=[]
+write 45: page=13 offset=132 len=8 working=[0, 8] failing=[]
+write 46: page=13 offset=140 len=8 working=[0, 8] failing=[]
+write 47: page=13 offset=148 len=8 working=[0, 8] failing=[]
+write 48: page=13 offset=92 len=8 working=[0, 8] failing=[]
+write 50: page=15 offset=48 len=4 working=[0, 4] failing=[]
+write 51: page=15 offset=52 len=8 working=[0, 8] failing=[]
+write 52: page=15 offset=60 len=4 working=[0, 4] failing=[]
+write 53: page=15 offset=64 len=8 working=[0, 8] failing=[]
+write 54: page=15 offset=0 len=40 working=[0, 40] failing=[]
+write 55: page=15 offset=40 len=8 working=[0, 8] failing=[]
+write 56: page=13 offset=164 len=8 working=[0, 8] failing=[]
+write 57: page=13 offset=172 len=8 working=[0, 8] failing=[]
+write 58: page=13 offset=180 len=8 working=[0, 8] failing=[]
+write 59: page=13 offset=188 len=8 working=[0, 8] failing=[]
+write 60: page=13 offset=196 len=8 working=[0, 8] failing=[]
+write 61: page=13 offset=204 len=8 working=[0, 8] failing=[]
+write 62: page=13 offset=212 len=8 working=[0, 8] failing=[]
+write 63: page=13 offset=220 len=8 working=[0, 8] failing=[]
+write 64: page=13 offset=228 len=8 working=[0, 8] failing=[]
+write 65: page=13 offset=156 len=8 working=[0, 8] failing=[]
+write 67: page=16 offset=48 len=4 working=[0, 4] failing=[]
+write 68: page=16 offset=52 len=8 working=[0, 8] failing=[]
+write 69: page=16 offset=60 len=4 working=[0, 4] failing=[]
+write 70: page=16 offset=64 len=8 working=[0, 8] failing=[]
+write 71: page=16 offset=0 len=40 working=[0, 40] failing=[]
+write 72: page=16 offset=40 len=8 working=[0, 8] failing=[]
+write 73: page=13 offset=244 len=8 working=[0, 8] failing=[]
+write 74: page=13 offset=252 len=8 working=[0, 8] failing=[]
+write 75: page=13 offset=260 len=8 working=[0, 8] failing=[]
+write 76: page=13 offset=268 len=8 working=[0, 8] failing=[]
+write 77: page=13 offset=276 len=8 working=[0, 8] failing=[]
+write 78: page=13 offset=284 len=8 working=[0, 8] failing=[]
+write 79: page=13 offset=292 len=8 working=[0, 8] failing=[]
+write 80: page=13 offset=300 len=8 working=[0, 8] failing=[]
+write 81: page=13 offset=308 len=8 working=[0, 8] failing=[]
+write 82: page=13 offset=316 len=8 working=[0, 8] failing=[]
+write 83: page=13 offset=324 len=8 working=[0, 8] failing=[]
+write 84: page=13 offset=236 len=8 working=[0, 8] failing=[]
+write 86: page=17 offset=48 len=4 working=[0, 4] failing=[]
+write 87: page=17 offset=52 len=8 working=[0, 8] failing=[]
+write 88: page=17 offset=60 len=4 working=[0, 4] failing=[]
+write 89: page=17 offset=64 len=8 working=[0, 8] failing=[]
+write 90: page=17 offset=0 len=40 working=[0, 40] failing=[]
+write 91: page=17 offset=40 len=8 working=[0, 8] failing=[]
+write 92: page=13 offset=340 len=8 working=[0, 8] failing=[]
+write 93: page=13 offset=348 len=8 working=[0, 8] failing=[]
+write 94: page=13 offset=356 len=8 working=[0, 8] failing=[]
+write 95: page=13 offset=364 len=8 working=[0, 8] failing=[]
+write 96: page=13 offset=372 len=8 working=[0, 8] failing=[]
+write 97: page=13 offset=380 len=8 working=[0, 8] failing=[]
+write 98: page=13 offset=388 len=8 working=[0, 8] failing=[]
+write 99: page=13 offset=396 len=8 working=[0, 8] failing=[]
+write 100: page=13 offset=404 len=8 working=[0, 8] failing=[]
+write 101: page=13 offset=412 len=8 working=[0, 8] failing=[]
+write 102: page=13 offset=420 len=8 working=[0, 8] failing=[]
+write 103: page=13 offset=332 len=8 working=[0, 8] failing=[]
+
+thread 'rollover::mount_survives_each_interrupted_write_during_metadata_rollover' (18155733) panicked at src/rollover.rs:196:5:
+power-loss failures:
+write 32 (Operation { erase: false, page: 13, offset: 0, data: [222, 188, 129, 29, 13, 0, 0, 0, 180, 117, 93, 54, 32, 0, 0, 0, 2, 0, 0, 0] })
+  working prefixes: [0]
+  failing prefixes: ["20 (KeyNotFound)"]
+write 33 (Operation { erase: false, page: 13, offset: 20, data: [197, 89, 64, 0, 42, 222, 249, 77] })
+  working prefixes: [8]
+  failing prefixes: ["0 (KeyNotFound)"]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test rollover::mount_survives_each_interrupted_write_during_metadata_rollover ... FAILED
+
+failures:
+
+failures:
+    rollover::mount_survives_each_interrupted_write_during_metadata_rollover
+
+test result: FAILED. 11 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 35.27s
+
+error: test failed, to rerun pass `--lib`

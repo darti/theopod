@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+allocator-api2.workspace = true
 littlefs-rust.workspace = true
 embassy-sync.workspace = true
 embassy-futures.workspace = true

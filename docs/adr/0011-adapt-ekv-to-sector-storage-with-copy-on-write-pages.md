@@ -1,6 +1,6 @@
 # ADR-0011: Adapt EKV to FAT sector storage with copy-on-write pages
 
-- Status: FAT backing-file direction superseded by ADR-0012; storage transport implemented, firmware service integration pending.
+- Status: FAT backing-file direction superseded by ADR-0012; original recovery gate failed in t-106 (ADR-0014); corrected locally in ADR-0015, runtime integration still pending.
 - Date: 2026-10-29
 
 ## Context

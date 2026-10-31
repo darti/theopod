@@ -1,0 +1,14 @@
+[package]
+name = "theo-t106-runtime"
+version = "0.0.0"
+edition = "2024"
+[dependencies]
+theo-storage = { path = "{{BASE}}/crates/theo-storage" }
+ekv = { version = "=1.0.0", features = ["crc", "max-page-count-4096", "max-value-size-4096"] }
+embassy-futures = "0.1"
+embassy-sync-06 = { package = "embassy-sync", version = "0.6" }
+littlefs-rust = { git = "https://github.com/light-player/littlefs-rust", branch = "main", default-features = false, features = ["alloc"] }
+[dev-dependencies]
+futures = { version = "0.3", features = ["executor"] }
+[patch.crates-io]
+ekv = { path = "{{BASE}}/vendor/ekv" }

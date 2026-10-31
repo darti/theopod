@@ -29,19 +29,20 @@ The user selected an embedded database on microSD, with audio stored in
 separate files. The alternative was a custom file index: fewer initial
 dependencies, but additional indexing, migration and recovery machinery to
 maintain. The database implementation must support Rust no_std and the existing
-async FAT storage; no SQLite or other std-dependent engine is assumed.
+shared SD owner; no SQLite or other std-dependent engine is assumed.
 The user subsequently authorized selecting EKV and revising the SD transport.
-EKV 1.0.0 now has a copy-on-write page adapter and async FAT file transport
-(ADR-0011); host persistence and Xtensa compatibility checks cover this layer.
-Integration into the firmware storage service is still required.
+EKV 1.0.0 has a copy-on-write page adapter (ADR-0011). t-106 found a
+metadata-rollover recovery defect through that adapter; ADR-0014 suspends
+persistence integration until t-116 resolves it. Successful short host tests
+and Xtensa compilation do not establish engine recovery.
 If no suitable engine integrates, return with the concrete tradeoffs rather
 than silently replacing the approved database approach with a custom index.
 
 ## Existing system and constraints
 
 The firmware has no network stack or podcast/audio service today. Storage is
-FAT32 over SPI3, owned by the asynchronous logging task (ADR-0010). General
-storage operations must extend this single owner through bounded requests;
+LittleFS over SPI3, owned on core 1 through the core-0 async sector service
+(ADR-0012). General storage operations must extend this single owner through bounded requests;
 they must not create a second mount or contend unsafely with logging.
 Cancellation or storage failure invalidates the mount until reboot, as today.
 The UI loop must remain within the main watchdog budget (ADR-0009).
@@ -114,3 +115,42 @@ run just audit for dependency changes, and just miri if driver unsafe code chang
 Record the selected database and storage/network architecture in docs/adr.
 Hardware throughput, Wi-Fi coexistence and power-loss durability need separate
 board validation after explicit authorization.
+
+## t-106 feasibility outcome
+
+[ADR-0014](../../adr/0014-gate-podcast-persistence-on-recovery.md) records a negative
+persistence gate. [The measured report](../../radio-france-feasibility.md) is the
+source of current versions, exact candidate types, memory measurements, fixture
+provenance and explicit unverified limits; the original proposals above cannot
+override it. Two real feed pages expose 134 items with 129 distinct GUIDs.
+The current Go source clamps negative pages to zero: follow rel=next for history.
+Missing lengths and validators require streamed, idempotent reconciliation.
+Read/playable/reclaimable semantics and the no-periodic-purge rule are unchanged.
+
+The TLS candidate compiles on Xtensa and exchanges real host HTTPS with chain,
+hostname, signature and date checks. Device time must come from local setup and
+monotonic uptime; unknown time blocks networking, not offline reading. Credentials
+are local ignored config/wifi.local.toml; its parser and setup are future work.
+Detailed timeout, field, reserve, queue and buffer proposals in the report remain
+subject to combined RAM and latency validation after the database gate passes.
+No engine substitution, raw SD layout or product networking is implemented here.
+
+## t-116 recovery correction
+
+ADR-0015 records adoption of the reviewed local EKV 1.0.0 correction after
+broader recovery histories, without a format/API change or enabling podcast
+storage. Checked immutable region descriptors and explicit page-buffer
+allocation are implemented building blocks. Existing whole-card storage is
+unchanged. Combined memory/latency and runtime region integration remain part
+of t-106's positive gate; no hardware operation is authorized by this update.
+
+## 2026-10-30 software feasibility gate
+
+ADR-0016 records passing shared-owner/publication experiments, full linked
+placement and verified audio-CDN TLS in addition to the corrected engine and
+feed evidence. This permits the host catalogue stages of the approved design;
+it does not enable networking/database initialization on the existing card or
+claim runtime/hardware certification. The optional description cap is now1024
+UTF-8 bytes, so GUID256 + title512 + enclosure2048 + description1024 plus at
+most256 bytes overhead fits the4096-byte engine value limit. Caller-owned
+bounded record buffers allow the eventual service to select PSRAM allocation.

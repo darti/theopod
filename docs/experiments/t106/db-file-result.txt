@@ -1,0 +1,11 @@
+   Compiling theo-t106-db v0.0.0 (/private/tmp/theo-t106-db)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.70s
+     Running unittests src/lib.rs (/Volumes/narf-space/cargo-build/ce/3a236bf79a165b/aarch64-apple-darwin/debug/deps/theo_t106_db-79443b06250c1fbe)
+
+running 1 test
+raw host file: 90 sector interruption points + successful endpoint
+Database inline bytes 10328
+test raw_tests::raw_file_interruptions_and_adapter ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 9.94s
+

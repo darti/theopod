@@ -1,0 +1,92 @@
+     Locking 1 package to highest Rust 1.99.0 compatible version
+      Adding ekv v1.0.0 (/private/tmp/theo-t116-history-green/ekv)
+   Compiling proc-macro2 v1.0.107
+   Compiling quote v1.0.47
+   Compiling unicode-ident v1.0.27
+   Compiling futures-core v0.3.34
+   Compiling futures-sink v0.3.34
+   Compiling futures-io v0.3.34
+   Compiling slab v0.4.12
+   Compiling pin-project-lite v0.2.17
+   Compiling memchr v2.8.3
+   Compiling futures-task v0.3.34
+   Compiling futures-channel v0.3.34
+   Compiling heapless v0.8.0
+   Compiling embedded-io-async v0.6.1
+   Compiling byteorder v1.5.0
+   Compiling stable_deref_trait v1.2.1
+   Compiling embedded-io v0.6.1
+   Compiling embassy-sync v0.6.2
+   Compiling critical-section v1.2.0
+   Compiling cfg-if v1.0.5
+   Compiling hash32 v0.3.1
+   Compiling ekv v1.0.0 (/private/tmp/theo-t116-history-green/ekv)
+   Compiling syn v3.0.9
+   Compiling futures-macro v0.3.34
+   Compiling futures-util v0.3.34
+   Compiling futures-executor v0.3.34
+   Compiling futures v0.3.34
+   Compiling theo-t106-probe v0.0.0 (/tmp/theo-t116-history-green/db)
+    Finished `release` profile [optimized] target(s) in 11.25s
+     Running unittests src/lib.rs (/Volumes/narf-space/cargo-build/4f/a380996b50950e/aarch64-apple-darwin/release/deps/theo_t106_probe-e6ce04751da71971)
+
+running 2 tests
+history checkpoint generation=32 rollover=false logical_ops=39
+history checkpoint generation=32 rollover=false logical_ops=39
+history checkpoint generation=61 rollover=true logical_ops=541
+history checkpoint generation=61 rollover=true logical_ops=541
+history checkpoint generation=96 rollover=false logical_ops=38
+history checkpoint generation=96 rollover=false logical_ops=38
+history checkpoint generation=119 rollover=true logical_ops=603
+history checkpoint generation=119 rollover=true logical_ops=603
+history checkpoint generation=160 rollover=false logical_ops=192
+history checkpoint generation=160 rollover=false logical_ops=192
+history checkpoint generation=176 rollover=true logical_ops=206
+history checkpoint generation=176 rollover=true logical_ops=206
+history: 192 commits/reopens, 3 metadata rollovers, 787 erases, page reuse=true
+history: 192 commits/reopens, 3 metadata rollovers, 787 erases, page reuse=true
+mixed-history logical sweep: 128
+mixed-history sector sweep: 256/2964
+mixed-history logical sweep: 256
+mixed-history logical sweep: 384
+mixed-history sector sweep: 512/2964
+mixed-history logical sweep: 512
+mixed-history sector sweep: 768/2964
+mixed-history logical sweep: 640
+test rollover_tests::history_tests::mixed_history_sector_and_sync_faults has been running for over 60 seconds
+test rollover_tests::history_tests::repeated_rollover_compaction_and_deletion_logical_cuts has been running for over 60 seconds
+mixed-history sector sweep: 1024/2964
+mixed-history logical sweep: 768
+mixed-history sector sweep: 1280/2964
+mixed-history logical sweep: 896
+mixed-history sector sweep: 1536/2964
+mixed-history logical sweep: 1024
+mixed-history sector sweep: 1792/2964
+mixed-history logical sweep: 1152
+mixed-history logical sweep: 1280
+mixed-history sector sweep: 2048/2964
+mixed-history logical sweep: 1408
+mixed-history sector sweep: 2304/2964
+mixed-history logical sweep: 1536
+mixed-history logical sweep: 1664
+mixed-history sector sweep: 2560/2964
+mixed-history logical sweep: 1792
+mixed-history sector sweep: 2816/2964
+mixed-history sector/sync cuts: 2964, generation=96
+test rollover_tests::history_tests::mixed_history_sector_and_sync_faults ... ok
+mixed-history logical sweep: 1920
+mixed-history logical sweep: 2048
+mixed-history logical sweep: 2176
+mixed-history logical sweep: 2304
+mixed-history logical sweep: 2432
+mixed-history logical sweep: 2560
+mixed-history logical sweep: 2688
+mixed-history logical sweep: 2816
+mixed-history logical sweep: 2944
+mixed-history logical sweep: 3072
+mixed-history logical sweep: 3200
+mixed-history logical cuts: 3238 across 6 checkpoints
+test rollover_tests::history_tests::repeated_rollover_compaction_and_deletion_logical_cuts ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 13 filtered out; finished in 256.33s
+

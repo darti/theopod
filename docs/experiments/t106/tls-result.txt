@@ -1,0 +1,7 @@
+   Compiling theo-t106-https-host v0.0.0 (/tmp/theo-t106-https-host)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.99s
+     Running `/tmp/theo-t106-https-host/target/aarch64-apple-darwin/debug/theo-t106-https-host`
+case 0: Ok(1680)
+case 1: Err(Tls(InvalidCertificate))
+case 2: Err(Tls(DecodeError))
+case 3: Err(Clock)

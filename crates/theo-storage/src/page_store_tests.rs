@@ -354,3 +354,53 @@ fn interrupted_ekv_commit_is_atomic() {
         }
     });
 }
+
+#[derive(Clone)]
+struct RejectAllocation;
+// SAFETY: allocation always fails, so no allocation can reach deallocate.
+unsafe impl allocator_api2::alloc::Allocator for RejectAllocation {
+    fn allocate(
+        &self,
+        _: core::alloc::Layout,
+    ) -> Result<core::ptr::NonNull<[u8]>, allocator_api2::alloc::AllocError> {
+        Err(allocator_api2::alloc::AllocError)
+    }
+    unsafe fn deallocate(&self, _: core::ptr::NonNull<u8>, _: core::alloc::Layout) {
+        unreachable!("the allocator never returned a pointer")
+    }
+}
+
+#[test]
+fn explicit_allocator_failure_performs_no_storage_io() {
+    // Regression (t-116): reserve the DB buffers in the selected heap before any card mutation.
+    block_on(async {
+        let disk = Disk::new(32);
+        let writes = disk.writes.clone();
+        assert!(matches!(
+            PageStore::create_in(disk, 32, RejectAllocation).await,
+            Err(PageError::Allocation)
+        ));
+        assert_eq!(writes.get(), 0);
+    });
+}
+
+#[test]
+fn explicit_allocator_can_reopen_and_reports_buffer_budget() {
+    // Regression (t-116): both page and version buffers use the explicit allocator contract.
+    block_on(async {
+        let store = PageStore::create_in(Disk::new(32), 32, allocator_api2::alloc::Global)
+            .await
+            .unwrap();
+        assert_eq!(
+            store.buffer_bytes(),
+            32 * core::mem::size_of::<Option<Version>>() + PAGE
+        );
+        let reopened = PageStore::open_in(store.into_inner(), 32, allocator_api2::alloc::Global)
+            .await
+            .unwrap();
+        assert_eq!(
+            reopened.buffer_bytes(),
+            32 * core::mem::size_of::<Option<Version>>() + PAGE
+        );
+    });
+}

@@ -3,7 +3,10 @@
 //! The backend must preserve sectors outside a failed write, and honour sync
 //! ordering. Ordinary SD cards do not guarantee this on physical power loss.
 
-use alloc::{vec, vec::Vec};
+use allocator_api2::{
+    alloc::{Allocator, Global},
+    vec::Vec,
+};
 use core::fmt::Debug;
 use ekv::flash::{Flash, PageID};
 
@@ -38,6 +41,7 @@ pub enum PageError<E> {
     NotErased,
     Disabled,
     GenerationExhausted,
+    Allocation,
 }
 
 #[derive(Clone, Copy)]
@@ -53,32 +57,54 @@ pub const fn file_len(pages: usize) -> u64 {
 
 /// Copy-on-write flash emulation. Drop and reopen after any failed or cancelled
 /// I/O; methods mark the instance disabled before their first await.
-pub struct PageStore<F> {
+pub struct PageStore<F, A: Allocator = Global> {
     file: F,
-    versions: Vec<Option<Version>>,
-    page: Vec<u8>,
+    versions: Vec<Option<Version>, A>,
+    page: Vec<u8, A>,
     enabled: bool,
 }
 
 impl<F: SectorFile> PageStore<F> {
-    fn new(file: F, pages: usize) -> Result<Self, PageError<F::Error>> {
+    pub async fn create(file: F, pages: usize) -> Result<Self, PageError<F::Error>> {
+        Self::create_in(file, pages, Global).await
+    }
+    pub async fn open(file: F, pages: usize) -> Result<Self, PageError<F::Error>> {
+        Self::open_in(file, pages, Global).await
+    }
+}
+
+impl<F: SectorFile, A: Allocator + Clone> PageStore<F, A> {
+    fn new_in(file: F, pages: usize, allocator: A) -> Result<Self, PageError<F::Error>> {
         if !(32..=ekv::config::MAX_PAGE_COUNT).contains(&pages)
             || file.byte_len() != file_len(pages)
         {
             return Err(PageError::Bounds);
         }
+        let mut versions = Vec::new_in(allocator.clone());
+        versions
+            .try_reserve_exact(pages)
+            .map_err(|_| PageError::Allocation)?;
+        versions.resize(pages, None);
+        let mut page = Vec::new_in(allocator);
+        page.try_reserve_exact(PAGE)
+            .map_err(|_| PageError::Allocation)?;
+        page.resize(PAGE, 0);
         Ok(Self {
             file,
-            versions: vec![None; pages],
-            page: vec![0; PAGE],
+            versions,
+            page,
             enabled: true,
         })
     }
 
     /// Destructive initialization, only for a newly created unpublished file.
     /// Publish the file only after this succeeds. Existing files use open.
-    pub async fn create(file: F, pages: usize) -> Result<Self, PageError<F::Error>> {
-        let mut this = Self::new(file, pages)?;
+    pub async fn create_in(
+        file: F,
+        pages: usize,
+        allocator: A,
+    ) -> Result<Self, PageError<F::Error>> {
+        let mut this = Self::new_in(file, pages, allocator)?;
         this.enabled = false;
         // Invalidate the format marker before initializing slots.
         this.file
@@ -111,8 +137,8 @@ impl<F: SectorFile> PageStore<F> {
         Ok(this)
     }
 
-    pub async fn open(file: F, pages: usize) -> Result<Self, PageError<F::Error>> {
-        let mut this = Self::new(file, pages)?;
+    pub async fn open_in(file: F, pages: usize, allocator: A) -> Result<Self, PageError<F::Error>> {
+        let mut this = Self::new_in(file, pages, allocator)?;
         let mut header = [0; SECTOR];
         this.file
             .read_sector(0, &mut header)
@@ -225,6 +251,11 @@ impl<F: SectorFile> PageStore<F> {
         Ok(())
     }
 
+    /// Actual reserved buffer payload; excludes allocator metadata and the file object.
+    pub fn buffer_bytes(&self) -> usize {
+        self.versions.capacity() * core::mem::size_of::<Option<Version>>() + self.page.capacity()
+    }
+
     pub async fn read_bytes(
         &mut self,
         page: usize,
@@ -292,7 +323,7 @@ impl<F: SectorFile> PageStore<F> {
     }
 }
 
-impl<F: SectorFile> Flash for PageStore<F> {
+impl<F: SectorFile, A: Allocator + Clone> Flash for PageStore<F, A> {
     type Error = PageError<F::Error>;
     fn page_count(&self) -> usize {
         self.versions.len()
@@ -348,7 +379,7 @@ fn format_header(pages: usize) -> [u8; SECTOR] {
     bytes
 }
 
-fn crc32(bytes: &[u8]) -> u32 {
+pub(crate) fn crc32(bytes: &[u8]) -> u32 {
     let mut crc = !0u32;
     for byte in bytes {
         crc ^= *byte as u32;

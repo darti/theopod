@@ -246,3 +246,27 @@ under GPL-3.0-only, its royalty-free license, or a commercial license. The
 royalty-free license does not cover embedded systems, so a distributed
 firmware image must comply with the GPL-3.0 (this source is compatible with
 it) unless a Slint commercial license applies.
+
+### Extended database recovery checks
+
+`just test-storage-recovery` runs the long, release-mode EKV/PageStore fault
+sweeps on the host. Run it when changing the engine, page format or a sector
+backend. It includes repeated metadata rollover, deletes, read-state retention,
+sector errors/cancellation, and commits after recovery. The default host suite
+retains the short metadata-publication guard. Neither recipe accesses the board.
+The local EKV correction and future checked card layout are recorded in
+[ADR-0015](docs/adr/0015-correct-ekv-publication-and-describe-sd-regions.md);
+podcast storage and networking are still disabled.
+
+### Podcast catalogue foundation
+
+`theo-podcasts` contains the host-tested Radio France catalogue: stable local
+identities, read/audio state, bounded records and paged scans. Marking read
+preserves available audio; reclaimed read episodes are not automatically queued.
+RSS synchronization and downloads are not wired into firmware yet. See
+[ADR-0017](docs/adr/0017-store-bounded-podcast-identity-and-state.md).
+
+`just test-catalogue-recovery` runs the longer file-backed interruption model
+for atomic episode/index/ID-counter commits. Run it when changing catalogue
+persistence or its schema. Normal `just test` retains real-file sync/reopen
+coverage. `just check`/`just lint` also check the standalone crate for Xtensa.

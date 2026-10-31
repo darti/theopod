@@ -1,5 +1,6 @@
 [workspace]
-members = ["crates/theo-drivers", "crates/theo-frame-dump", "crates/theo-storage", "tools/frame-png"]
+exclude = ["vendor/ekv"]
+members = ["crates/theo-drivers", "crates/theo-frame-dump", "crates/theo-storage", "crates/theo-podcasts", "tools/frame-png"]
 
 [workspace.package]
 edition = "2024"
@@ -38,11 +39,13 @@ sdio = "0.5.1"
 png = "0.18"
 slint = { version = "1.18", default-features = false, features = ["compat-1-2", "unsafe-single-threaded", "libm", "renderer-software"] }
 slint-build = "1.18"
+sha2 = { version = "0.11", default-features = false }
 speculoos = "0.13"
 static_cell = "2.1"
 theo-drivers = { path = "crates/theo-drivers" }
 theo-frame-dump = { path = "crates/theo-frame-dump" }
 theo-storage = { path = "crates/theo-storage" }
+theo-podcasts = { path = "crates/theo-podcasts" }
 
 [package]
 name = "theo-pod"
@@ -114,3 +117,7 @@ debug = 2
 [profile.dev]
 debug = 2
 opt-level = "s"
+
+# EKV 1.0.0 recovery correction; provenance and removal criteria in vendor/ekv/THEO-PATCH.md.
+[patch.crates-io]
+ekv = { path = "vendor/ekv" }

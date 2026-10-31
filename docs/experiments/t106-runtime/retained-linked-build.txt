@@ -1,0 +1,477 @@
+ESP_LOG=info LIBCLANG_PATH="/Users/matthieu/.rustup/toolchains/esp/bin/../xtensa-esp32-elf-clang/esp-21.1.3_20260408/esp-clang/lib" PATH="/Users/matthieu/.rustup/toolchains/esp/bin/../xtensa-esp-elf/esp-16.2.0_20260914/xtensa-esp-elf/bin:${PATH}" RUSTUP_TOOLCHAIN=esp cargo build --release
+   Compiling compiler_builtins v0.1.160 (/Users/matthieu/.rustup/toolchains/esp/lib/rustlib/src/rust/library/compiler-builtins/compiler-builtins)
+   Compiling core v0.0.0 (/Users/matthieu/.rustup/toolchains/esp/lib/rustlib/src/rust/library/core)
+   Compiling proc-macro2 v1.0.107
+   Compiling quote v1.0.47
+   Compiling unicode-ident v1.0.26
+   Compiling autocfg v1.5.1
+   Compiling version_check v0.9.5
+   Compiling libm v0.2.16
+   Compiling foldhash v0.2.0
+   Compiling equivalent v1.0.2
+   Compiling hashbrown v0.17.1
+   Compiling litrs v1.0.0
+   Compiling esp-metadata-generated v0.5.3
+   Compiling serde_core v1.0.229
+   Compiling itoa v1.0.18
+   Compiling heapless v0.9.3
+   Compiling num-traits v0.2.19
+   Compiling generic-array v0.14.7
+   Compiling indexmap v2.14.2
+   Compiling document-features v0.2.12
+   Compiling memchr v2.8.3
+   Compiling serde v1.0.229
+   Compiling stable_deref_trait v1.2.1
+   Compiling somni-parser v0.3.1
+   Compiling ryu v1.0.23
+   Compiling unsafe-libyaml v0.2.11
+   Compiling heck v0.5.0
+   Compiling smallvec v1.16.3
+   Compiling syn v3.0.7
+   Compiling syn v2.0.119
+   Compiling somni-expr v0.3.2
+   Compiling writeable v0.6.4
+   Compiling ident_case v1.0.1
+   Compiling bitflags v2.13.2
+   Compiling portable-atomic v1.15.0
+   Compiling slotmap v1.1.1
+   Compiling log v0.4.34
+   Compiling simd-adler32 v0.3.10
+   Compiling arrayvec v0.7.8
+   Compiling litemap v0.8.3
+   Compiling embedded-io-async v0.6.1
+   Compiling winnow v1.0.4
+   Compiling crc32fast v1.5.2
+   Compiling adler2 v2.0.1
+   Compiling memoffset v0.9.1
+   Compiling embassy-sync v0.8.0
+   Compiling toml_writer v1.1.3+spec-1.1.0
+   Compiling toml_datetime v1.1.2+spec-1.1.0
+   Compiling fnv v1.0.7
+   Compiling heapless v0.8.0
+   Compiling once_cell v1.21.4
+   Compiling cfg-if v1.0.5
+   Compiling miniz_oxide v0.9.1
+   Compiling unicode-segmentation v1.13.3
+   Compiling embassy-sync v0.6.2
+   Compiling semver v1.0.28
+   Compiling flate2 v1.1.10
+   Compiling float-cmp v0.9.0
+   Compiling toml_parser v1.1.5+spec-1.1.0
+   Compiling convert_case v0.10.0
+   Compiling unicode-xid v0.2.6
+   Compiling strsim v0.11.1
+   Compiling strict-num v0.1.1
+   Compiling rustc_version v0.4.1
+   Compiling miniz_oxide v0.8.9
+   Compiling polycool v0.4.0
+   Compiling fdeflate v0.3.7
+   Compiling toml_edit v0.25.17+spec-1.1.0
+   Compiling icu_locale_fallback_data v2.3.0
+   Compiling arrayref v0.3.9
+   Compiling objc2 v0.6.5
+   Compiling embedded-hal-async v1.0.0
+   Compiling libc v0.2.190
+   Compiling synstructure v0.14.0
+   Compiling proc-macro-crate v3.5.0
+   Compiling png v0.18.1
+   Compiling kurbo v0.13.1
+   Compiling esp-rom-sys v0.1.5
+   Compiling objc2-encode v4.1.0
+   Compiling byteorder-lite v0.1.0
+   Compiling tinyvec v1.13.3
+   Compiling rustversion v1.0.23
+   Compiling embassy-sync v0.7.2
+   Compiling siphasher v1.0.4
+   Compiling icu_decimal_data v2.3.0
+   Compiling zune-core v0.5.3
+   Compiling svgtypes v0.16.1
+   Compiling fontdb v0.24.0
+   Compiling zune-jpeg v0.5.15
+   Compiling simplecss v0.2.2
+   Compiling objc2-core-foundation v0.3.2
+   Compiling roxmltree v0.21.1
+   Compiling esp-sync v0.3.0
+   Compiling derive_more-impl v2.1.1
+   Compiling bytemuck_derive v1.12.1
+   Compiling zerofrom-derive v0.1.8
+   Compiling yoke-derive v0.8.4
+   Compiling serde_derive v1.0.229
+   Compiling displaydoc v0.2.7
+   Compiling zerovec-derive v0.11.6
+   Compiling color_quant v1.1.0
+   Compiling pulldown-cmark v0.13.5
+   Compiling icu_normalizer_data v2.3.0
+   Compiling pico-args v0.5.0
+   Compiling embassy-time-driver v0.2.2
+   Compiling unicode-script v0.5.8
+   Compiling quick-error v2.0.1
+   Compiling xmlwriter v0.1.0
+   Compiling imagesize v0.15.0
+   Compiling bytemuck v1.25.2
+   Compiling data-url v0.3.2
+   Compiling zerofrom v0.1.8
+   Compiling icu_properties_data v2.3.0
+   Compiling crossbeam-utils v0.8.23
+   Compiling weezl v0.1.12
+   Compiling yoke v0.8.3
+   Compiling unicode-bidi v0.3.18
+   Compiling font-types v0.12.6
+   Compiling tiny-skia-path v0.12.0
+   Compiling zerovec v0.11.8
+   Compiling zerotrie v0.2.5
+   Compiling utf8_iter v1.0.4
+   Compiling read-fonts v0.41.0
+   Compiling unicode-vo v0.1.0
+   Compiling base64 v0.23.1
+   Compiling tiny-skia v0.12.0
+   Compiling gif v0.14.2
+   Compiling tinystr v0.8.4
+   Compiling alloc v0.0.0 (/Users/matthieu/.rustup/toolchains/esp/lib/rustlib/src/rust/library/alloc)
+   Compiling potential_utf v0.1.6
+   Compiling icu_locale_core v2.3.0
+   Compiling icu_collections v2.3.0
+   Compiling rgb v0.8.53
+   Compiling image-webp v0.2.4
+   Compiling serde_yaml v0.9.34+deprecated
+   Compiling icu_provider v2.3.1
+   Compiling fixed_decimal v0.7.2
+   Compiling objc2-foundation v0.3.2
+   Compiling icu_locale_fallback v2.3.0
+   Compiling objc2-core-text v0.3.2
+   Compiling memmap2 v0.9.11
+   Compiling esp-config v0.8.0
+   Compiling strum_macros v0.28.0
+   Compiling darling_core v0.21.3
+   Compiling unicase v2.10.0
+   Compiling zeroize v1.9.1
+   Compiling subtle v2.6.1
+   Compiling typenum v1.20.1
+   Compiling byteorder v1.5.0
+   Compiling critical-section v1.2.0
+   Compiling rand_core v0.10.1
+   Compiling hash32 v0.3.1
+   Compiling const-oid v0.9.6
+   Compiling cmov v0.5.4
+   Compiling rand_core v0.6.4
+   Compiling ctutils v0.4.7
+   Compiling embedded-io v0.7.1
+   Compiling embedded-io-async v0.7.0
+   Compiling const-oid v0.10.2
+   Compiling futures-core v0.3.34
+   Compiling hybrid-array v0.4.15
+   Compiling futures-sink v0.3.34
+   Compiling embedded-io v0.6.1
+   Compiling nb v1.1.0
+   Compiling crypto-common v0.2.2
+   Compiling block-buffer v0.10.4
+   Compiling crypto-common v0.1.7
+   Compiling block-buffer v0.12.1
+   Compiling digest v0.10.7
+   Compiling pin-project-lite v0.2.17
+   Compiling futures-task v0.3.34
+   Compiling cpubits v0.1.1
+   Compiling futures-util v0.3.34
+   Compiling embedded-hal v1.0.0
+   Compiling xtensa-lx v0.13.0
+   Compiling nb v0.1.3
+   Compiling der v0.7.10
+   Compiling void v1.0.2
+   Compiling skrifa v0.44.0
+   Compiling harfrust v0.12.0
+   Compiling digest v0.11.3
+   Compiling linebender_resource_handle v0.1.1
+   Compiling parlance v0.1.1
+   Compiling crossbeam-epoch v0.9.21
+   Compiling darling_macro v0.21.3
+   Compiling embedded-hal v0.2.7
+   Compiling fontique v0.11.1
+   Compiling icu_decimal v2.3.0
+   Compiling derive_more v2.1.1
+   Compiling xtensa-lx-rt v0.23.0
+   Compiling htmlparser v0.2.1
+   Compiling crossbeam-deque v0.8.8
+   Compiling icu_properties v2.3.0
+   Compiling icu_normalizer v2.3.0
+   Compiling darling v0.21.3
+   Compiling crypto-bigint v0.7.10
+   Compiling ff v0.14.0
+   Compiling as-slice v0.2.1
+   Compiling usvg v0.48.1
+   Compiling vcell v0.1.3
+   Compiling der_derive v0.8.0
+   Compiling euclid v0.22.14
+   Compiling darling_core v0.24.1
+   Compiling thiserror v2.0.21
+   Compiling rayon-core v1.13.0
+   Compiling zerocopy v0.8.62
+   Compiling esp32s3 v0.36.0
+   Compiling embassy-hal-internal v0.4.0
+   Compiling object v0.37.3
+   Compiling der v0.8.3
+   Compiling resvg v0.48.1
+   Compiling lyon_geom v1.0.19
+   Compiling idna_adapter v1.2.2
+   Compiling i-slint-common v1.18.1
+   Compiling embassy-time v0.5.1
+   Compiling enumset_derive v0.15.0
+   Compiling aligned v0.4.3
+   Compiling hmac v0.13.0
+   Compiling signature v2.2.0
+   Compiling embedded-storage v0.3.2
+   Compiling embassy-futures v0.1.2
+   Compiling thiserror-impl v2.0.21
+   Compiling snafu-derive v0.8.9
+   Compiling field-offset v0.3.6
+   Compiling somni-template v0.3.2
+   Compiling rspolib v0.1.2
+   Compiling zmij v1.0.23
+   Compiling paste v1.0.15
+   Compiling either v1.19.0
+   Compiling unicode-width v0.2.2
+   Compiling pxfm v0.1.30
+   Compiling darling_macro v0.24.1
+   Compiling percent-encoding v2.3.2
+   Compiling form_urlencoded v1.2.2
+   Compiling esp-hal v1.2.2
+   Compiling darling v0.24.1
+   Compiling enumset v1.1.14
+   Compiling embedded-storage-async v0.4.2
+   Compiling block-device-driver v0.2.0
+   Compiling lyon_path v1.0.19
+   Compiling idna v1.1.0
+   Compiling group v0.14.0
+   Compiling hmac v0.12.1
+   Compiling embassy-usb-driver v0.2.2
+   Compiling base16ct v1.0.0
+   Compiling gcd v2.3.0
+   Compiling bitfield-macros v0.19.5
+   Compiling num_enum_derive v0.7.6
+   Compiling strum_macros v0.27.2
+   Compiling xtensa-lx-rt-proc-macros v0.5.0
+   Compiling termcolor v1.4.1
+   Compiling moxcms v0.8.1
+   Compiling text-size v1.1.1
+   Compiling snafu v0.8.9
+   Compiling anstyle v1.0.14
+   Compiling lazy_static v1.5.1
+   Compiling rustc-hash v1.1.0
+   Compiling i-slint-compiler v1.18.1
+   Compiling unicode-linebreak v0.1.5
+   Compiling hashbrown v0.14.5
+   Compiling serde_json v1.0.152
+   Compiling natord v1.0.9
+   Compiling yazi v0.2.1
+   Compiling zeno v0.3.3
+   Compiling countme v3.0.1
+   Compiling indoc v2.0.7
+   Compiling rowan v0.17.0
+   Compiling swash v0.2.10
+   Compiling num_enum v0.7.6
+   Compiling annotate-snippets v0.12.16
+   Compiling instability v0.3.14
+   Compiling ppv-lite86 v0.2.21
+   Compiling bitfield v0.19.5
+   Compiling strum v0.27.2
+   Compiling esp-hal-procmacros v0.23.0
+   Compiling fugit v0.5.0
+   Compiling sec1 v0.8.1
+   Compiling embassy-usb-synopsys-otg v0.4.0
+   Compiling lyon_extra v1.1.0
+   Compiling embassy-embedded-hal v0.6.0
+   Compiling url v2.5.8
+   Compiling rayon v1.12.0
+   Compiling sdio v0.5.1
+   Compiling image v0.25.10
+   Compiling itertools v0.15.0
+   Compiling hkdf v0.13.0
+   Compiling strum v0.28.0
+   Compiling sha2 v0.10.9
+   Compiling embedded-can v0.4.1
+   Compiling inout v0.2.5
+   Compiling static_cell v2.1.1
+   Compiling ff v0.13.1
+   Compiling base16ct v0.2.0
+   Compiling rand_core v0.9.5
+   Compiling ufmt-write v0.1.0
+   Compiling const-field-offset-macro v0.2.1
+   Compiling delegate v0.13.5
+   Compiling smol_str v0.3.6
+   Compiling by_address v1.2.1
+   Compiling pin-utils v0.1.1
+   Compiling typed-index-collections v3.5.0
+   Compiling spin_on v0.1.1
+   Compiling sec1 v0.7.3
+   Compiling group v0.13.0
+   Compiling const-field-offset v0.2.1
+   Compiling elliptic-curve v0.14.3
+   Compiling rand_chacha v0.3.1
+   Compiling hkdf v0.12.4
+   Compiling primefield v0.14.0
+   Compiling spki v0.7.3
+   Compiling crypto-bigint v0.5.5
+   Compiling vtable-macro v0.5.0
+   Compiling pin-project-internal v1.1.13
+   Compiling darling_core v0.20.11
+   Compiling esp-println v0.18.0
+   Compiling embassy-crypto v0.1.0 (https://github.com/embassy-rs/embassy?rev=822a76ea91f2c0885c6eb0c65fe91181e31133e1#822a76ea)
+   Compiling elliptic-curve v0.13.8
+   Compiling vtable v0.5.0
+   Compiling i-slint-core-macros v1.18.1
+   Compiling taffy v0.10.1
+   Compiling wnaf v0.14.1
+   Compiling pkcs8 v0.10.2
+   Compiling cipher v0.5.2
+   Compiling pin-project v1.1.13
+   Compiling rfc6979 v0.6.0
+   Compiling signature v3.0.0
+   Compiling sha2 v0.11.0
+   Compiling universal-hash v0.6.1
+   Compiling num-integer v0.1.47
+   Compiling chrono v0.4.45
+   Compiling esp-alloc v0.11.0
+   Compiling spin v0.9.9
+   Compiling scopeguard v1.2.0
+   Compiling const-default v1.0.0
+   Compiling pin-weak v1.1.0
+   Compiling slab v0.4.12
+   Compiling allocator-api2 v0.3.1
+   Compiling unitrait-macros v2.0.0 (https://github.com/embassy-rs/unitrait?rev=bb96601b3d293fa27d1ca2891f6ea148e534e433#bb96601b)
+   Compiling curve25519-dalek v4.1.3
+   Compiling esp32s3 v0.37.0
+   Compiling jiff-core v0.1.1
+   Compiling cfg_aliases v0.2.2
+   Compiling darling_macro v0.20.11
+   Compiling num-bigint-dig v0.8.6
+   Compiling embassy-time-queue-utils v0.3.2
+   Compiling esp-wifi-sys-esp32s3 v0.3.0
+   Compiling i-slint-backend-selector v1.18.1
+   Compiling darling v0.20.11
+   Compiling i-slint-core v1.18.1
+   Compiling rlsf v0.2.3
+   Compiling jiff v0.2.37
+   Compiling unitrait v2.0.0 (https://github.com/embassy-rs/unitrait?rev=bb96601b3d293fa27d1ca2891f6ea148e534e433#bb96601b)
+   Compiling num-iter v0.1.46
+   Compiling polyval v0.7.3
+   Compiling ecdsa v0.17.0
+   Compiling primeorder v0.14.0
+   Compiling rand v0.8.8
+   Compiling rfc6979 v0.4.0
+   Compiling esp-phy v0.3.0
+   Compiling embedded-nal v0.9.0
+   Compiling linked_list_allocator v0.10.6
+   Compiling embassy-executor-timer-queue v0.1.0
+   Compiling esp-storage v0.10.0
+   Compiling smoltcp v0.13.1
+   Compiling ekv v1.0.0 (/private/tmp/theo-t106-retained-linked/base/vendor/ekv)
+   Compiling embassy-executor v0.10.0
+   Compiling httparse v1.10.1
+   Compiling xarxa-driver v0.1.0
+   Compiling embedded-nal-async v0.9.0
+   Compiling ecdsa v0.16.9
+   Compiling ghash v0.6.0
+   Compiling embassy-executor-macros v0.8.0
+   Compiling ctr v0.10.1
+   Compiling aes v0.9.3
+   Compiling pkcs1 v0.7.5
+   Compiling primeorder v0.13.6
+   Compiling aead v0.6.1
+   Compiling ed25519 v2.2.3
+   Compiling esp-radio-rtos-driver v0.4.2
+   Compiling esp-rtos v0.4.0
+   Compiling esp-backtrace v0.20.0
+   Compiling esp-radio v1.0.0-beta.1
+   Compiling cordyceps v0.3.5
+   Compiling littlefs-rust-core v0.1.1 (https://github.com/light-player/littlefs-rust?branch=main#732d038b)
+   Compiling untrusted v0.9.0
+   Compiling esp-bootloader-esp-idf v0.6.0
+   Compiling managed v0.8.0
+   Compiling rustls-pki-types v1.15.1
+   Compiling embassy-net-driver v0.2.0
+   Compiling bitflags v1.3.2
+   Compiling docsplay-macros v0.1.2
+   Compiling portable_atomic_enum_macros v0.2.1
+   Compiling rustls-webpki v0.103.16
+   Compiling i-slint-renderer-software v1.18.1
+   Compiling portable_atomic_enum v0.3.1
+   Compiling docsplay v0.1.3
+   Compiling littlefs-rust v0.1.1 (https://github.com/light-player/littlefs-rust?branch=main#732d038b)
+   Compiling slint-build v1.18.1
+   Compiling ed25519-dalek v2.2.0
+   Compiling p256 v0.13.2
+   Compiling aes-gcm v0.11.1
+   Compiling rsa v0.9.10
+   Compiling p384 v0.14.0
+   Compiling p256 v0.14.0
+   Compiling buffered-io v0.6.0
+   Compiling base64 v0.21.7
+   Compiling hex v0.4.3
+   Compiling nourl v0.1.5
+   Compiling num-derive v0.4.2
+   Compiling theo-storage v0.1.0 (/private/tmp/theo-t106-retained-linked/base/crates/theo-storage)
+   Compiling embedded-tls v0.19.0 (https://github.com/embassy-rs/embedded-tls?rev=6487c62bb084c33361822022e21836ddfd48388f#6487c62b)
+   Compiling reqwless v0.14.0
+   Compiling embassy-net v0.9.1
+   Compiling theo-drivers v0.1.0 (/private/tmp/theo-t106-retained-linked/base/crates/theo-drivers)
+   Compiling embassy-crypto-rustcrypto v0.1.0 (https://github.com/embassy-rs/embassy?rev=822a76ea91f2c0885c6eb0c65fe91181e31133e1#822a76ea)
+   Compiling theo-pod v0.1.0 (/private/tmp/theo-t106-retained-linked/base)
+   Compiling slint-macros v1.18.1
+   Compiling slint v1.18.1
+warning: associated function `with_before_io` is never used
+   --> src/device/t106_regions.rs:111:12
+    |
+108 | impl<D: SectorIo, B: FnMut() -> Result<(), Error>> AsyncRegion<D, B> {
+    | -------------------------------------------------------------------- associated function in this implementation
+...
+111 |     pub fn with_before_io(io: RegionIo<D>, before_io: B) -> Self {
+    |            ^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `0` is never read
+  --> src/device/t106_transport.rs:33:9
+   |
+33 |     Tls(TlsError),
+   |     --- ^^^^^^^^
+   |     |
+   |     field in this variant
+   |
+   = note: `Error` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+help: consider changing the field to be of unit type to suppress this warning while preserving the field numbering, or remove the field
+   |
+33 -     Tls(TlsError),
+33 +     Tls(()),
+   |
+
+warning: field `0` is never read
+  --> src/device/t106_transport.rs:34:10
+   |
+34 |     Http(reqwless::Error),
+   |     ---- ^^^^^^^^^^^^^^^
+   |     |
+   |     field in this variant
+   |
+   = note: `Error` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+help: consider changing the field to be of unit type to suppress this warning while preserving the field numbering, or remove the field
+   |
+34 -     Http(reqwless::Error),
+34 +     Http(()),
+   |
+
+warning: field `0` is never read
+  --> src/device/t106_transport.rs:35:12
+   |
+35 |     Status(u16),
+   |     ------ ^^^
+   |     |
+   |     field in this variant
+   |
+   = note: `Error` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+help: consider changing the field to be of unit type to suppress this warning while preserving the field numbering, or remove the field
+   |
+35 -     Status(u16),
+35 +     Status(()),
+   |
+
+warning: `theo-pod` (bin "theo-pod") generated 4 warnings
+    Finished `release` profile [optimized + debuginfo] target(s) in 1m 13s

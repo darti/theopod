@@ -1,0 +1,55 @@
+     Locking 1 package to highest Rust 1.99.0 compatible version
+      Adding ekv v1.0.0 (/private/tmp/theo-t116-history-red/ekv)
+   Compiling proc-macro2 v1.0.107
+   Compiling unicode-ident v1.0.27
+   Compiling quote v1.0.47
+   Compiling futures-core v0.3.34
+   Compiling futures-sink v0.3.34
+   Compiling futures-io v0.3.34
+   Compiling slab v0.4.12
+   Compiling pin-project-lite v0.2.17
+   Compiling memchr v2.8.3
+   Compiling futures-task v0.3.34
+   Compiling futures-channel v0.3.34
+   Compiling heapless v0.8.0
+   Compiling embedded-io-async v0.6.1
+   Compiling byteorder v1.5.0
+   Compiling stable_deref_trait v1.2.1
+   Compiling embedded-io v0.6.1
+   Compiling embassy-sync v0.6.2
+   Compiling critical-section v1.2.0
+   Compiling hash32 v0.3.1
+   Compiling cfg-if v1.0.5
+   Compiling ekv v1.0.0 (/private/tmp/theo-t116-history-red/ekv)
+   Compiling syn v3.0.9
+   Compiling futures-macro v0.3.34
+   Compiling futures-util v0.3.34
+   Compiling futures-executor v0.3.34
+   Compiling futures v0.3.34
+   Compiling theo-t106-probe v0.0.0 (/tmp/theo-t116-history-red/db)
+    Finished `release` profile [optimized] target(s) in 17.46s
+     Running unittests src/lib.rs (/Volumes/narf-space/cargo-build/87/b05cf85524b623/aarch64-apple-darwin/release/deps/theo_t106_probe-c29e52e604b1e6cc)
+
+running 1 test
+history checkpoint generation=32 rollover=false logical_ops=39
+history checkpoint generation=61 rollover=true logical_ops=541
+history checkpoint generation=96 rollover=false logical_ops=38
+history checkpoint generation=119 rollover=true logical_ops=603
+history checkpoint generation=160 rollover=false logical_ops=192
+history checkpoint generation=176 rollover=true logical_ops=206
+history: 192 commits/reopens, 3 metadata rollovers, 787 erases, page reuse=true
+test rollover_tests::history_tests::repeated_rollover_compaction_and_deletion_logical_cuts has been running for over 60 seconds
+
+thread 'rollover_tests::history_tests::repeated_rollover_compaction_and_deletion_logical_cuts' (18534301) panicked at src/history_tests.rs:157:5:
+generation=61 logical cut=539 prefix=20: catalogue is neither complete old nor complete new state
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test rollover_tests::history_tests::repeated_rollover_compaction_and_deletion_logical_cuts ... FAILED
+
+failures:
+
+failures:
+    rollover_tests::history_tests::repeated_rollover_compaction_and_deletion_logical_cuts
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 14 filtered out; finished in 122.98s
+
+error: test failed, to rerun pass `--lib`

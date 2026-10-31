@@ -1,0 +1,19 @@
+   Compiling theo-t106-runtime v0.0.0 (/tmp/theo-t106-runtime)
+    Finished `release` profile [optimized] target(s) in 2.10s
+     Running unittests src/lib.rs (/Volumes/narf-space/cargo-build/26/4778347d72a070/aarch64-apple-darwin/release/deps/theo_t106_runtime-22ffc7e2d477bc69)
+
+running 1 test
+
+thread 'regions_tests::late_database_completion_after_media_failure_is_rejected' (20752626) panicked at src/regions_tests.rs:232:5:
+assertion failed: matches!(op.as_mut().poll(&mut cx), Poll::Ready(Err(Error::Io)))
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test regions_tests::late_database_completion_after_media_failure_is_rejected ... FAILED
+
+failures:
+
+failures:
+    regions_tests::late_database_completion_after_media_failure_is_rejected
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--lib`

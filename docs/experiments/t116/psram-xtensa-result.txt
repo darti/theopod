@@ -1,0 +1,11 @@
+LIBCLANG_PATH="/Users/matthieu/.rustup/toolchains/esp/bin/../xtensa-esp32-elf-clang/esp-21.1.3_20260408/esp-clang/lib" PATH="/Users/matthieu/.rustup/toolchains/esp/bin/../xtensa-esp-elf/esp-16.2.0_20260914/xtensa-esp-elf/bin:${PATH}" RUSTC_WRAPPER= RUSTUP_TOOLCHAIN=esp cargo check --offline --manifest-path /tmp/theo-t116-xtensa/Cargo.toml --lib --target xtensa-esp32s3-none-elf -Z build-std=core,alloc
+
+
+WARNING: use --release
+  We *strongly* recommend using release profile when building esp-hal.
+  The dev profile can potentially be one or more orders of magnitude
+  slower than release, and may cause issues with timing-sensitive
+  peripherals or devices.
+
+    Checking theo-t106-probe v0.0.0 (/tmp/theo-t116-xtensa)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.68s

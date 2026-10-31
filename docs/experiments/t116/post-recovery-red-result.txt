@@ -1,0 +1,27 @@
+   Compiling allocator-api2 v0.3.1
+   Compiling theo-t106-probe v0.0.0 (/tmp/theo-t116-history-red/db)
+    Finished `release` profile [optimized] target(s) in 4.48s
+     Running unittests src/lib.rs (/Volumes/narf-space/cargo-build/87/b05cf85524b623/aarch64-apple-darwin/release/deps/theo_t106_probe-e01bf08b323e6728)
+
+running 1 test
+history checkpoint generation=32 rollover=false logical_ops=39
+history checkpoint generation=61 rollover=true logical_ops=541
+history checkpoint generation=96 rollover=false logical_ops=38
+history checkpoint generation=119 rollover=true logical_ops=603
+history checkpoint generation=160 rollover=false logical_ops=192
+history checkpoint generation=176 rollover=true logical_ops=206
+history: 192 commits/reopens, 3 metadata rollovers, 787 erases, page reuse=true
+
+thread 'rollover_tests::history_tests::recovered_catalogue_can_commit_large_values_and_reopen_again' (18683861) panicked at src/history_tests.rs:288:13:
+assertion failed: expected == checkpoint.old || expected == checkpoint.new
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test rollover_tests::history_tests::recovered_catalogue_can_commit_large_values_and_reopen_again ... FAILED
+
+failures:
+
+failures:
+    rollover_tests::history_tests::recovered_catalogue_can_commit_large_values_and_reopen_again
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 17 filtered out; finished in 13.45s
+
+error: test failed, to rerun pass `--lib`

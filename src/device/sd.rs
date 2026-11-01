@@ -461,7 +461,9 @@ async fn init_card(
 mod worker;
 #[cfg(feature = "sd-check")]
 pub use worker::test_rotation;
-pub use worker::{SdStorage, append_log, init, mount, report_log_tail};
+pub use worker::{
+    PodcastRequest, SdStorage, append_log, disable, domain, guard, init, mount, report_log_tail,
+};
 
 #[path = "sd_io.rs"]
 mod io;

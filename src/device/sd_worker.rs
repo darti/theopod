@@ -14,9 +14,19 @@ use esp_hal::{
 };
 use littlefs_rust::{Error, Filesystem};
 use static_cell::{ConstStaticCell, StaticCell};
+use theo_podcasts::{
+    catalogue::Catalogue,
+    littlefs_media::LittlefsMedia,
+    runtime::{self, Runtime},
+};
 use theo_storage::{
     LogBuffer,
     littlefs::{self, Geometry, LogTail, RequestGuard, SectorIo, SectorStorage},
+};
+use theo_storage::{
+    card_layout::CardLayout,
+    page_store::PageStore,
+    regions::{self, AsyncRegion, RegionIo},
 };
 
 use super::{SdInitError, io};
@@ -26,10 +36,13 @@ const IO_BUDGET: Duration = Duration::from_millis(500);
 pub(super) static SECTORS: SectorBus = SectorBus::new();
 static COMMANDS: Channel<CriticalSectionRawMutex, Request, 1> = Channel::new();
 static REPLY: Signal<CriticalSectionRawMutex, Result<Reply, Error>> = Signal::new();
-const STACK_SIZE: usize = 32768;
+const STACK_SIZE: usize = 48 * 1024;
 static STACK: ConstStaticCell<Stack<STACK_SIZE>> = ConstStaticCell::new(Stack::new());
 
+pub type PodcastRequest =
+    allocator_api2::boxed::Box<runtime::Command, &'static esp_alloc::ExternalMemory>;
 enum Command {
+    Domain(PodcastRequest),
     Mount,
     Append(Vec<u8>, LogTarget),
     Tail,
@@ -58,8 +71,8 @@ struct Request {
 }
 // Fixed inline replies keep the one-slot mailbox bounded without allocation.
 #[allow(clippy::large_enum_variant)]
-#[derive(Debug)]
 enum Reply {
+    Domain(runtime::Reply),
     Done,
     Tail(LogTail),
 }
@@ -119,7 +132,7 @@ pub async fn init(
         EXECUTOR
             .init(esp_rtos::embassy::Executor::new())
             .run(|spawner| {
-                spawner.spawn(worker(geometry, stack_bottom).expect("SD owner once"));
+                spawner.spawn(worker(geometry, sectors, stack_bottom).expect("SD owner once"));
             });
     });
     guard.complete().map_err(|_| SdInitError::Host)?;
@@ -150,6 +163,23 @@ pub async fn append_log<const N: usize>(
         .await?;
     buffer.consume(buffer.len());
     Ok(())
+}
+
+pub fn disable() {
+    SECTORS.disable();
+}
+pub fn guard() -> Result<RequestGuard<'static>, Error> {
+    RequestGuard::begin(SECTORS.poison_flag())
+}
+
+pub async fn domain(
+    storage: &mut SdStorage,
+    command: PodcastRequest,
+) -> Result<runtime::Reply, Error> {
+    match storage.request(Command::Domain(command), IO_BUDGET).await? {
+        Reply::Domain(reply) => Ok(reply),
+        _ => Err(Error::Io),
+    }
 }
 
 pub async fn report_log_tail(storage: &mut SdStorage) -> Result<(), Error> {
@@ -188,6 +218,7 @@ impl Measurements {
 }
 
 struct CardIo {
+    sectors: u64,
     client: SectorClient<'static>,
     #[cfg(feature = "sd-check")]
     measurements: Rc<Measurements>,
@@ -237,29 +268,56 @@ impl SectorIo for CardIo {
 }
 
 #[embassy_executor::task]
-async fn worker(geometry: Geometry, _stack_bottom: usize) {
+async fn worker(geometry: Geometry, sectors: u64, stack_bottom: usize) {
+    // Keep Embassy's task header/atomic wake state in internal memory. Only
+    // the large, pinned domain future is placed externally; cache-sensitive
+    // HAL and sector I/O tasks retain their existing internal storage.
+    match theo_storage::future::try_pin_in(
+        move || owner(geometry, sectors, stack_bottom),
+        &esp_alloc::ExternalMemory,
+        114000,
+    ) {
+        Ok(future) => {
+            log::info!(
+                "storage owner future: {} PSRAM bytes",
+                core::mem::size_of_val(future.as_ref().get_ref())
+            );
+            future.await;
+        }
+        Err(_) => {
+            SECTORS.disable();
+            log::warn!("storage offline: PSRAM owner allocation failed");
+        }
+    }
+}
+async fn owner(geometry: Geometry, sectors: u64, _stack_bottom: usize) {
     #[cfg(feature = "sd-check")]
     let measurements = Rc::new(Measurements {
         stack_bottom: _stack_bottom,
         min_sampled_headroom: Cell::new(STACK_SIZE),
     });
     let deadline = Rc::new(Cell::new(Instant::now()));
-    let mut card = Some(SectorStorage::new(
-        CardIo {
-            #[cfg(feature = "sd-check")]
-            measurements: measurements.clone(),
-            client: SECTORS.take_client().expect("one sector client"),
-            deadline: deadline.clone(),
-        },
-        geometry,
-    ));
+    let mut card = Some(CardIo {
+        sectors,
+        #[cfg(feature = "sd-check")]
+        measurements: measurements.clone(),
+        client: SECTORS.take_client().expect("one sector client"),
+        deadline: deadline.clone(),
+    });
     let mut volume = None;
+    let mut podcasts = None;
+    let mut scratch = allocator_api2::vec::Vec::new_in(&esp_alloc::ExternalMemory);
+    if scratch.try_reserve_exact(4096).is_ok() {
+        scratch.resize(4096, 0);
+    }
+
     loop {
         let request = COMMANDS.receive().await;
         deadline.set(request.deadline);
         #[cfg(feature = "sd-check")]
         let label = match &request.command {
             Command::Mount => "mount",
+            Command::Domain(_) => "podcast",
             Command::Append(..) => "append",
             Command::Tail => "tail",
             Command::RotationStart => "rotation-start",
@@ -272,31 +330,49 @@ async fn worker(geometry: Geometry, _stack_bottom: usize) {
         } else {
             match request.command {
                 Command::Mount => match card.take() {
-                    Some(card) => match mount_card(card, geometry) {
-                        Ok(fs) => {
-                            volume = Some(fs);
-                            Ok(Reply::Done)
+                    Some(card) => {
+                        match mount_owner(card, geometry, &mut podcasts, !scratch.is_empty()).await
+                        {
+                            Ok(fs) => {
+                                volume = Some(fs);
+                                Ok(Reply::Done)
+                            }
+                            Err((error, _)) => Err(error),
                         }
-                        Err((error, _)) => Err(error),
-                    },
+                    }
                     None => Err(Error::Io),
+                },
+                Command::Domain(command) => match podcasts.as_mut() {
+                    Some(owner) => match owner
+                        .handle(
+                            allocator_api2::boxed::Box::into_inner(command),
+                            &mut scratch,
+                        )
+                        .await
+                    {
+                        Ok(reply) => Ok(Reply::Domain(reply)),
+                        Err(runtime::Error::Storage) => Err(Error::Io),
+                        Err(runtime::Error::Invalid) => Ok(Reply::Domain(runtime::Reply::Rejected)),
+                    },
+                    None => Ok(Reply::Domain(runtime::Reply::Offline)),
                 },
                 Command::Append(bytes, target) => match volume.as_ref() {
                     Some(fs) => {
                         let mut buffer = LogBuffer::<4096>::new();
                         buffer.push(&bytes);
                         let (name, archive) = target.paths();
-                        littlefs::append_log(fs, &mut buffer, name, archive).map(|()| Reply::Done)
+                        littlefs::append_log(fs.as_ref(), &mut buffer, name, archive)
+                            .map(|()| Reply::Done)
                     }
                     None => Err(Error::Io),
                 },
                 Command::Tail => match volume.as_ref() {
-                    Some(fs) => littlefs::log_tail(fs, "/theo.log").map(Reply::Tail),
+                    Some(fs) => littlefs::log_tail(fs.as_ref(), "/theo.log").map(Reply::Tail),
                     None => Err(Error::Io),
                 },
                 #[cfg(feature = "sd-check")]
                 Command::RotationStart => match volume.as_ref() {
-                    Some(fs) => rotation_start(fs).map(|()| Reply::Done),
+                    Some(fs) => rotation_start(fs.as_ref()).map(|()| Reply::Done),
                     None => Err(Error::Io),
                 },
                 #[cfg(feature = "sd-check")]
@@ -319,6 +395,7 @@ async fn worker(geometry: Geometry, _stack_bottom: usize) {
         if result.is_err() || SECTORS.is_disabled() {
             SECTORS.disable();
             volume = None;
+            podcasts = None;
             card = None;
         }
         #[cfg(feature = "sd-check")]
@@ -368,25 +445,91 @@ pub async fn test_rotation(storage: &mut SdStorage) -> Result<(), Error> {
     Ok(())
 }
 
-fn mount_card(
-    card: SectorStorage<CardIo>,
-    geometry: Geometry,
-) -> Result<Filesystem<SectorStorage<CardIo>>, (Error, ())> {
-    #[cfg(feature = "sd-provision")]
-    if option_env!("THEO_SD_PROVISION") == Some("format") {
-        return littlefs::provision_once(card, geometry)
-            .map(|(fs, formatted)| {
-                esp_println::println!(
-                    "INFO - microSD provisioning: {}",
-                    if formatted {
-                        "formatted LittleFS"
-                    } else {
-                        "existing LittleFS preserved"
-                    }
-                );
-                fs
-            })
-            .map_err(|error| (error, ()));
+type DbFlash = PageStore<AsyncRegion<CardIo>, &'static esp_alloc::ExternalMemory>;
+type MediaFs = Filesystem<SectorStorage<MediaIo>>;
+type PodcastOwner = Runtime<DbFlash, LittlefsMedia<SectorStorage<MediaIo>>>;
+enum MediaIo {
+    Legacy(CardIo),
+    Region(RegionIo<CardIo>),
+}
+impl SectorIo for MediaIo {
+    fn read_sector(&mut self, sector: u32, out: &mut [u8; 512]) -> Result<(), Error> {
+        match self {
+            Self::Legacy(io) => io.read_sector(sector, out),
+            Self::Region(io) => io.read_sector(sector, out),
+        }
     }
-    Filesystem::mount(card, geometry.config()).map_err(|(error, _)| (error, ()))
+    fn write_sector(&mut self, sector: u32, data: &[u8; 512]) -> Result<(), Error> {
+        match self {
+            Self::Legacy(io) => io.write_sector(sector, data),
+            Self::Region(io) => io.write_sector(sector, data),
+        }
+    }
+    fn sync(&mut self) -> Result<(), Error> {
+        match self {
+            Self::Legacy(io) => io.sync(),
+            Self::Region(io) => io.sync(),
+        }
+    }
+}
+async fn mount_owner(
+    mut card: CardIo,
+    legacy: Geometry,
+    owner: &mut Option<PodcastOwner>,
+    allocated: bool,
+) -> Result<Rc<MediaFs>, (Error, ())> {
+    let mut first = [0; 512];
+    let mut second = [0; 512];
+    card.read_sector(0, &mut first).map_err(|e| (e, ()))?;
+    card.read_sector(8, &mut second).map_err(|e| (e, ()))?;
+    // Actual capacity is retained, not rounded geometry, for descriptor checks.
+    let layout =
+        CardLayout::select(&first, &second, card.sectors).map_err(|_| (Error::Corrupt, ()))?;
+    let (io, geometry, database) = match layout {
+        None => (MediaIo::Legacy(card), legacy, None),
+        Some(layout) => {
+            let (db, media) = regions::split(card, layout);
+            (
+                MediaIo::Region(media),
+                Geometry::new(layout.media().sectors() as u64).map_err(|e| (e, ()))?,
+                Some((db, layout)),
+            )
+        }
+    };
+    let storage = SectorStorage::new(io, geometry);
+    // Explicit provisioning remains legacy-only; normal boot never formats.
+    #[cfg(feature = "sd-provision")]
+    let fs = if option_env!("THEO_SD_PROVISION") == Some("format") && database.is_none() {
+        littlefs::provision_once(storage, geometry)
+            .map(|(fs, _)| fs)
+            .map_err(|e| (e, ()))?
+    } else {
+        Filesystem::mount(storage, geometry.config()).map_err(|(e, _)| (e, ()))?
+    };
+    #[cfg(not(feature = "sd-provision"))]
+    let fs = Filesystem::mount(storage, geometry.config()).map_err(|(e, _)| (e, ()))?;
+    let fs = Rc::new(fs);
+    if let Some((db, layout)) = database {
+        if allocated {
+            let store = PageStore::open_in(
+                AsyncRegion::new(db),
+                layout.pages(),
+                &esp_alloc::ExternalMemory,
+            )
+            .await
+            .map_err(|_| (Error::Io, ()))?;
+            let catalogue = Catalogue::open(store)
+                .await
+                .map_err(|_| (Error::Corrupt, ()))?;
+            *owner = Some(Runtime::new(
+                catalogue,
+                LittlefsMedia::new(fs.clone(), layout.media().byte_len()),
+            ));
+        } else {
+            log::warn!("podcasts offline: PSRAM scratch allocation failed");
+        }
+    } else {
+        log::info!("podcasts offline: existing whole-card LittleFS preserved");
+    }
+    Ok(fs)
 }

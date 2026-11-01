@@ -178,3 +178,76 @@ and the bounded storage owner remain integration requirements.
 six pre-existing explicit long-sweep ignores), `just lint`, `just audit` and
 `just build` pass. Independent review findings for declaration/reference grammar
 and namespace-aware pagination were corrected and covered by regressions.
+
+## 2026-10-31: pressure-only audio lifecycle (t-109)
+
+`MediaStore` is an ID-addressed interface for the future unique storage owner.
+No remote path or filename crosses it. Each method must durably finish before
+success and invalidate the entire shared mount after I/O failure/cancellation.
+It exposes bounded4096byte appends and16ID file-list pages. Filesystem/radio
+implementation and global request guards remain t-110, not a second mount.
+
+Downloads restart, without Range/If-Range or retained representation validators.
+A stale partial is discarded before space preflight so it cannot cause needless
+reclamation of playable audio. Only Queued+unread+inactive jobs start; current
+enclosure URL and optional length must match the job snapshot. HTTP200 without
+Content-Range is required. Known lengths must agree;206, changed lengths, short
+bodies and failed framing never publish. Before publication, current catalogue
+URL/length are rechecked. Ordinary HTTP/body failures durably remove partials and
+restore unread jobs to Queued in place; read jobs become Missing. Failed/cancelled
+storage work stays poisoned for reboot recovery rather than retrying that mount.
+
+Each known-length append preflights its actual payload; unknown-length appends
+require a full4096byte budget. Free capacity must retain the greater of16MiB
+and1% of the media region, rounded up. The filesystem adapter must report a
+conservative usable capacity that accounts for allocation/metadata costs. A
+chunk that cannot fit is not consumed and returns WaitingForSpace; the caller
+retains it until a relevant state/space change or explicit retry. There is no
+internal capacity polling timer. Waiting cannot be declared a completed body.
+
+Successful transfer requires complete transport framing and the expected byte
+count when known, then temporary-file synchronization with the actual length,
+then durable filesystem publication, then a sorted atomic EKV commit of:
+
+- `a` plus local EpisodeId big-endian8 → actual nonzero byte length u64LE;
+- the existing episode record → Available, preserving its read flag.
+
+The optional audio fact key leaves schema1 records readable. Moving an episode
+to Missing or Reclaimed clears the fact atomically with the episode state.
+A reset after file publication but before that commit leaves Downloading; recovery
+discards that uncommitted representation and queues an unread restart. There is
+no Available state preceding durable file publication.
+
+`make_space` runs only for an actual pending download/append deficit. It scans
+bounded catalogue pages, selecting read+Available+inactive candidates. Dated
+episodes are oldest-first, followed by undated episodes in import order; IDs
+break ties. This total ordering avoids a nontransitive comparison when one of
+two timestamps is missing. It persists Deleting before durable unlink and only
+then commits Reclaimed/clears the audio fact. It rechecks free space and stops
+as soon as the deficit is met. Exhausted candidates return a wait; unread or
+active audio is protected. The owner must forbid new active leases for Deleting
+and Downloading states and serialize lease/state decisions with file operations.
+
+Startup recovery walks both bounded catalogue pages and sorted local file IDs.
+Valid Available files are checked against their persisted actual lengths and
+kept, regardless of mutable RSS length metadata. Missing/truncated representations
+are made non-Available; interrupted Downloading/Deleting operations are settled
+idempotently. Read flags/tombstones survive. Unknown local IDs are orphan files
+and are removed through the same ID-only interface. Active IDs are untouched.
+No scheduled purge, filename inferred from URL or guessed identity is added.
+
+Host tests use actual database and media files. Normal publication retains real
+sync_all/directory barriers; fault sweeps use the explicit immediate-durability
+file model and inject errors before/after every observed media step. Additional
+cases cover DB failure after publication/unlink, append cancellation, short /
+failed bodies, unknown-length reserve, in-place retry, metadata changes, oldest
+selection, protected files and partial/orphan recovery. These are software
+lifecycle guarantees, not physical card durability or firmware timing evidence.
+Whole-history scan/recovery calls need cooperative service admission/deadlines
+in t-110; bounded memory alone is not a measured shutdown/latency bound.
+
+`t-109` verification: `just fmt`, `just check`, `just test` (427passing,
+six pre-existing long-sweep ignores), `just lint` and `just build` pass.
+Dependencies are unchanged since the passing t-108 audit. Separate review's
+four Important findings have RED→GREEN regression coverage; service scheduling
+remains an explicit t-110 integration obligation. No hardware was accessed.

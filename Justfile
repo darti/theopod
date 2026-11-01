@@ -35,6 +35,18 @@ lint:
 build:
     ESP_LOG=info LIBCLANG_PATH="{{libclang_path}}" PATH="{{gcc_path}}:${PATH}" RUSTUP_TOOLCHAIN=esp cargo build --release
 
+# Compile a credential-bearing local image only with explicit opt-in. No hardware operation.
+build-network config="config/wifi.local.toml":
+    THEO_WIFI_CONFIG={{quote(config)}} ESP_LOG=info LIBCLANG_PATH="{{libclang_path}}" PATH="{{gcc_path}}:${PATH}" RUSTUP_TOOLCHAIN=esp cargo build --release --features local-network
+
+# Retain a linker map for the fully enabled memory-placement check.
+network-map config="config/wifi.local.toml":
+    THEO_WIFI_CONFIG={{quote(config)}} ESP_LOG=info LIBCLANG_PATH="{{libclang_path}}" PATH="{{gcc_path}}:${PATH}" RUSTUP_TOOLCHAIN=esp cargo rustc --release --features local-network -- -C link-arg=-Map=/tmp/theopod-network.map
+
+# Create a NEW regular host image; never accepts an existing card/device path.
+prepare-image path sectors:
+    RUSTUP_TOOLCHAIN=stable cargo run -p theo-podcasts --example prepare_image --target {{host_target}} -- --create-image {{quote(path)}} --sectors {{quote(sectors)}}
+
 flash port="":
     ESP_LOG=info LIBCLANG_PATH="{{libclang_path}}" PATH="{{gcc_path}}:${PATH}" RUSTUP_TOOLCHAIN=esp cargo espflash flash --release --chip {{chip}} {{ if port != "" { "--port " + port } else { "" } }}
 
@@ -115,6 +127,7 @@ sd-format device sectors="":
 # Run the HAL-independent unit tests on the host.
 test:
     RUSTUP_TOOLCHAIN=stable cargo test -p theo-drivers -p theo-frame-dump -p theo-storage -p theo-podcasts -p frame-png --target {{host_target}} --features theo-storage/legacy-fat
+    RUSTUP_TOOLCHAIN=stable cargo test -p theo-podcasts --example prepare_image --target {{host_target}}
 
 # Run the driver tests under Miri, to catch undefined behaviour in their
 # unsafe code (`rustup +nightly component add miri rust-src` once). Cargo

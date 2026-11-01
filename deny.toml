@@ -8,6 +8,10 @@ targets = ["xtensa-esp32s3-none-elf", "aarch64-apple-darwin", "x86_64-unknown-li
 # Known unmaintained crates, pulled in by the esp-hal ecosystem with no
 # replacement upstream; any other advisory still fails the audit.
 ignore = [
+    # User approved 2026-11-01 for current features only; reassess before 2026-12-01.
+    # Any client private key / reqwless TLS enablement invalidates these exceptions.
+    { id = "RUSTSEC-2026-0387", reason = "Dormant reqwless p256 TLS client; see docs/podcast-security-assessment.md" },
+    { id = "RUSTSEC-2023-0071", reason = "RSA public signature verification only, no private key; see docs/podcast-security-assessment.md" },
     { id = "RUSTSEC-2024-0436", reason = "paste: proc-macro via esp-hal and riscv, no replacement upstream" },
     { id = "RUSTSEC-2024-0449", reason = "unsafe-libyaml: build time only, via esp-config and serde_yaml" },
 ]
@@ -16,6 +20,7 @@ ignore = [
 # The source is MIT OR Apache-2.0: dependencies must be permissive, except
 # Slint below, which makes the firmware image GPL-3.0 (README, License).
 allow = [
+    "0BSD",
     "Apache-2.0",
     "BSD-2-Clause",
     "BSD-3-Clause",
@@ -59,4 +64,10 @@ crate = "i-slint-renderer-software"
 allow = ["GPL-3.0-only"]
 
 [sources]
-allow-git = ["https://github.com/light-player/littlefs-rust"]
+allow-git = [
+    "https://github.com/light-player/littlefs-rust",
+    # Exact revisions selected and verified by ADR-0016.
+    "https://github.com/embassy-rs/embedded-tls",
+    "https://github.com/embassy-rs/embassy",
+    "https://github.com/embassy-rs/unitrait",
+]

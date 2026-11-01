@@ -1,5 +1,5 @@
 [workspace]
-exclude = ["vendor/ekv"]
+exclude = ["vendor/ekv", "vendor/littlefs"]
 members = ["crates/theo-drivers", "crates/theo-frame-dump", "crates/theo-storage", "crates/theo-podcasts", "tools/frame-png"]
 
 [workspace.package]
@@ -32,7 +32,7 @@ esp-bootloader-esp-idf = { version = "0.6", features = ["esp32s3"] }
 # unstable APIs are outside esp-hal's semver guarantees.
 esp-hal = { version = "~1.2", features = ["esp32s3", "unstable"] }
 esp-println = { version = "0.18", features = ["esp32s3", "log-04"] }
-esp-rtos = { version = "0.4", features = ["embassy", "esp32s3"] }
+esp-rtos = { version = "0.4", features = ["embassy", "esp32s3", "esp-radio", "esp-alloc"] }
 log = "0.4"
 littlefs-rust = { git = "https://github.com/light-player/littlefs-rust", branch = "main", default-features = false, features = ["alloc"] }
 sdio = "0.5.1"
@@ -55,6 +55,16 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+esp-radio = { version = "=1.0.0-beta.1", features = ["esp32s3", "wifi", "esp-alloc", "unstable"] }
+embassy-net = { version = "0.9", features = ["tcp", "dhcpv4", "dns", "medium-ethernet"] }
+reqwless = { version = "0.14", default-features = false, features = [] }
+embedded-tls = { git = "https://github.com/embassy-rs/embedded-tls", rev = "6487c62bb084c33361822022e21836ddfd48388f", default-features = false, features = ["webpki", "p256", "p384", "ed25519", "rsa"] }
+embassy-crypto-rustcrypto = { git = "https://github.com/embassy-rs/embassy", rev = "822a76ea91f2c0885c6eb0c65fe91181e31133e1", features = ["embassy-crypto-sha256", "embassy-crypto-sha384", "embassy-crypto-hmac-sha256", "embassy-crypto-hmac-sha384", "embassy-crypto-aes128-gcm", "embassy-crypto-p256-ecdh", "embassy-crypto-p256-ecdsa", "embassy-crypto-p384-ecdsa", "embassy-crypto-ed25519"] }
+embedded-io-async = "0.7"
+embassy-sync-06 = { package = "embassy-sync", version = "0.6" }
+embassy-crypto = { git = "https://github.com/embassy-rs/embassy", rev = "822a76ea91f2c0885c6eb0c65fe91181e31133e1" }
+theo-podcasts.workspace = true
+heapless = { version = "0.9", default-features = false }
 allocator-api2.workspace = true
 aligned.workspace = true
 bytemuck.workspace = true
@@ -84,6 +94,7 @@ theo-frame-dump = { workspace = true, optional = true }
 
 [features]
 # Explicit one-time provisioning build only; never enabled by normal flash.
+local-network = []
 sd-provision = []
 sd-check = ["sleep-check"]
 # Prints the framebuffer to the serial log after the first frame and after
@@ -107,6 +118,7 @@ sleep-check = []
 
 [build-dependencies]
 slint-build.workspace = true
+toml = "1.1"
 
 [profile.release]
 opt-level = "s"
@@ -121,3 +133,13 @@ opt-level = "s"
 # EKV 1.0.0 recovery correction; provenance and removal criteria in vendor/ekv/THEO-PATCH.md.
 [patch.crates-io]
 ekv = { path = "vendor/ekv" }
+
+# Temporary exact LittleFS correction explicitly authorized2026-10-31.
+# Provenance/removal criteria:vendor/littlefs/THEO-PATCH.md.
+[patch."https://github.com/light-player/littlefs-rust"]
+littlefs-rust = { path = "vendor/littlefs/littlefs-rust" }
+
+[profile.release.package.esp-radio]
+opt-level = 3
+[profile.dev.package.esp-radio]
+opt-level = 3

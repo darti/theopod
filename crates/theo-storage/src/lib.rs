@@ -9,6 +9,7 @@ pub mod card_layout;
 pub mod fat_page_file;
 pub mod littlefs;
 pub mod page_store;
+pub mod regions;
 pub mod sector_bus;
 
 use core::fmt;
@@ -208,3 +209,5 @@ pub fn sector_index(position: u64, blocks: u64, len: usize) -> Option<u32> {
 #[cfg(test)]
 #[path = "page_store_rollover_tests.rs"]
 mod page_store_rollover_tests;
+
+pub mod future;

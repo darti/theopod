@@ -32,10 +32,12 @@ mod esp_qspi;
 mod expander;
 mod i2c_bus;
 mod logging;
+pub mod network;
 mod psram_tx_buf;
 mod restart;
 mod sd;
 mod sleep;
+pub(crate) mod storage;
 
 use core::fmt;
 
@@ -65,7 +67,6 @@ pub use self::expander::{Expander, Touch};
 )]
 pub use self::expander::{TouchError, TouchResetError};
 pub use self::i2c_bus::{I2cBus, I2cDevice};
-pub use self::logging::{flush_before_sleep, spawn as spawn_storage};
 pub use self::restart::{
     WATCHDOG_TIMEOUT_MS, Watchdog, clear_display_resets, clear_watchdog_resets_if_healthy,
     display_resets, log_start_cause, reset_for_display,
@@ -77,6 +78,7 @@ pub use self::sd::{
 pub use self::sleep::DeepSleep;
 #[cfg(feature = "sd-check")]
 pub use self::sleep::diagnostic_sleep_requested;
+pub use self::storage::{flush_before_sleep, spawn as spawn_storage};
 use self::{esp_qspi::EspQspi, psram_tx_buf::PsramTxBuf};
 use embedded_hal::digital::PinState;
 use theo_drivers::{
@@ -193,6 +195,8 @@ pub struct Board {
     pub sd_status: SdStatus,
     /// Armed main watchdog: the UI loop must feed it.
     pub watchdog: Watchdog,
+    pub wifi: esp_hal::peripherals::WIFI<'static>,
+    pub usb: esp_hal::peripherals::USB_DEVICE<'static>,
 }
 
 impl fmt::Debug for Board {
@@ -228,6 +232,7 @@ impl Board {
     /// display and the BOOT button still work.
     pub async fn init(spawner: embassy_executor::Spawner) -> Self {
         esp_alloc::heap_allocator!(size: HEAP_SIZE);
+        esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 64 * 1024);
         logging::init();
         log::info!("firmware init");
         let peripherals = esp_hal::init(esp_hal::Config::default());
@@ -445,6 +450,8 @@ impl Board {
             sd,
             sd_status,
             watchdog,
+            wifi: peripherals.WIFI,
+            usb: peripherals.USB_DEVICE,
         }
     }
 }

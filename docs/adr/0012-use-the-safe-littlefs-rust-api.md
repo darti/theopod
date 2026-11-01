@@ -117,3 +117,14 @@ Minimum sampled core-1 stack margin was 22019 bytes. These are sampled service
 measurements, not worst-case guarantees. Normal firmware was restored and
 remounted/read prior logs. Physical SD power interruption/removal remain
 unperformed; see the updated validation matrix for exact evidence and limits.
+
+## 2026-10-31 temporary correction authorization (t-110)
+
+The user explicitly selected temporary adoption of reviewed correction
+`e51ca62cd33dbd9564d07f718214cae842f0d22f` from upstream PR#12 after a fresh
+check confirmed upstream main remains732d038 and the PR is unmerged. This
+supersedes the earlier main-only source preference for this exact correction;
+it does not authorize tracking the fork or unrelated changes. A path patch
+retains both0.1.1crate source snapshots under `vendor/littlefs`, with provenance
+and removal criteria in `THEO-PATCH.md`. Public safe API and on-disk format stay
+the same. Adopt upstream once the correction or reviewed equivalent merges.

@@ -6,9 +6,12 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+embedded-tls = { git = "https://github.com/embassy-rs/embedded-tls", rev = "6487c62bb084c33361822022e21836ddfd48388f", default-features = false }
+embassy-futures.workspace = true
 heapless = { version = "0.9", default-features = false }
 ekv.workspace = true
 sha2.workspace = true
+littlefs-rust.workspace = true
 embassy-sync-06 = { package = "embassy-sync", version = "0.6" }
 
 [dev-dependencies]

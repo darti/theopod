@@ -105,7 +105,7 @@ const _: () =
 /// owner until it is discarded and reopened. The service must also invalidate
 /// its shared filesystem session, as it does for every failed storage request.
 pub struct Catalogue<F: Flash> {
-    db: ekv::Database<F, NoopRawMutex>,
+    pub(crate) db: ekv::Database<F, NoopRawMutex>,
     next: u64,
     enabled: bool,
 }
@@ -160,6 +160,61 @@ impl<F: Flash> Catalogue<F> {
             enabled: true,
         })
     }
+    pub async fn completed_audio_len(
+        &mut self,
+        id: EpisodeId,
+    ) -> Result<Option<u64>, Error<F::Error>> {
+        self.begin()?;
+        let result = async {
+            let tx = self.db.read_transaction().await;
+            let mut value = [0; 8];
+            match tx.read(&audio_key(id), &mut value).await {
+                Ok(8) => {
+                    let bytes = u64::from_le_bytes(value);
+                    if bytes == 0 {
+                        Err(Error::Corrupt)
+                    } else {
+                        Ok(Some(bytes))
+                    }
+                }
+                Ok(_) => Err(Error::Corrupt),
+                Err(ekv::ReadError::KeyNotFound) => Ok(None),
+                Err(e) => Err(read_error(e)),
+            }
+        }
+        .await;
+        self.finish(result)
+    }
+    /// Called only after durable temporary-file publication by the media owner.
+    pub(crate) async fn finish_download(
+        &mut self,
+        id: EpisodeId,
+        bytes: u64,
+        scratch: &mut [u8],
+    ) -> Result<(), Error<F::Error>> {
+        self.check(scratch)?;
+        if bytes == 0 {
+            return Err(Error::InvalidMetadata);
+        }
+        self.begin()?;
+        let result = async {
+            let (episode, n) = self.load(id, scratch).await?.ok_or(Error::NotFound)?;
+            if episode.state.audio != AudioState::Downloading {
+                return Err(Error::InvalidState);
+            }
+            scratch[AUDIO_OFFSET] = AudioState::Available as u8;
+            let mut tx = self.db.write_transaction().await;
+            tx.write(&audio_key(id), &bytes.to_le_bytes())
+                .await
+                .map_err(write_error)?;
+            tx.write(&episode_key(id), &scratch[..n])
+                .await
+                .map_err(write_error)?;
+            tx.commit().await.map_err(commit_error)
+        }
+        .await;
+        self.finish(result)
+    }
     /// Last completely reconciled history. Partial imports never replace this.
     pub async fn sync_checkpoint(
         &mut self,
@@ -209,14 +264,17 @@ impl<F: Flash> Catalogue<F> {
         .await;
         self.finish(result)
     }
-    fn begin(&mut self) -> Result<(), Error<F::Error>> {
+    pub(crate) fn begin(&mut self) -> Result<(), Error<F::Error>> {
         if !self.enabled {
             return Err(Error::Disabled);
         }
         self.enabled = false;
         Ok(())
     }
-    fn finish<T>(&mut self, result: Result<T, Error<F::Error>>) -> Result<T, Error<F::Error>> {
+    pub(crate) fn finish<T>(
+        &mut self,
+        result: Result<T, Error<F::Error>>,
+    ) -> Result<T, Error<F::Error>> {
         if !matches!(
             &result,
             Err(Error::Storage(_)
@@ -486,6 +544,9 @@ impl<F: Flash> Catalogue<F> {
         scratch[AUDIO_OFFSET] = state.audio as u8;
         scratch[READ_OFFSET] = u8::from(state.read);
         let mut tx = self.db.write_transaction().await;
+        if matches!(state.audio, AudioState::Missing | AudioState::Reclaimed) {
+            tx.delete(&audio_key(id)).await.map_err(write_error)?;
+        }
         tx.write(&episode_key(id), &scratch[..n])
             .await
             .map_err(write_error)?;
@@ -544,13 +605,13 @@ fn identity_key(subscription: SubscriptionId, metadata: EpisodeMetadata<'_>) -> 
     ));
     key
 }
-fn read_error<E>(error: ekv::ReadError<E>) -> Error<E> {
+pub(crate) fn read_error<E>(error: ekv::ReadError<E>) -> Error<E> {
     match error {
         ekv::ReadError::Flash(e) => Error::Storage(e),
         _ => Error::Corrupt,
     }
 }
-fn write_error<E>(error: ekv::WriteError<E>) -> Error<E> {
+pub(crate) fn write_error<E>(error: ekv::WriteError<E>) -> Error<E> {
     match error {
         ekv::WriteError::Flash(e) => Error::Storage(e),
         ekv::WriteError::Full => Error::Full,
@@ -558,7 +619,7 @@ fn write_error<E>(error: ekv::WriteError<E>) -> Error<E> {
         _ => Error::Corrupt,
     }
 }
-fn commit_error<E>(error: ekv::CommitError<E>) -> Error<E> {
+pub(crate) fn commit_error<E>(error: ekv::CommitError<E>) -> Error<E> {
     match error {
         ekv::CommitError::Flash(e) => Error::Storage(e),
         ekv::CommitError::TransactionCanceled => Error::Cancelled,
@@ -728,6 +789,13 @@ mod tests;
 fn sync_key(id: SubscriptionId) -> [u8; 9] {
     let mut key = [0; 9];
     key[0] = b's';
+    key[1..].copy_from_slice(&id.0.to_be_bytes());
+    key
+}
+
+fn audio_key(id: EpisodeId) -> [u8; 9] {
+    let mut key = [0; 9];
+    key[0] = b'a';
     key[1..].copy_from_slice(&id.0.to_be_bytes());
     key
 }

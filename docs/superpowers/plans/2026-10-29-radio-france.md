@@ -107,11 +107,11 @@ feasibility report. t-116 precedes resuming the remaining positive gate.
 
 **Interfaces:** `DownloadJob` carries episode ID, enclosure URL and optional expected bytes; `DownloadOutcome::{Complete,WaitingForSpace,RetryLater}`. `ReclaimCandidate` carries episode ID, read flag, availability, publication/import order and active-use state. `choose_reclaim` yields oldest eligible candidates until the requested deficit is met. Missing timestamps use import order.
 
-- [ ] Write failing tests proving no reclamation with sufficient space, oldest-first selection for a deficit, read audio playable before deletion, exclusion of unread/active files, waiting when candidates are exhausted, and no automatic requeue of reclaimed read episodes.
-- [ ] Run `just test`, confirm failures, implement the selection policy and durable deletion intent → unlink → Reclaimed transition. No clock-driven purge job exists.
-- [ ] Test temporary download publication after sync only, short HTTP body, unknown length with reserve intact, connection failure, Range ignored (200), stale validator and invalid Content-Range. Restart partial downloads unless safe resume is proven.
-- [ ] Inject failure before/after every deletion and completion step, reopen storage and assert no unread deletion, no false Available state and preserved read tombstones. Recover orphan temporary files by persisted identity, never remote-provided paths.
-- [ ] Run `just fmt`, `just test` and `just check`; commit lifecycle and recovery logic.
+- [x] Write failing tests proving no reclamation with sufficient space, oldest-first selection for a deficit, read audio playable before deletion, exclusion of unread/active files, waiting when candidates are exhausted, and no automatic requeue of reclaimed read episodes.
+- [x] Run `just test`, confirm failures, implement the selection policy and durable deletion intent → unlink → Reclaimed transition. No clock-driven purge job exists.
+- [x] Test temporary download publication after sync only, short HTTP body, unknown length with reserve intact, connection failure, Range ignored (200), stale validator and invalid Content-Range. Restart partial downloads unless safe resume is proven.
+- [x] Inject failure before/after every deletion and completion step, reopen storage and assert no unread deletion, no false Available state and preserved read tombstones. Recover orphan temporary files by persisted identity, never remote-provided paths.
+- [x] Run `just fmt`, `just test` and `just check`; commit lifecycle and recovery logic.
 
 ### Task 5: Integrate background services with the existing firmware
 
@@ -119,12 +119,12 @@ feasibility report. t-116 precedes resuming the remaining positive gate.
 
 **Interfaces:** `storage.rs` becomes sole owner of `Option<SdStorage>` and the database. Logging retains its current nonblocking producer queue; storage serves bounded catalogue/file requests alongside log flushes. `podcasts.rs` exposes follow-Radio-France-feed and mark-read commands, progress/status and explicit sync/retry requests. UI integration is a minimal command/status hook, not a full player.
 
-- [ ] Add host-testable scheduler tests: continuous audio writes do not starve logs/control messages; shutdown cancels network work and acknowledges bounded storage flush; storage invalidation rejects queued writes; capacity wait wakes only on relevant state change/retry.
-- [ ] Run `just test`, confirm failures, implement the service scheduler and migrate mount ownership without adding a second FAT instance. Preserve existing 500 ms log I/O and 1.2 s final-flush bounds unless a documented, tested ADR revision is necessary.
-- [ ] Add the verified Wi-Fi/HTTPS adapter, bounded sync/download worker and ignored credential configuration. Keep no-credentials/offline startup functional. Wire Radio France subscriptions and states to persisted configuration; reconnect triggers reconciliation without duplicate simultaneous jobs.
-- [ ] Add transport/fake-storage integration tests for offline boot, TLS rejection, redirects, card removal, full-media waiting and sleep during each operation. Verify storage errors retain the existing disable-until-reboot policy.
-- [ ] Update README with configuration, Radio France-only scope, sync triggers, read/reclamation behaviour, recovery limits and verification commands. Document playback as future work.
-- [ ] Run `just fmt`, `just check`, `just test`, `just lint`, `just audit`, `just build`; all must succeed. Run `just miri` only if driver unsafe code changed. Review final diff for credentials and generic-feed features outside scope; commit.
+- [x] Add host-testable scheduler tests: continuous audio writes do not starve logs/control messages; shutdown cancels network work and acknowledges bounded storage flush; storage invalidation rejects queued writes; capacity wait wakes only on relevant state change/retry.
+- [x] Run `just test`, confirm failures, implement the service scheduler and migrate mount ownership without adding a second FAT instance. Preserve existing 500 ms log I/O and 1.2 s final-flush bounds unless a documented, tested ADR revision is necessary.
+- [x] Add the verified Wi-Fi/HTTPS adapter, bounded sync/download worker and ignored credential configuration. Keep no-credentials/offline startup functional. Wire Radio France subscriptions and states to persisted configuration; reconnect triggers reconciliation without duplicate simultaneous jobs.
+- [x] Add transport/fake-storage integration tests for offline boot, TLS rejection, redirects, card removal, full-media waiting and sleep during each operation. Verify storage errors retain the existing disable-until-reboot policy.
+- [x] Update README with configuration, Radio France-only scope, sync triggers, read/reclamation behaviour, recovery limits and verification commands. Document playback as future work.
+- [x] Run `just fmt`, `just check`, `just test`, `just lint`, `just audit`, `just build`; all must succeed. Run `just miri` only if driver unsafe code changed. Review final diff for credentials and generic-feed features outside scope; commit.
 
 ## Hardware validation after explicit authorization
 
@@ -206,3 +206,37 @@ fmt/check/lint/audit/release build pass. Separate review found three XML/paginat
 issues, corrected with regression coverage. No transport or firmware activation,
 no card operation. t-108 and parent t-105 stay open until merge; t-109 and t-110
 remain required for downloads, pressure reclamation and runtime integration.
+
+## t-109 lifecycle checkpoint (2026-10-31)
+
+Restart-only download sessions now enforce complete HTTP bodies, exact known
+lengths, metadata snapshot checks and reserve-preserving appends. Durable
+file publication precedes atomic actual-size/Available facts. Pressure-only
+reclamation persists Deleting before unlink and retains read tombstones after
+recovery. Old partials are removed before preflight; ordinary network failures
+clean up and requeue without reboot. Failed/cancelled storage stays poisoned.
+MediaStore is the ID-only integration contract, not an implemented firmware mount.
+
+Validation:427normal host tests pass (six existing long-sweep ignores),
+fmt/check/lint/release build pass; dependency set unchanged since passing t-108
+audit. Separate review's four Important findings reproduced RED and corrected
+GREEN. A scheduling note carries into t-110: whole-library scans/recovery need
+cooperative admission, absolute deadlines and sleep/control cancellation.
+No hardware operation or network activation; t-109 remains open until merge.
+
+## t-110 software implementation checkpoint (2026-11-01)
+
+The production owner, checked region discovery, LittleFS media adapter, persistent
+follows, bounded streaming network worker, trusted local setup and stop handshake
+are implemented. Final checks: fmt/check/test464passed6longignored/lint/audit/
+security-audit/default release/fully enabled synthetic-credential link pass.
+ADR-0018 records exact memory placement, tested seams and remaining hardware
+limits. Both security exceptions were explicitly authorized on2026-11-01 and
+are constrained by docs/podcast-security-assessment.md. No board operation.
+
+Independent review findings were fixed and re-reviewed: download pass progression,
+RetryLater backoff, transient TLS errors and duplicate queue timeout. Production
+uses the tested download/cancellation/shutdown seams. Host tests do not execute
+an ESP boot or certify physical elapsed time, runtime stack/heap peaks or media
+power-loss safety; those remain the explicitly separate hardware validation
+phase above. Keep t-110 and parent t-105 open through PR review/main merge.

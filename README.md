@@ -256,7 +256,7 @@ sector errors/cancellation, and commits after recovery. The default host suite
 retains the short metadata-publication guard. Neither recipe accesses the board.
 The local EKV correction and future checked card layout are recorded in
 [ADR-0015](docs/adr/0015-correct-ekv-publication-and-describe-sd-regions.md);
-podcast storage and networking are still disabled.
+existing whole-card cards remain log-only; podcast activation requires a separately prepared image.
 
 ### Podcast catalogue foundation
 
@@ -265,11 +265,71 @@ identities, read/audio state, bounded records and paged scans. Marking read
 preserves available audio; reclaimed read episodes are not automatically queued.
 The crate also streams Radio France RSS history, reconciles duplicate/changed
 episodes and persists validators only after every page succeeds. It also defines restart-only audio downloads, durable publication/recovery and
-pressure-only reclamation of read, inactive files. Media I/O and RSS transport
-are not wired into firmware yet. See
+pressure-only reclamation of read, inactive files. The firmware now connects this catalogue to the shared storage owner and the selected verified HTTPS transport. See
 [ADR-0017](docs/adr/0017-store-bounded-podcast-identity-and-state.md).
 
 `just test-catalogue-recovery` runs the longer file-backed interruption model
 for atomic episode/index/ID-counter commits. Run it when changing catalogue
 persistence or its schema. Normal `just test` retains real-file sync/reopen
 coverage. `just check`/`just lint` also check the standalone crate for Xtensa.
+
+
+### Local Radio France setup
+
+Normal builds remain offline. Copy `config/wifi.example.toml` to ignored
+`config/wifi.local.toml`, fill in the WPA2 credentials, then explicitly run
+`just build-network`. This only builds an image; it does not flash or touch a
+card. Credentials are embedded in that local binary: do not distribute it.
+Normal `just build` and release automation do not read the local configuration.
+`just build-network /tmp/fixture.toml` can verify the enabled build with dummy
+credentials.
+
+Podcasts require an already prepared versioned card layout. Existing whole-card
+LittleFS cards keep their logs and remain podcast-offline. Boot never formats,
+partitions or migrates them. `just prepare-image NEW_PATH EXACT_CARD_SECTORS`
+creates a **new regular host image**, prepares a4096-page database and LittleFS,
+syncs both stores and the catalogue schema, then publishes immutable descriptors.
+It refuses every existing destination, including device paths and symlinks.
+This command does not install an image onto a card. Installing one is a separate
+destructive action requiring explicit authorization and an exact capacity match.
+
+After every boot or deep-sleep wake, supply current UTC through the existing
+USB Serial/JTAG connection. The local, newline-terminated setup commands are:
+
+- `TIME <unix-seconds>`: current trusted UTC from the connected host. Trust lasts
+  at most24h of this powered session. Build dates, card timestamps, HTTP dates
+  and unauthenticated network time never bootstrap TLS trust.
+- `FOLLOW https://rss-rf.aerion.me/rss/<show-uuid>`: persist a Radio France follow
+  before requesting its full available history. Other feed providers are rejected.
+- `READ <local-episode-id>`: persist read state; available audio stays available.
+- `SYNC`: reconcile followed shows now. Reconnects and six hours awake also
+  trigger sync; there is only one network transfer at a time.
+- `RETRY`: explicitly retry network/capacity work. `STATUS` prints its phase.
+
+The receive loop is bounded and accepts no credential or remote setup commands.
+HTTPS validates the permitted host, pinned publisher root, chain, certificate
+validity and handshake signature. Every redirect is revalidated; at most five
+hops are accepted. TLS rejection waits for corrected time or an explicit retry;
+there is no plaintext or unchecked-TLS fallback. Transient failures back off
+30s,2min,10min,1h with jitter and honor a longer bounded numeric Retry-After.
+
+Audio downloads restart interrupted files and publish only completely framed,
+synced bodies. Storage reserves the greater of16MiB and1% of the media region.
+Only a download needing capacity reclaims the oldest eligible read audio;
+unread files and read tombstones remain protected. Capacity waits resume on
+mark-read or explicit retry, rather than polling downloads on every tick.
+Playback and a subscription/player UI remain future work.
+
+Storage owns the sole LittleFS mount and catalogue on core1. Commands and audio
+chunks cross cores as bounded owned messages; log and data admissions alternate.
+Recovery proceeds one bounded scan or identity repair per admission. Cancelled
+or failed storage invalidates the shared mount until reboot. Sleep closes network
+work and bounds its combined stop/final-log-flush handshake to1.2s. Physical SD
+power-loss guarantees, radio/crypto latency, memory peaks and throughput still
+require separately authorized hardware tests; no hardware action is part of
+these host/compile checks. See [ADR-0018](docs/adr/0018-integrate-podcast-background-services.md).
+
+Verification: `just fmt`, `just check`, `just test`, `just lint`, `just audit`,
+`just build`, and `just build-network /tmp/fixture.toml` with synthetic credentials.
+`just test` also runs the new-image tool's tests. Existing long fault sweeps remain
+in `just test-storage-recovery` and `just test-catalogue-recovery`.

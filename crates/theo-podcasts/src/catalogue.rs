@@ -105,7 +105,7 @@ const _: () =
 /// owner until it is discarded and reopened. The service must also invalidate
 /// its shared filesystem session, as it does for every failed storage request.
 pub struct Catalogue<F: Flash> {
-    db: ekv::Database<F, NoopRawMutex>,
+    pub(crate) db: ekv::Database<F, NoopRawMutex>,
     next: u64,
     enabled: bool,
 }
@@ -264,14 +264,17 @@ impl<F: Flash> Catalogue<F> {
         .await;
         self.finish(result)
     }
-    fn begin(&mut self) -> Result<(), Error<F::Error>> {
+    pub(crate) fn begin(&mut self) -> Result<(), Error<F::Error>> {
         if !self.enabled {
             return Err(Error::Disabled);
         }
         self.enabled = false;
         Ok(())
     }
-    fn finish<T>(&mut self, result: Result<T, Error<F::Error>>) -> Result<T, Error<F::Error>> {
+    pub(crate) fn finish<T>(
+        &mut self,
+        result: Result<T, Error<F::Error>>,
+    ) -> Result<T, Error<F::Error>> {
         if !matches!(
             &result,
             Err(Error::Storage(_)
@@ -602,13 +605,13 @@ fn identity_key(subscription: SubscriptionId, metadata: EpisodeMetadata<'_>) -> 
     ));
     key
 }
-fn read_error<E>(error: ekv::ReadError<E>) -> Error<E> {
+pub(crate) fn read_error<E>(error: ekv::ReadError<E>) -> Error<E> {
     match error {
         ekv::ReadError::Flash(e) => Error::Storage(e),
         _ => Error::Corrupt,
     }
 }
-fn write_error<E>(error: ekv::WriteError<E>) -> Error<E> {
+pub(crate) fn write_error<E>(error: ekv::WriteError<E>) -> Error<E> {
     match error {
         ekv::WriteError::Flash(e) => Error::Storage(e),
         ekv::WriteError::Full => Error::Full,
@@ -616,7 +619,7 @@ fn write_error<E>(error: ekv::WriteError<E>) -> Error<E> {
         _ => Error::Corrupt,
     }
 }
-fn commit_error<E>(error: ekv::CommitError<E>) -> Error<E> {
+pub(crate) fn commit_error<E>(error: ekv::CommitError<E>) -> Error<E> {
     match error {
         ekv::CommitError::Flash(e) => Error::Storage(e),
         ekv::CommitError::TransactionCanceled => Error::Cancelled,

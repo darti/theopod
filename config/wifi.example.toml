@@ -1,0 +1,5 @@
+# Copy to wifi.local.toml (ignored), then opt in with --features local-network.
+# These credentials are embedded in that local firmware binary. Never distribute it.
+ssid = "Your network"
+password = "Your WPA2 password"
+# Current UTC is supplied over USB after every boot/sleep; it is never embedded.

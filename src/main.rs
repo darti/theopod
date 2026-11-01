@@ -31,6 +31,7 @@ extern crate alloc;
 
 mod device;
 mod input;
+mod podcasts;
 mod slint_backend;
 
 use alloc::boxed::Box;
@@ -114,8 +115,11 @@ async fn main(spawner: Spawner) {
         sd,
         sd_status,
         mut watchdog,
+        wifi,
+        usb,
     } = Board::init(spawner).await;
     device::spawn_storage(spawner, sd);
+    podcasts::spawn(spawner, wifi, usb);
     input::spawn(spawner, button, deep_sleep, touch, imu);
     let size = display.size();
     let panel = PanelSize {

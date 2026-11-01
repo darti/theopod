@@ -19,3 +19,5 @@
 | [0015](0015-correct-ekv-publication-and-describe-sd-regions.md) | Correct EKV publication and describe checked SD regions | Local correction and descriptor API accepted; runtime integration pending |
 | [0016](0016-prove-shared-storage-and-linked-network-feasibility.md) | Prove shared storage and linked network feasibility | Software feasibility verified; firmware activation pending |
 | [0017](0017-store-bounded-podcast-identity-and-state.md) | Store bounded podcast identity and local state in EKV | Host catalogue implemented; firmware activation pending |
+
+| [0018](0018-integrate-podcast-background-services.md) | Integrate bounded podcast background services | Implemented in software; hardware validation pending |

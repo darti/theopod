@@ -102,3 +102,79 @@ pub async fn recover_all<F: Flash, M: MediaStore>(
 #[cfg(test)]
 #[path = "recovery_tests.rs"]
 mod tests;
+
+/// Incremental mount recovery. Each admission scans one bounded page or repairs
+/// one identity, so the owner can admit logs and shutdown between units.
+pub struct Recovery {
+    after: Option<EpisodeId>,
+    ids: heapless::Vec<EpisodeId, FILE_PAGE>,
+    at: usize,
+    files: bool,
+    end: bool,
+}
+impl Default for Recovery {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+impl Recovery {
+    pub fn new() -> Self {
+        Self {
+            after: None,
+            ids: heapless::Vec::new(),
+            at: 0,
+            files: false,
+            end: false,
+        }
+    }
+    pub async fn step<F: Flash, M: MediaStore>(
+        &mut self,
+        cat: &mut Catalogue<F>,
+        media: &mut M,
+        scratch: &mut [u8],
+    ) -> Result<bool, MediaError<F::Error, M::Error>> {
+        if let Some(&id) = self.ids.get(self.at) {
+            recover_one(cat, media, id, scratch).await?;
+            self.at += 1;
+            return Ok(false);
+        }
+        if self.end {
+            if self.files {
+                return Ok(true);
+            }
+            self.files = true;
+            self.after = None;
+            self.end = false;
+        }
+        self.ids.clear();
+        self.at = 0;
+        if self.files {
+            let mut ids = [EpisodeId(0); FILE_PAGE];
+            let n = media
+                .list_ids(self.after, &mut ids)
+                .await
+                .map_err(MediaError::Media)?;
+            if n > FILE_PAGE {
+                return Err(MediaError::InvalidState);
+            }
+            for &id in &ids[..n] {
+                if id.0 == 0 || self.after.is_some_and(|a| id.0 <= a.0) {
+                    return Err(MediaError::InvalidState);
+                }
+                self.ids.push(id).map_err(|_| MediaError::InvalidState)?;
+                self.after = Some(id);
+            }
+            self.end = n == 0;
+        } else {
+            let page = cat
+                .scan(self.after, scratch, |e| {
+                    let _ = self.ids.push(e.id);
+                })
+                .await
+                .map_err(MediaError::Catalogue)?;
+            self.after = page.resume_after;
+            self.end = !page.has_more;
+        }
+        Ok(false)
+    }
+}

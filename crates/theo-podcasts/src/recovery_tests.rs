@@ -215,3 +215,32 @@ fn failure_after_unlink_retains_read_deletion_intent_until_reopen() {
         assert_eq!(e.state.audio, AudioState::Reclaimed);
     });
 }
+#[test]
+fn recovery_steps_leave_other_orphans_untouched_until_admitted() {
+    // Regression (t-110): one admitted recovery unit cannot consume an arbitrary library before control/log admission.
+    block_on(async {
+        let image = Image::new();
+        let mut cat = image.create().await;
+        let mut media = HostMedia::new(root_for(&image));
+        let mut scratch = [0; MAX_RECORD_BYTES];
+        for id in 1..=20 {
+            std::fs::write(media.path(EpisodeId(id), true), b"partial").unwrap();
+        }
+        let mut recovery = Recovery::new();
+        let mut completed = false;
+        for _ in 0..100 {
+            let before = std::fs::read_dir(&media.root).unwrap().count();
+            completed = recovery
+                .step(&mut cat, &mut media, &mut scratch)
+                .await
+                .unwrap();
+            let after = std::fs::read_dir(&media.root).unwrap().count();
+            assert!(before - after <= 1, "one unit recovered more than one file");
+            if completed {
+                break;
+            }
+        }
+        assert!(completed);
+        assert_eq!(std::fs::read_dir(&media.root).unwrap().count(), 0);
+    });
+}

@@ -1,0 +1,5 @@
+# Approved by the user 2026-11-01; current transport configuration only.
+# Reassess before 2026-12-01 and on dependency/feature changes.
+# Rationale and invalidation conditions: docs/podcast-security-assessment.md.
+[advisories]
+ignore = ["RUSTSEC-2026-0387", "RUSTSEC-2023-0071"]

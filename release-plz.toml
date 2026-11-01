@@ -5,8 +5,8 @@ semver_check = false
 dependencies_update = false
 changelog_config = "cliff.toml"
 pr_name = "chore(release): release v{{ version }}"
-# All components use the firmware tag as their release baseline. Only the root
-# creates that tag and release; processing children is needed for change detection.
+# Original components use the firmware tag as their release baseline. Only the
+# root creates the GitHub release; processing children detects their changes.
 git_tag_name = "v{{ version }}"
 git_tag_enable = false
 git_release_enable = false
@@ -21,7 +21,7 @@ changelog_update = true
 git_release_name = "Theo Pod v{{ version }}"
 git_release_body = "{{ changelog }}"
 changelog_path = "CHANGELOG.md"
-changelog_include = ["theo-drivers", "theo-frame-dump", "theo-storage", "frame-png"]
+changelog_include = ["theo-drivers", "theo-frame-dump", "theo-storage", "theo-podcasts", "frame-png"]
 
 [[package]]
 name = "theo-drivers"
@@ -34,6 +34,14 @@ version_group = "firmware"
 [[package]]
 name = "theo-storage"
 version_group = "firmware"
+
+[[package]]
+name = "theo-podcasts"
+version_group = "firmware"
+# Added after v0.1.0: that shared tag has no podcast package (t-117).
+# Keep a package-specific baseline, including on subsequent releases.
+git_tag_name = "theo-podcasts-v{{ version }}"
+git_tag_enable = true
 
 [[package]]
 name = "frame-png"

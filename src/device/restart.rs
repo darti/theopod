@@ -149,18 +149,33 @@ pub(super) fn hang_until_watchdog() {
     }
 }
 
-/// A reboot count kept across digital-core resets in RTC fast RAM.
+/// A reboot count in RTC fast RAM, kept across digital-core resets.
 ///
-/// A reset during its volatile write is detected through the complement.
-struct RtcCount;
+/// RTC fast RAM survives a digital-core reset (software or MWDT0). Its
+/// contents are arbitrary after an early reset (esp-hal `persistent`) or a
+/// deep sleep, which powers that RAM down; the complement
+/// ([`encode_resets`]) makes those read as zero. Holds a pointer to one of
+/// the `static mut` pairs below, and is the only code that reads or writes
+/// them.
+#[derive(Clone, Copy)]
+struct RtcCount(*mut [u32; 2]);
 
 impl RtcCount {
-    fn read(storage: *const [u32; 2]) -> u32 {
-        decode_resets(unsafe { storage.read_volatile() })
+    /// The stored count, or zero if the pair fails its check.
+    fn get(self) -> u32 {
+        // SAFETY: the pointer is to a `static` in RTC fast RAM, valid for
+        // the whole program, read volatile through the raw pointer (no
+        // reference to the `static mut`). Each count has one user at a time
+        // (`Board::init`, then the UI task), and every bit pattern is a
+        // valid `[u32; 2]`.
+        decode_resets(unsafe { self.0.read_volatile() })
     }
 
-    fn write(storage: *mut [u32; 2], count: u32) {
-        unsafe { storage.write_volatile(encode_resets(count)) };
+    /// Stores `count`; a reset during the write leaves a pair that reads as
+    /// zero.
+    fn set(self, count: u32) {
+        // SAFETY: as in `get`.
+        unsafe { self.0.write_volatile(encode_resets(count)) };
     }
 }
 
@@ -173,16 +188,11 @@ static mut DISPLAY_RESETS: [u32; 2] = [0; 2];
 /// touches the counter.
 #[must_use]
 pub fn display_resets() -> u32 {
-    // SAFETY: a volatile read through a raw pointer (no reference to the
-    // `static mut`); only the UI task touches it, and every bit pattern is
-    // a valid `[u32; 2]`.
-    RtcCount::read(&raw const DISPLAY_RESETS)
+    RtcCount(&raw mut DISPLAY_RESETS).get()
 }
 
 fn set_display_resets(count: u32) {
-    // SAFETY: as in `display_resets`; a reset during the write leaves a
-    // pair that fails the check and reads as zero.
-    RtcCount::write(&raw mut DISPLAY_RESETS, count);
+    RtcCount(&raw mut DISPLAY_RESETS).set(count);
 }
 
 /// Forgets past display reboots, once the display has stayed healthy.
@@ -196,7 +206,7 @@ pub fn reset_for_display() -> ! {
     esp_hal::system::software_reset()
 }
 
-/// Watchdog reboots in a row, kept across core resets like `DISPLAY_RESETS`.
+/// Watchdog reboots in a row, kept across core resets.
 #[esp_hal::ram(unstable(rtc_fast, persistent))]
 static mut WATCHDOG_RESETS: [u32; 2] = [0; 2];
 
@@ -205,16 +215,11 @@ static mut WATCHDOG_RESETS: [u32; 2] = [0; 2];
 /// Only `Board::init` and then the UI task use the functions below, one
 /// after the other: nothing else touches the counter.
 fn watchdog_resets() -> u32 {
-    // SAFETY: a volatile read through a raw pointer (no reference to the
-    // `static mut`); one user at a time, and every bit pattern is a valid
-    // `[u32; 2]`.
-    RtcCount::read(&raw const WATCHDOG_RESETS)
+    RtcCount(&raw mut WATCHDOG_RESETS).get()
 }
 
 fn set_watchdog_resets(count: u32) {
-    // SAFETY: as in `watchdog_resets`; a reset during the write leaves a
-    // pair that fails the check and reads as zero.
-    RtcCount::write(&raw mut WATCHDOG_RESETS, count);
+    RtcCount(&raw mut WATCHDOG_RESETS).set(count);
 }
 
 /// Forgets past watchdog reboots, just before the stop's deep sleep.

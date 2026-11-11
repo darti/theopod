@@ -21,7 +21,7 @@ Used by the firmware (`src/device/sd_worker.rs`) and `theo-podcasts`.
 - `sector_bus.rs`: owned-buffer mailbox from the synchronous filesystem core
   to the async SD service; late replies after cancellation are refused.
 - `page_store.rs`: copy-on-write EKV pages on raw sectors (ADR-0011/0015).
-- `future.rs`: fallible PSRAM placement of large futures.
+- `future.rs`: PSRAM placement of large futures; `run_in` polls one apart.
 - `fat_page_file.rs` (`legacy-fat` feature): the former FAT page transport.
 
 ## Card layout v2

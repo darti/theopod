@@ -124,7 +124,18 @@ Commands: `just fmt`, `just check`, `just test`, `just lint`, `just build`.
 
 Results (2026-11-11, host): `just fmt` clean; `just check`, `just lint` and
 `RUSTFLAGS="-C link-arg=-Tlinkall.x" just build` pass; `just test` passes
-(theo-podcasts 109, 1 ignored; theo-storage 80, 5 ignored; drivers 308;
+(theo-podcasts 112, 1 ignored; theo-storage 82, 5 ignored; drivers 308;
 frame-dump 22; frame-png 3; prepare_image 3). The unit-store bound test measures zero
 catalogue commits, reads and writes for `space()` and appends inside reserved
-units with 1, 16 and 64 stored episodes. Not yet validated on the board.
+units with 1, 16 and 64 stored episodes.
+
+Board (2026-11-11, legacy whole-card LittleFS, 59700 MiB card): the first
+flash panicked at boot. The storage owner's poll frame had grown to 76 KB,
+past core1's 48 KiB stack, and overflowed into the internal heap: the
+runtime, catalogue and mount/`handle` futures were moved by value through
+it. They are now built in PSRAM and awaited through `run_in`. The frame is
+14.8 KB, the deepest mount path is about 38 KB and a podcast request about
+23 KB; base `ec0efba` was 33 KB. After the fix the board boots, mounts the
+log volume, appends to `theo.log` and runs 100 s without a panic, matching
+`ec0efba`. A v2-provisioned card (podcasts online) is not yet exercised on
+the board.

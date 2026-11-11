@@ -318,3 +318,115 @@ fn legacy_mount_does_not_create_regions_or_write_descriptors() {
     assert!(crate::littlefs::log_tail(&fs, "/theo.log").unwrap().size > 0);
     assert_eq!(image.borrow().sectors, before);
 }
+
+/// A device that fails while `expired` is set, reporting `device_failed()`
+/// as `poisoned`: a soft (deadline) or hard (bus) failure.
+struct Timed {
+    disk: Disk,
+    expired: Rc<core::cell::Cell<bool>>,
+    poisoned: bool,
+}
+impl Timed {
+    fn live(&self) -> Result<(), Error> {
+        if self.expired.get() {
+            Err(Error::Io)
+        } else {
+            Ok(())
+        }
+    }
+}
+impl SectorIo for Timed {
+    fn read_sector(&mut self, s: u32, out: &mut [u8; 512]) -> Result<(), Error> {
+        self.live()?;
+        self.disk.read_sector(s, out)
+    }
+    fn write_sector(&mut self, s: u32, data: &[u8; 512]) -> Result<(), Error> {
+        self.live()?;
+        self.disk.write_sector(s, data)
+    }
+    fn sync(&mut self) -> Result<(), Error> {
+        self.live()?;
+        self.disk.sync()
+    }
+    fn check(&mut self) -> Result<(), Error> {
+        self.live()
+    }
+    fn device_failed(&self) -> bool {
+        self.poisoned
+    }
+}
+type TimedSetup = (
+    RegionIo<Timed>,
+    RegionIo<Timed>,
+    RegionIo<Timed>,
+    Rc<core::cell::Cell<bool>>,
+);
+fn timed(poisoned: bool) -> TimedSetup {
+    let expired = Rc::new(core::cell::Cell::new(false));
+    let device = Timed {
+        disk: Disk(Rc::new(RefCell::new(Image::default()))),
+        expired: expired.clone(),
+        poisoned,
+    };
+    let (db, log, media) = split(device, CardLayout::new(128 * 1024, 32).unwrap());
+    (db, log, media, expired)
+}
+
+// Regression (t-121): a deadline error in one region must not take the shared device.
+#[test]
+fn soft_failure_keeps_shared_device_for_other_regions() {
+    let (_db, mut log, mut media, expired) = timed(false);
+    expired.set(true);
+    assert_eq!(media.read_sector(0, &mut [0; 512]), Err(Error::Io));
+    assert_eq!(media.check(), Err(Error::Io));
+    assert!(!media.device_failed());
+    expired.set(false);
+    log.read_sector(0, &mut [0; 512]).unwrap();
+    media.read_sector(0, &mut [0; 512]).unwrap();
+}
+
+// Regression (t-121): a bus-level failure still disables every region.
+#[test]
+fn hard_failure_still_disables_every_region() {
+    let (_db, mut log, mut media, expired) = timed(true);
+    expired.set(true);
+    assert_eq!(media.read_sector(0, &mut [0; 512]), Err(Error::Io));
+    expired.set(false);
+    assert_eq!(log.read_sector(0, &mut [0; 512]), Err(Error::Io));
+    assert!(log.device_failed());
+}
+
+// Regression (t-121): an EKV sector call that returns a soft error completes
+// its guard, so the log handle stays usable.
+#[test]
+fn async_region_soft_error_keeps_log_handle() {
+    let (db, mut log, _media, expired) = timed(false);
+    let mut file = AsyncRegion::new(db);
+    futures::executor::block_on(async {
+        expired.set(true);
+        assert_eq!(file.read_sector(0, &mut [0; 512]).await, Err(Error::Io));
+        assert_eq!(file.write_sector(0, &[1; 512]).await, Err(Error::Io));
+        assert_eq!(SectorFile::sync(&mut file).await, Err(Error::Io));
+        expired.set(false);
+        file.read_sector(0, &mut [0; 512]).await.unwrap();
+    });
+    log.read_sector(0, &mut [0; 512]).unwrap();
+}
+
+// Regression (t-121): cancelling an in-flight EKV sector still disables every
+// region, even on a device that reports no hard failure.
+#[test]
+fn dropped_async_region_future_still_disables_all_regions() {
+    let (db, mut log, mut media, _expired) = timed(false);
+    let mut file = AsyncRegion::new(db);
+    let mut out = [0; 512];
+    {
+        let mut op = pin!(file.read_sector(0, &mut out));
+        assert!(matches!(
+            op.as_mut().poll(&mut Context::from_waker(Waker::noop())),
+            Poll::Pending
+        ));
+    }
+    assert_eq!(log.read_sector(0, &mut [0; 512]), Err(Error::Io));
+    assert_eq!(media.sync(), Err(Error::Io));
+}

@@ -40,10 +40,14 @@ pub fn split<D: SectorIo>(
     )
 }
 impl<D: SectorIo> RegionIo<D> {
+    /// A failed call drops the shared device, disabling every region, only
+    /// when the device itself failed; a soft (deadline) error fails this call
+    /// alone and leaves the other regions usable (t-121).
     fn access<T>(&mut self, call: impl FnOnce(&mut D) -> Result<T, Error>) -> Result<T, Error> {
         let mut owner = self.owner.borrow_mut();
-        let result = call(owner.as_mut().ok_or(Error::Io)?);
-        if result.is_err() {
+        let device = owner.as_mut().ok_or(Error::Io)?;
+        let result = call(device);
+        if result.is_err() && device.device_failed() {
             owner.take();
         }
         result
@@ -70,10 +74,18 @@ impl<D: SectorIo> SectorIo for RegionIo<D> {
     fn check(&mut self) -> Result<(), Error> {
         self.access(|device| device.check())
     }
+    fn device_failed(&self) -> bool {
+        self.owner
+            .borrow()
+            .as_ref()
+            .is_none_or(SectorIo::device_failed)
+    }
 }
 
 // Clearing the one owned device drops its unique sector client in firmware.
 // Cancellation therefore disables media and database together, including late replies.
+// A sector call that returns an error is not a cancellation: it disarms the
+// guard and leaves the decision to `RegionIo::access` (t-121).
 struct Guard<D> {
     owner: Owner<D>,
     complete: bool,
@@ -94,6 +106,18 @@ impl<D> Guard<D> {
         }
         self.complete = true;
         Ok(())
+    }
+    fn disarm(mut self) {
+        self.complete = true;
+    }
+    /// Disarm on a returned error; otherwise yield, then complete.
+    async fn finish(self, result: Result<(), Error>) -> Result<(), Error> {
+        if let Err(error) = result {
+            self.disarm();
+            return Err(error);
+        }
+        embassy_futures::yield_now().await;
+        self.complete()
     }
 }
 impl<D> Drop for Guard<D> {
@@ -129,27 +153,24 @@ impl<D: SectorIo, B: FnMut() -> Result<(), Error>> SectorFile for AsyncRegion<D,
         self.io.region.byte_len()
     }
     async fn read_sector(&mut self, relative: u64, out: &mut [u8; 512]) -> Result<(), Error> {
+        let relative = u32::try_from(relative).map_err(|_| Error::Invalid)?;
         let guard = Guard::begin(&self.io.owner)?;
         (self.before_io)()?;
-        let relative = u32::try_from(relative).map_err(|_| Error::Invalid)?;
-        self.io.read_sector(relative, out)?;
-        embassy_futures::yield_now().await;
-        guard.complete()
+        let result = self.io.read_sector(relative, out);
+        guard.finish(result).await
     }
     async fn write_sector(&mut self, relative: u64, data: &[u8; 512]) -> Result<(), Error> {
+        let relative = u32::try_from(relative).map_err(|_| Error::Invalid)?;
         let guard = Guard::begin(&self.io.owner)?;
         (self.before_io)()?;
-        let relative = u32::try_from(relative).map_err(|_| Error::Invalid)?;
-        self.io.write_sector(relative, data)?;
-        embassy_futures::yield_now().await;
-        guard.complete()
+        let result = self.io.write_sector(relative, data);
+        guard.finish(result).await
     }
     async fn sync(&mut self) -> Result<(), Error> {
         let guard = Guard::begin(&self.io.owner)?;
         (self.before_io)()?;
-        self.io.sync()?;
-        embassy_futures::yield_now().await;
-        guard.complete()
+        let result = self.io.sync();
+        guard.finish(result).await
     }
 }
 

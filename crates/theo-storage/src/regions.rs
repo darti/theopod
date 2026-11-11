@@ -1,4 +1,4 @@
-//! Unique shared-sector owner: both ranges retain one synchronous device.
+//! Unique shared-sector owner: all three ranges retain one synchronous device.
 //! Use only on the isolated storage core; Rc handles never cross cores.
 //! No constructor performs I/O, provisioning or descriptor publication.
 use crate::{
@@ -17,13 +17,21 @@ pub struct RegionIo<D> {
 }
 
 /// The caller must supply a descriptor validated against actual card capacity.
-/// The two returned handles cannot be cloned or used to construct overlapping regions.
-pub fn split<D: SectorIo>(device: D, layout: CardLayout) -> (RegionIo<D>, RegionIo<D>) {
+/// The three returned handles (database, log, media) cannot be cloned or used to
+/// construct overlapping regions.
+pub fn split<D: SectorIo>(
+    device: D,
+    layout: CardLayout,
+) -> (RegionIo<D>, RegionIo<D>, RegionIo<D>) {
     let owner = Rc::new(RefCell::new(Some(device)));
     (
         RegionIo {
             owner: owner.clone(),
             region: layout.database(),
+        },
+        RegionIo {
+            owner: owner.clone(),
+            region: layout.log(),
         },
         RegionIo {
             owner,
@@ -147,7 +155,12 @@ impl<D: SectorIo, B: FnMut() -> Result<(), Error>> SectorFile for AsyncRegion<D,
 
 pub enum Discovered<D: SectorIo> {
     Legacy(crate::littlefs::SectorStorage<D>),
-    Regions(RegionIo<D>, RegionIo<D>, CardLayout),
+    Regions {
+        database: RegionIo<D>,
+        log: RegionIo<D>,
+        media: RegionIo<D>,
+        layout: CardLayout,
+    },
 }
 /// Read-only discovery. Missing descriptors try legacy geometry, never format.
 pub fn discover<D: SectorIo>(mut device: D, card_sectors: u64) -> Result<Discovered<D>, Error> {
@@ -164,8 +177,13 @@ pub fn discover<D: SectorIo>(mut device: D, card_sectors: u64) -> Result<Discove
             )?,
         )),
         Some(layout) => {
-            let (db, media) = split(device, layout);
-            Ok(Discovered::Regions(db, media, layout))
+            let (database, log, media) = split(device, layout);
+            Ok(Discovered::Regions {
+                database,
+                log,
+                media,
+                layout,
+            })
         }
     }
 }

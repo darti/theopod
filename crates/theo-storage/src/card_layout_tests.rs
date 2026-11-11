@@ -67,7 +67,7 @@ fn incompatible_or_conflicting_descriptors_are_rejected_without_guessing() {
         Err(LayoutError::Conflict)
     );
     let mut future = header;
-    future[8..12].copy_from_slice(&2u32.to_le_bytes());
+    future[8..12].copy_from_slice(&3u32.to_le_bytes());
     checksum(&mut future);
     assert_eq!(
         CardLayout::select(&future, &header, CARD),
@@ -86,4 +86,49 @@ fn incompatible_or_conflicting_descriptors_are_rejected_without_guessing() {
         CardLayout::select(&torn, &torn, CARD),
         Err(LayoutError::Checksum)
     );
+}
+
+// Regression (t-121): logs get their own region so log allocation never scans media.
+#[test]
+fn v2_layout_places_log_then_unit_aligned_media() {
+    let card = 8 * 1024 * 1024 * 2; // 8 GiB in sectors
+    let layout = CardLayout::new(card, 4096).unwrap();
+    let db_end = layout.database().start() + layout.database().sectors();
+    assert_eq!(layout.log().start(), db_end.next_multiple_of(8));
+    assert_eq!(layout.log().sectors(), LOG_SECTORS);
+    let log_end = layout.log().start() + LOG_SECTORS;
+    assert_eq!(
+        layout.media().start(),
+        log_end.next_multiple_of(UNIT_SECTORS)
+    );
+    assert_eq!(layout.media().sectors() % UNIT_SECTORS, 0);
+    assert_eq!(
+        layout.media_units(),
+        layout.media().sectors() / UNIT_SECTORS
+    );
+    assert!(layout.media().start() as u64 + layout.media().sectors() as u64 <= card);
+}
+
+// Regression (t-121): v1 descriptors are no longer mountable (none exist).
+#[test]
+fn v1_descriptor_is_rejected_as_version() {
+    let card = 8 * 1024 * 1024 * 2;
+    let mut v1 = CardLayout::new(card, 4096).unwrap().encode();
+    v1[..8].copy_from_slice(b"THEOSD01");
+    let crc = crate::page_store::crc32(&v1[..508]);
+    v1[508..].copy_from_slice(&crc.to_le_bytes());
+    assert_eq!(
+        CardLayout::select(&v1, &v1, card),
+        Err(LayoutError::Version)
+    );
+}
+
+#[test]
+fn v2_round_trips_and_too_small_media_is_rejected() {
+    let card = 8 * 1024 * 1024 * 2;
+    let layout = CardLayout::new(card, 4096).unwrap();
+    let bytes = layout.encode();
+    assert_eq!(CardLayout::select(&bytes, &bytes, card), Ok(Some(layout)));
+    let tight = layout.media().start() as u64 + 65_536 - 1;
+    assert_eq!(CardLayout::new(tight, 4096), Err(LayoutError::Geometry));
 }

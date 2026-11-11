@@ -579,10 +579,11 @@ async fn mount_owner(
     let (io, geometry, database) = match layout {
         None => (MediaIo::Legacy(card), legacy, None),
         Some(layout) => {
-            let (db, media) = regions::split(card, layout);
+            // The media handle is unused until the raw unit store lands (t-121).
+            let (db, log, _media) = regions::split(card, layout);
             (
-                MediaIo::Region(media),
-                Geometry::new(layout.media().sectors() as u64).map_err(|e| (e, ()))?,
+                MediaIo::Region(log),
+                Geometry::new(layout.log().sectors() as u64).map_err(|e| (e, ()))?,
                 Some((db, layout)),
             )
         }
@@ -617,7 +618,7 @@ async fn mount_owner(
                 .map_err(|_| (Error::Corrupt, ()))?;
             *owner = Some(Runtime::new(
                 catalogue,
-                LittlefsMedia::new(fs.clone(), layout.media().byte_len()),
+                LittlefsMedia::new(fs.clone(), layout.log().byte_len()),
             ));
         } else {
             log::warn!("podcasts offline: PSRAM scratch allocation failed");

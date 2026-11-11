@@ -25,7 +25,7 @@ fn new_image_publishes_only_initialized_catalogue_and_media() {
         .unwrap()
         .unwrap();
     assert_eq!(layout.pages(), 4096);
-    let (db, media) = theo_storage::regions::split(io, layout);
+    let (db, log, _media) = theo_storage::regions::split(io, layout);
     futures::executor::block_on(async {
         let pages = theo_storage::page_store::PageStore::open(
             theo_storage::regions::AsyncRegion::new(db),
@@ -38,9 +38,9 @@ fn new_image_publishes_only_initialized_catalogue_and_media() {
             .unwrap();
         assert!(cat.next_subscription(None).await.unwrap().is_none());
     });
-    let geometry = theo_storage::littlefs::Geometry::new(layout.media().sectors() as u64).unwrap();
+    let geometry = theo_storage::littlefs::Geometry::new(layout.log().sectors() as u64).unwrap();
     let fs = littlefs_rust::Filesystem::mount(
-        theo_storage::littlefs::SectorStorage::new(media, geometry),
+        theo_storage::littlefs::SectorStorage::new(log, geometry),
         geometry.config(),
     )
     .map_err(|(e, _)| e)

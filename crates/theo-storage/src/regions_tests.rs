@@ -73,16 +73,50 @@ impl SectorIo for Disk {
         }
     }
 }
-fn setup() -> (
+type Setup3 = (
+    RegionIo<Disk>,
     RegionIo<Disk>,
     RegionIo<Disk>,
     Rc<RefCell<Image>>,
     CardLayout,
-) {
+);
+fn setup3() -> Setup3 {
     let image = Rc::new(RefCell::new(Image::default()));
     let layout = CardLayout::new(128 * 1024, 32).unwrap();
-    let (db, media) = split(Disk(image.clone()), layout);
-    (db, media, image, layout)
+    let (db, log, media) = split(Disk(image.clone()), layout);
+    (db, log, media, image, layout)
+}
+/// Database and log handles; the media handle is not needed by most tests.
+/// The log region plays the role of the "other" region sharing the device.
+type Setup = (
+    RegionIo<Disk>,
+    RegionIo<Disk>,
+    Rc<RefCell<Image>>,
+    CardLayout,
+);
+fn setup() -> Setup {
+    let (db, log, _media, image, layout) = setup3();
+    (db, log, image, layout)
+}
+// Regression (t-121): three handles translate to database, log and media starts.
+#[test]
+fn split_yields_database_log_and_media_handles() {
+    let (mut db, mut log, mut media, image, layout) = setup3();
+    db.write_sector(0, &[1; 512]).unwrap();
+    log.write_sector(0, &[2; 512]).unwrap();
+    media.write_sector(0, &[3; 512]).unwrap();
+    let image = image.borrow();
+    assert_eq!(image.sectors[&layout.database().start()], [1; 512]);
+    assert_eq!(image.sectors[&layout.log().start()], [2; 512]);
+    assert_eq!(image.sectors[&layout.media().start()], [3; 512]);
+    assert_eq!(
+        image.calls,
+        vec![
+            layout.database().start(),
+            layout.log().start(),
+            layout.media().start()
+        ]
+    );
 }
 #[test]
 fn translates_disjoint_regions_and_rejects_out_of_bounds_before_io() {
@@ -92,7 +126,7 @@ fn translates_disjoint_regions_and_rejects_out_of_bounds_before_io() {
     media.write_sector(0, &[0x24; 512]).unwrap();
     assert_eq!(
         image.borrow().calls,
-        vec![layout.database().start(), layout.media().start()]
+        vec![layout.database().start(), layout.log().start()]
     );
     let calls = image.borrow().calls.len();
     assert_eq!(
@@ -174,7 +208,7 @@ fn actual_ekv_and_littlefs_share_one_device_and_reopen() {
     // Regression (t-106): actual engines use disjoint regions of one device and logs make progress during DB work.
     futures::executor::block_on(async {
         let (db_region, media, image, layout) = setup();
-        let geometry = Geometry::new(layout.media().sectors() as u64).unwrap();
+        let geometry = Geometry::new(layout.log().sectors() as u64).unwrap();
         let mut media = SectorStorage::new(media, geometry);
         Filesystem::format(&mut media, &geometry.config()).unwrap();
         let fs = Filesystem::mount(media, geometry.config())
@@ -213,7 +247,7 @@ fn actual_ekv_and_littlefs_share_one_device_and_reopen() {
         futures::join!(database, logger);
         drop(db);
         fs.unmount().unwrap();
-        let (db_region, media) = split(Disk(image), layout);
+        let (db_region, media, _media_region) = split(Disk(image), layout);
         let store = PageStore::open(AsyncRegion::new(db_region), 32)
             .await
             .unwrap();

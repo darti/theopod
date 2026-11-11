@@ -100,7 +100,7 @@ fn prepared_image_has_v2_log_region_and_empty_units() {
         .await
         .unwrap();
         let space = units.space(&mut cat).await.unwrap();
-        let bytes = layout.media_units() as u64 * theo_podcasts::units::UNIT_BYTES;
+        let bytes = layout.media_units() as u64 * theo_podcasts::unit_media::UNIT_BYTES;
         assert_eq!(space.capacity, bytes);
         assert_eq!(space.free, bytes);
     });

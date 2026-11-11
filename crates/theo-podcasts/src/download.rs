@@ -46,6 +46,9 @@ enum Phase {
     Body,
     Waiting,
     Rejected,
+    /// The announced length exceeds the media capacity; abort marks the
+    /// episode `Missing` instead of re-queuing it.
+    Oversize,
     Poisoned,
 }
 pub struct DownloadSession {
@@ -53,6 +56,24 @@ pub struct DownloadSession {
     phase: Phase,
     bytes: u64,
     expected: Option<u64>,
+    /// Media capacity at start: no episode can be larger.
+    capacity: u64,
+}
+/// An episode larger than the whole media region can never be stored: free
+/// what it owns and set it `Missing`, so it is not retried.
+async fn refuse_oversize<F: Flash, M: MediaStore<F>>(
+    cat: &mut Catalogue<F>,
+    media: &mut M,
+    id: EpisodeId,
+    scratch: &mut [u8],
+) -> Result<(), MediaError<F::Error, M::Error>> {
+    media
+        .unlink_temp(cat, id)
+        .await
+        .map_err(MediaError::Media)?;
+    cat.transition_audio(id, AudioState::Missing, scratch)
+        .await
+        .map_err(MediaError::Catalogue)
 }
 impl DownloadSession {
     /// Restart only: discard partials before issuing an unconditional GET. Never
@@ -77,6 +98,14 @@ impl DownloadSession {
         {
             return Err(MediaError::InvalidInput);
         }
+        // Refuse before any unlink, eviction or allocation (t-121).
+        let capacity = media.space(cat).await.map_err(MediaError::Media)?.capacity;
+        if job.expected_bytes.is_some_and(|n| n > capacity) {
+            cat.transition_audio(job.id, AudioState::Missing, scratch)
+                .await
+                .map_err(MediaError::Catalogue)?;
+            return Err(MediaError::InvalidInput);
+        }
         // Discard only this non-Available job's orphaned files first. Their
         // capacity must be recovered before considering playable read audio.
         media
@@ -94,16 +123,17 @@ impl DownloadSession {
         cat.transition_audio(job.id, AudioState::Downloading, scratch)
             .await
             .map_err(MediaError::Catalogue)?;
+        let expected = job.expected_bytes;
         media
-            .reset_temp(cat, job.id)
+            .reset_temp(cat, job.id, expected)
             .await
             .map_err(MediaError::Media)?;
-        let expected = job.expected_bytes;
         Ok(Start::Ready(Self {
             job,
             phase: Phase::Headers,
             bytes: 0,
             expected,
+            capacity,
         }))
     }
     pub fn response(
@@ -123,6 +153,10 @@ impl DownloadSession {
             || length == Some(0)
             || length.zip(self.expected).is_some_and(|(a, b)| a != b)
         {
+            return Err(DownloadOutcome::RetryLater);
+        }
+        if length.is_some_and(|n| n > self.capacity) {
+            self.phase = Phase::Oversize;
             return Err(DownloadOutcome::RetryLater);
         }
         self.expected = length.or(self.expected);
@@ -148,6 +182,10 @@ impl DownloadSession {
             .checked_add(bytes.len() as u64)
             .ok_or(MediaError::InvalidInput)?;
         if self.expected.is_some_and(|n| end > n) {
+            return Err(MediaError::InvalidInput);
+        }
+        if end > self.capacity {
+            refuse_oversize(cat, media, self.job.id, scratch).await?;
             return Err(MediaError::InvalidInput);
         }
         let required = if self.expected.is_some() {
@@ -180,6 +218,10 @@ impl DownloadSession {
         }
         if media.active(self.job.id) {
             return Err(MediaError::InvalidState);
+        }
+        if self.phase == Phase::Oversize {
+            refuse_oversize(cat, media, self.job.id, scratch).await?;
+            return Ok(DownloadOutcome::RetryLater);
         }
         crate::recovery::recover_one(cat, media, self.job.id, scratch).await?;
         Ok(DownloadOutcome::RetryLater)

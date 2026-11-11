@@ -12,6 +12,7 @@ static SEQUENCE: AtomicU64 = AtomicU64::new(0);
 pub(crate) struct Image {
     pub(crate) path: PathBuf,
     pages: usize,
+    pub(crate) reads: Rc<Cell<usize>>,
     pub(crate) writes: Rc<Cell<usize>>,
     pub(crate) fail: Rc<Cell<bool>>,
     pub(crate) hang: Rc<Cell<bool>>,
@@ -40,6 +41,7 @@ impl Image {
         Self {
             path,
             pages,
+            reads: Rc::new(Cell::new(0)),
             writes: Rc::new(Cell::new(0)),
             fail: Rc::new(Cell::new(false)),
             hang: Rc::new(Cell::new(false)),
@@ -55,6 +57,7 @@ impl Image {
                 .write(true)
                 .open(&self.path)
                 .unwrap(),
+            reads: self.reads.clone(),
             writes: self.writes.clone(),
             fail: self.fail.clone(),
             hang: self.hang.clone(),
@@ -81,6 +84,7 @@ impl Drop for Image {
 }
 pub(crate) struct HostFile {
     file: File,
+    reads: Rc<Cell<usize>>,
     writes: Rc<Cell<usize>>,
     fail: Rc<Cell<bool>>,
     hang: Rc<Cell<bool>>,
@@ -94,6 +98,7 @@ impl SectorFile for HostFile {
         self.file.metadata().unwrap().len()
     }
     async fn read_sector(&mut self, sector: u64, data: &mut [u8; 512]) -> Result<(), Self::Error> {
+        self.reads.set(self.reads.get() + 1);
         self.file.seek(SeekFrom::Start(sector * 512))?;
         self.file.read_exact(data)
     }

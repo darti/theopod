@@ -549,3 +549,146 @@ fn changed_expected_length_before_publication_restarts_current_representation() 
         );
     });
 }
+
+mod capacity {
+    //! An episode larger than the media capacity is refused before it
+    //! allocates or writes anything, set `Missing` so it is not retried, and
+    //! the store keeps answering (t-121).
+    use super::*;
+    use crate::{
+        media_test_support::Disk,
+        unit_media::{UNIT_BYTES, UnitMedia},
+    };
+    use allocator_api2::alloc::Global;
+    use theo_storage::card_layout::UNIT_SECTORS;
+
+    const UNITS: u32 = 20; // above the 16 MiB reserve
+    type Media = UnitMedia<Disk, Global>;
+
+    async fn setup(
+        expected: Option<u64>,
+        scratch: &mut [u8],
+    ) -> (Image, Catalogue<PageStore<HostFile>>, Media, DownloadJob) {
+        let image = Image::new();
+        image.sync_to_disk.set(false);
+        let mut cat = image.create().await;
+        let media = UnitMedia::open_in(
+            &mut cat,
+            Disk::counting(UNITS * UNIT_SECTORS),
+            UNITS,
+            Global,
+        )
+        .await
+        .unwrap();
+        let job = queued(&mut cat, "huge", expected, scratch).await;
+        (image, cat, media, job)
+    }
+
+    async fn audio(cat: &mut Catalogue<PageStore<HostFile>>, id: EpisodeId) -> AudioState {
+        let mut scratch = [0; MAX_RECORD_BYTES];
+        cat.get(id, &mut scratch)
+            .await
+            .unwrap()
+            .unwrap()
+            .state
+            .audio
+    }
+
+    /// Nothing allocated or written, and the store still answers.
+    async fn assert_untouched(cat: &mut Catalogue<PageStore<HostFile>>, media: &mut Media) {
+        assert_eq!(media.table.used(), 0);
+        assert_eq!(media.device().writes, 0);
+        let space = media.space(cat).await.unwrap();
+        assert_eq!(space.free, space.capacity);
+    }
+
+    // Regression (t-121): a known length over the capacity is refused at
+    // start, before any unlink, eviction or allocation.
+    #[test]
+    fn known_length_over_capacity_is_refused_at_start() {
+        block_on(async {
+            let mut scratch = [0; MAX_RECORD_BYTES];
+            let over = u64::from(UNITS) * UNIT_BYTES + 1;
+            let (_image, mut cat, mut media, job) = setup(Some(over), &mut scratch).await;
+            let id = job.id;
+            assert!(matches!(
+                DownloadSession::start(&mut cat, &mut media, job, &mut scratch).await,
+                Err(MediaError::InvalidInput)
+            ));
+            assert_eq!(media.commits, 0);
+            assert_untouched(&mut cat, &mut media).await;
+            assert_eq!(audio(&mut cat, id).await, AudioState::Missing);
+        });
+    }
+
+    // Regression (t-121): an unknown length announced over the capacity is
+    // refused at the headers; abort sets the episode `Missing`.
+    #[test]
+    fn unknown_length_announced_over_capacity_is_refused() {
+        block_on(async {
+            let mut scratch = [0; MAX_RECORD_BYTES];
+            let (_image, mut cat, mut media, job) = setup(None, &mut scratch).await;
+            let id = job.id;
+            let Start::Ready(mut session) =
+                DownloadSession::start(&mut cat, &mut media, job, &mut scratch)
+                    .await
+                    .unwrap()
+            else {
+                panic!("not started")
+            };
+            let over = u64::from(UNITS) * UNIT_BYTES + 1;
+            assert_eq!(
+                session.response(200, Some(over), None),
+                Err(DownloadOutcome::RetryLater)
+            );
+            assert_eq!(
+                session
+                    .abort(&mut cat, &mut media, &mut scratch)
+                    .await
+                    .unwrap(),
+                DownloadOutcome::RetryLater
+            );
+            assert_untouched(&mut cat, &mut media).await;
+            assert_eq!(audio(&mut cat, id).await, AudioState::Missing);
+        });
+    }
+
+    // Regression (t-121): an unknown-length body growing past the capacity
+    // is refused before `append_temp`, its units are freed and the episode
+    // is set `Missing`. The reserve normally stops such a body first, so the
+    // test starts the session near the cap.
+    #[test]
+    fn unknown_length_body_past_capacity_is_refused() {
+        block_on(async {
+            let mut scratch = [0; MAX_RECORD_BYTES];
+            let (_image, mut cat, mut media, job) = setup(None, &mut scratch).await;
+            let id = job.id;
+            let Start::Ready(mut session) =
+                DownloadSession::start(&mut cat, &mut media, job, &mut scratch)
+                    .await
+                    .unwrap()
+            else {
+                panic!("not started")
+            };
+            session.response(200, None, None).unwrap();
+            session
+                .push(&mut cat, &mut media, &[1; AUDIO_CHUNK], &mut scratch)
+                .await
+                .unwrap();
+            assert_eq!(media.table.used(), 1);
+            let writes = media.device().writes;
+            session.bytes = u64::from(UNITS) * UNIT_BYTES - 1;
+            assert!(matches!(
+                session
+                    .push(&mut cat, &mut media, &[1; 2], &mut scratch)
+                    .await,
+                Err(MediaError::InvalidInput)
+            ));
+            assert_eq!(media.device().writes, writes);
+            assert_eq!(media.table.used(), 0);
+            let space = media.space(&mut cat).await.unwrap();
+            assert_eq!(space.free, space.capacity);
+            assert_eq!(audio(&mut cat, id).await, AudioState::Missing);
+        });
+    }
+}

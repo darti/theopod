@@ -113,7 +113,12 @@ impl<F: Flash> MediaStore<F> for HostMedia {
             })
         })
     }
-    async fn reset_temp(&mut self, _: &mut Catalogue<F>, id: EpisodeId) -> io::Result<()> {
+    async fn reset_temp(
+        &mut self,
+        _: &mut Catalogue<F>,
+        id: EpisodeId,
+        _: Option<u64>,
+    ) -> io::Result<()> {
         self.operation(|this| {
             File::create(this.path(id, true))?;
             Ok(())
@@ -262,4 +267,84 @@ pub(crate) async fn available(
         cat.mark_read(id, scratch).await.unwrap();
     }
     id
+}
+
+/// Raw media device for `UnitMedia` tests: bounds-checked, counting, storing
+/// sector contents only when `keep`.
+pub(crate) struct Disk {
+    pub sectors: std::collections::BTreeMap<u32, [u8; 512]>,
+    pub keep: bool,
+    pub reads: usize,
+    pub writes: usize,
+    /// Highest sector written, if any.
+    pub highest: Option<u32>,
+    pub limit: u32,
+}
+impl Disk {
+    pub fn counting(limit: u32) -> Self {
+        Self {
+            sectors: std::collections::BTreeMap::new(),
+            keep: false,
+            reads: 0,
+            writes: 0,
+            highest: None,
+            limit,
+        }
+    }
+    pub fn storing(limit: u32) -> Self {
+        Self {
+            keep: true,
+            ..Self::counting(limit)
+        }
+    }
+}
+impl theo_storage::littlefs::SectorIo for Disk {
+    fn read_sector(
+        &mut self,
+        sector: u32,
+        out: &mut [u8; 512],
+    ) -> Result<(), littlefs_rust::Error> {
+        if sector >= self.limit {
+            return Err(littlefs_rust::Error::Io);
+        }
+        self.reads += 1;
+        *out = self.sectors.get(&sector).copied().unwrap_or([0; 512]);
+        Ok(())
+    }
+    fn write_sector(&mut self, sector: u32, data: &[u8; 512]) -> Result<(), littlefs_rust::Error> {
+        if sector >= self.limit {
+            return Err(littlefs_rust::Error::Io);
+        }
+        self.writes += 1;
+        self.highest = self.highest.max(Some(sector));
+        if self.keep {
+            self.sectors.insert(sector, *data);
+        }
+        Ok(())
+    }
+    fn sync(&mut self) -> Result<(), littlefs_rust::Error> {
+        Ok(())
+    }
+    fn check(&mut self) -> Result<(), littlefs_rust::Error> {
+        Ok(())
+    }
+}
+// Lets a test keep the disk across a simulated reboot.
+impl theo_storage::littlefs::SectorIo for &mut Disk {
+    fn read_sector(
+        &mut self,
+        sector: u32,
+        out: &mut [u8; 512],
+    ) -> Result<(), littlefs_rust::Error> {
+        (**self).read_sector(sector, out)
+    }
+    fn write_sector(&mut self, sector: u32, data: &[u8; 512]) -> Result<(), littlefs_rust::Error> {
+        (**self).write_sector(sector, data)
+    }
+    fn sync(&mut self) -> Result<(), littlefs_rust::Error> {
+        Ok(())
+    }
+    fn check(&mut self) -> Result<(), littlefs_rust::Error> {
+        Ok(())
+    }
 }

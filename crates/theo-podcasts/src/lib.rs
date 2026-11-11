@@ -1,8 +1,9 @@
 //! Bounded Radio France catalogue and persistent episode lifecycle.
 //!
-//! Audio bodies live in raw 1 MiB allocation units: `units` persists the
-//! bitmap, counter and per-episode unit records in the catalogue, and
-//! `unit_media` is the media store over them (ADR-0020).
+//! Audio bodies live in raw 1 MiB allocation units (ADR-0020): the private
+//! `units` module persists the bitmap, counter and per-episode extent records
+//! in the catalogue, and `unit_media::UnitMedia` is the `media::MediaStore`
+//! over them, failing with `unit_media::UnitError`.
 #![no_std]
 extern crate alloc;
 pub mod catalogue;
@@ -26,7 +27,7 @@ mod test_support;
 pub mod subscriptions;
 
 pub mod unit_media;
-pub mod units;
+pub(crate) mod units;
 
 pub mod runtime;
 

@@ -110,9 +110,31 @@ pub struct Catalogue<F: Flash> {
     enabled: bool,
 }
 impl<F: Flash> Catalogue<F> {
+    /// Formats `flash` as an empty catalogue.
+    ///
     /// Destructive: only for a newly initialized, unpublished backend.
     pub async fn create(flash: F) -> Result<Self, Error<F::Error>> {
-        let db = ekv::Database::new(flash, ekv::Config::default());
+        let mut slot = None;
+        Self::create_into(&mut slot, flash).await?;
+        slot.ok_or(Error::Corrupt)
+    }
+    /// [`Self::create`], built in `slot` rather than returned (see
+    /// [`Self::open_into`]). `slot` is `None` after a failure.
+    pub async fn create_into(slot: &mut Option<Self>, flash: F) -> Result<(), Error<F::Error>> {
+        let catalogue = slot.insert(Self {
+            db: ekv::Database::new(flash, ekv::Config::default()),
+            next: 1,
+            enabled: true,
+        });
+        let result = catalogue.format().await;
+        if result.is_err() {
+            *slot = None;
+        }
+        result
+    }
+    /// Formats the database and writes the next-id, schema and units keys.
+    async fn format(&mut self) -> Result<(), Error<F::Error>> {
+        let db = &self.db;
         db.format()
             .await
             .map_err(|ekv::FormatError::Flash(e)| Error::Storage(e))?;
@@ -128,12 +150,7 @@ impl<F: Flash> Catalogue<F> {
         tx.write(crate::units::UNITS_KEY, &0u32.to_le_bytes())
             .await
             .map_err(write_error)?;
-        tx.commit().await.map_err(commit_error)?;
-        Ok(Self {
-            db,
-            next: 1,
-            enabled: true,
-        })
+        tx.commit().await.map_err(commit_error)
     }
     /// Read-only mount/schema validation. Never formats or migrates on failure.
     pub async fn open(flash: F) -> Result<Self, Error<F::Error>> {
@@ -805,6 +822,9 @@ fn decode(bytes: &[u8]) -> Option<Episode<'_>> {
         },
     })
 }
+#[cfg(test)]
+#[path = "catalogue_create_tests.rs"]
+mod create_tests;
 #[cfg(test)]
 #[path = "catalogue_tests.rs"]
 mod tests;

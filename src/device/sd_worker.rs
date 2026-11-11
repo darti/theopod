@@ -22,6 +22,7 @@ use littlefs_rust::{Error, Filesystem};
 use static_cell::{ConstStaticCell, StaticCell};
 use theo_podcasts::{
     catalogue::Catalogue,
+    provision::CardId,
     runtime::{self, Runtime},
     unit_media::{UnitError, UnitMedia},
 };
@@ -159,7 +160,7 @@ pub async fn init(
 ) -> Result<SdStorage, SdInitError> {
     let guard = RequestGuard::begin(SECTORS.poison_flag()).map_err(|_| SdInitError::Host)?;
     let deadline = Instant::now() + Duration::from_secs(3);
-    let (device, sectors) =
+    let (device, sectors, card_id) =
         with_deadline(deadline, super::init_card(spi, clk, mosi, miso, expander))
             .await
             .map_err(|_| SdInitError::Card(sdio::MmcError::Timeout))??;
@@ -174,7 +175,9 @@ pub async fn init(
         EXECUTOR
             .init(esp_rtos::embassy::Executor::new())
             .run(|spawner| {
-                spawner.spawn(worker(geometry, sectors, stack_bottom).expect("SD owner once"));
+                spawner.spawn(
+                    worker(geometry, sectors, card_id, stack_bottom).expect("SD owner once"),
+                );
             });
     });
     guard.complete().map_err(|_| SdInitError::Host)?;
@@ -376,12 +379,12 @@ impl SectorIo for CardIo {
 }
 
 #[embassy_executor::task]
-async fn worker(geometry: Geometry, sectors: u64, stack_bottom: usize) {
+async fn worker(geometry: Geometry, sectors: u64, card_id: Option<CardId>, stack_bottom: usize) {
     // Keep Embassy's task header/atomic wake state in internal memory. Only
     // the large, pinned domain future is placed externally; cache-sensitive
     // HAL and sector I/O tasks retain their existing internal storage.
     match theo_storage::future::try_pin_in(
-        move || owner(geometry, sectors, stack_bottom),
+        move || owner(geometry, sectors, card_id, stack_bottom),
         &esp_alloc::ExternalMemory,
         114000,
     ) {
@@ -398,7 +401,7 @@ async fn worker(geometry: Geometry, sectors: u64, stack_bottom: usize) {
         }
     }
 }
-async fn owner(geometry: Geometry, sectors: u64, _stack_bottom: usize) {
+async fn owner(geometry: Geometry, sectors: u64, card_id: Option<CardId>, _stack_bottom: usize) {
     #[cfg(feature = "sd-check")]
     let measurements = Rc::new(Measurements {
         stack_bottom: _stack_bottom,
@@ -427,6 +430,17 @@ async fn owner(geometry: Geometry, sectors: u64, _stack_bottom: usize) {
     if scratch.try_reserve_exact(4096).is_ok() {
         scratch.resize(4096, 0);
     }
+    // Explicit provisioning build only: runs before any request is served.
+    #[cfg(feature = "sd-provision")]
+    if let Some(io) = card.as_mut()
+        && provision::run(io, card_id).await
+    {
+        // The card was being erased: keep it offline for this boot; the
+        // normal firmware mounts the new layout.
+        card = None;
+    }
+    #[cfg(not(feature = "sd-provision"))]
+    let _ = card_id;
 
     loop {
         let request = COMMANDS.receive().await;
@@ -744,7 +758,7 @@ fn mount_logs(
     let storage = SectorStorage::try_new_in(io, geometry, &esp_alloc::ExternalMemory)?;
     // Explicit provisioning remains legacy-only; normal boot never formats.
     #[cfg(feature = "sd-provision")]
-    if option_env!("THEO_SD_PROVISION") == Some("format") && legacy_card {
+    if provision::REQUEST == provision::Request::Format && legacy_card {
         let (fs, _) = littlefs::provision_once(storage, geometry)?;
         littlefs::prepare_for_writes(&fs)?;
         return Ok(fs);
@@ -832,3 +846,7 @@ fn install(
 async fn apart<F: core::future::Future>(make: impl FnOnce() -> F) -> Result<F::Output, AllocError> {
     theo_storage::future::run_in(make, &esp_alloc::ExternalMemory, STEP_FUTURE_BYTES).await
 }
+
+#[cfg(feature = "sd-provision")]
+#[path = "sd_provision.rs"]
+mod provision;

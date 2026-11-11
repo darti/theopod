@@ -16,7 +16,8 @@ Used by the firmware (`src/device/sd_worker.rs`) and `theo-podcasts`.
   `append_log`, `log_tail`, `RequestGuard` (cancellation poisons a session).
 - `card_layout.rs`, `regions.rs`: versioned region descriptors (sectors 0
   and 8) and `RegionIo`, one device split into database, log and media
-  ranges; `discover` is for host tooling.
+  ranges; `discover` is for host tooling. Layouts are created only by
+  `theo_podcasts::provision::provision_v2` (ADR-0021).
 - `scope.rs`: failure scopes, the owner's `after_failure`, `OWNER_MARGIN_MS`.
 - `sector_bus.rs`: owned-buffer mailbox from the synchronous filesystem core
   to the async SD service; late replies after cancellation are refused.
@@ -43,7 +44,8 @@ client. Layout, unit store and failure scopes: ADR-0020.
 
 ## Invariants
 
-- Nothing formats except `provision_once` on a `Corrupt` mount.
+- Nothing in this crate formats except `provision_once` on a `Corrupt`
+  mount; v2 layouts come only from explicit provisioning (ADR-0021).
 - Any failed device call disables its adapter until reboot. `RegionIo`
   drops the shared device, disabling every region, only when
   `device_failed()` or an in-flight `AsyncRegion` sector is cancelled;

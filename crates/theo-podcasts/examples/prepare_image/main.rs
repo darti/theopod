@@ -6,7 +6,7 @@ use std::{
     path::Path,
 };
 use theo_storage::littlefs::SectorIo;
-struct ImageIo(File, bool);
+struct ImageIo(File);
 impl ImageIo {
     #[cfg(test)]
     fn open(path: &Path) -> std::io::Result<Self> {
@@ -14,7 +14,7 @@ impl ImageIo {
             .read(true)
             .write(true)
             .open(path)
-            .map(|file| Self(file, true))
+            .map(Self)
     }
 }
 impl SectorIo for ImageIo {
@@ -30,25 +30,18 @@ impl SectorIo for ImageIo {
             .map_err(|_| Error::Io)?;
         self.0.write_all(bytes).map_err(|_| Error::Io)
     }
+    /// `provision_v2` syncs only at its barriers, so this stays cheap.
     fn sync(&mut self) -> Result<(), Error> {
-        if self.1 {
-            self.0.sync_all().map_err(|_| Error::Io)
-        } else {
-            Ok(())
-        }
+        self.0.sync_all().map_err(|_| Error::Io)
     }
     fn check(&mut self) -> Result<(), Error> {
         Ok(())
     }
 }
 fn create_image(path: &Path, sectors: u64) -> Result<(), String> {
-    use theo_storage::{
-        card_layout::{CardLayout, DESCRIPTOR_SECTORS},
-        littlefs::{Geometry, SectorStorage},
-        page_store::PageStore,
-        regions::{AsyncRegion, split},
-    };
-    let layout = CardLayout::new(sectors, 4096).map_err(report)?;
+    use theo_storage::card_layout::CardLayout;
+    // Refuse a capacity the layout cannot hold before creating any file.
+    CardLayout::new(sectors, theo_podcasts::provision::PAGES).map_err(report)?;
     // O_EXCL refuses an existing file, symlink or raw-device path. This tool
     // only creates a new regular image; copying it to hardware is separate.
     let file = OpenOptions::new()
@@ -58,44 +51,14 @@ fn create_image(path: &Path, sectors: u64) -> Result<(), String> {
         .open(path)
         .map_err(report)?;
     file.set_len(sectors * 512).map_err(report)?;
-    // Initialization is unpublished: defer physical flushes until every region
-    // is ready. The single sync before descriptor publication flushes all of
-    // this inode's writes. A reset before then cannot discover the new layout.
-    let (db, log, _media) = split(ImageIo(file.try_clone().map_err(report)?, false), layout);
-    let geometry = Geometry::new(layout.log().sectors() as u64).map_err(report)?;
-    let mut storage = SectorStorage::new(log, geometry);
-    littlefs_rust::Filesystem::format(&mut storage, &geometry.config()).map_err(report)?;
-    let fs =
-        littlefs_rust::Filesystem::mount(storage, geometry.config()).map_err(|(e, _)| report(e))?;
-    fs.open(
-        "/theo.log",
-        littlefs_rust::OpenFlags::WRITE | littlefs_rust::OpenFlags::CREATE,
-    )
-    .map_err(report)?
-    .close()
-    .map_err(report)?;
-    fs.unmount().map_err(report)?;
-    futures::executor::block_on(async {
-        let store = PageStore::create(AsyncRegion::new(db), layout.pages())
-            .await
-            .map_err(report)?;
-        let catalogue = theo_podcasts::catalogue::Catalogue::create(store)
-            .await
-            .map_err(report)?;
-        drop(catalogue);
-        Ok::<_, String>(())
-    })?;
-    let mut publisher = ImageIo(file, true);
-    // Both regions and catalogue schema are durable before either descriptor
-    // makes the layout discoverable. A failed preparation leaves no descriptor.
-    publisher.sync().map_err(report)?;
-    for sector in DESCRIPTOR_SECTORS {
-        publisher
-            .write_sector(sector, &layout.encode())
-            .map_err(report)?;
-        publisher.sync().map_err(report)?;
-    }
-    Ok(())
+    let mut image = ImageIo(file);
+    futures::executor::block_on(theo_podcasts::provision::provision_v2(
+        &mut image,
+        sectors,
+        allocator_api2::alloc::Global,
+    ))
+    .map(drop)
+    .map_err(report)
 }
 fn report(error: impl std::fmt::Debug) -> String {
     format!("{error:?}")

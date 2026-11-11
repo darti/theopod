@@ -22,3 +22,4 @@
 | [0018](0018-integrate-podcast-background-services.md) | Integrate bounded podcast background services | Implemented in software; hardware validation pending |
 | [0019](0019-prepare-littlefs-at-mount-and-cache-sector-reads.md) | Prepare LittleFS at mount and cache sector reads | Implemented; board-verified on a log-only volume |
 | [0020](0020-store-media-in-raw-allocation-units.md) | Store media in raw allocation units and isolate failures per scope | Implemented in software; hardware validation pending |
+| [0021](0021-provision-layout-v2-on-the-device.md) | Provision layout v2 on the device | Implemented; board validation pending |

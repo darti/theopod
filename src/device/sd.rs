@@ -14,6 +14,8 @@ use esp_hal::{
     },
     time::Rate,
 };
+use theo_podcasts::provision::CardId;
+
 use sdio::{
     BlockReadCommand, BlockWriteCommand, BusWidth, ByteReadCommand, ByteWriteCommand,
     ControlCommand, MmcBus, MmcError, Response, ResponseLen,
@@ -129,22 +131,30 @@ impl SdSpi {
     }
 }
 
+/// What identification learned about the card beyond `sdio`'s own state.
+#[derive(Clone, Copy, Default)]
+struct Identity {
+    blocks: u64,
+    /// `None` when CMD10 failed: only `sd-provision-v2` needs it.
+    card: Option<CardId>,
+}
+
 /// SD SPI command bus. This is local because `sdio 0.5.1` decodes SPI R1/R7
 /// responses as if the leading R1 byte were part of the native 32-bit word.
 struct SdMmcBus {
     spi: SdSpi,
     cs: ExpanderCs,
     delay: Delay,
-    blocks: Rc<Cell<u64>>,
+    identity: Rc<Cell<Identity>>,
 }
 
 impl SdMmcBus {
-    fn new(spi: SdSpi, cs: ExpanderCs, delay: Delay, blocks: Rc<Cell<u64>>) -> Self {
+    fn new(spi: SdSpi, cs: ExpanderCs, delay: Delay, identity: Rc<Cell<Identity>>) -> Self {
         Self {
             spi,
             cs,
             delay,
-            blocks,
+            identity,
         }
     }
 
@@ -256,9 +266,24 @@ impl SdMmcBus {
             if blocks == 0 || blocks > u32::MAX as u64 {
                 return Err(MmcError::Unsupported);
             }
-            self.blocks.set(blocks);
+            let card = self.read_cid().await.ok();
+            self.identity.set(Identity { blocks, card });
         }
         Ok(response)
+    }
+
+    /// Reads the CID (CMD10) for the card's identity; never fails init.
+    async fn read_cid(&mut self) -> Result<CardId, MmcError> {
+        self.send_header(&sdio::common::send_cid(0)).await?;
+        let status = self.read_r1().await;
+        let cid = match status {
+            Ok(0) => self.read_response::<sdio::R2>(10, 0).await,
+            Ok(_) => Err(MmcError::Other),
+            Err(error) => Err(error),
+        };
+        self.deselect().await?;
+        let cid: sdio::common::CID<sdio::sd::SD> = cid?.into();
+        Ok(CardId::new(cid.manufacturer_id(), cid.serial()))
     }
 
     async fn wait_not_busy(&mut self) -> Result<(), MmcError> {
@@ -419,13 +444,15 @@ impl MmcBus for SdMmcBus {
 }
 
 /// Initializes the microSD SPI slot and identifies the card.
+///
+/// Returns the device, its capacity in sectors and its CID identity.
 async fn init_card(
     spi3: SPI3<'static>,
     clk: GPIO2<'static>,
     mosi: GPIO1<'static>,
     miso: GPIO3<'static>,
     expander: &'static super::Expander,
-) -> Result<(HalDevice, u64), SdInitError> {
+) -> Result<(HalDevice, u64, Option<CardId>), SdInitError> {
     // Exercise the same bounded identification path as an absent/unresponsive
     // card without requiring physical removal or altering the card contents.
     #[cfg(feature = "sd-check")]
@@ -443,18 +470,22 @@ async fn init_card(
     .with_mosi(mosi)
     .with_miso(miso)
     .into_async();
-    let capacity = Rc::new(Cell::new(0));
-    let bus = SdMmcBus::new(SdSpi(spi), ExpanderCs { expander }, Delay, capacity.clone());
+    let identity = Rc::new(Cell::new(Identity::default()));
+    let bus = SdMmcBus::new(SdSpi(spi), ExpanderCs { expander }, Delay, identity.clone());
     let device: HalDevice = sdio::DefaultBlockDevice::new(bus, Delay, CARD_FREQUENCY_HZ)
         .await
         .map_err(SdInitError::Card)?;
-    let blocks = capacity.get();
+    let Identity { blocks, card } = identity.get();
     log::info!(
         "microSD capacity: {} blocks ({} MiB)",
         blocks,
         blocks / 2048
     );
-    Ok((device, blocks))
+    match card {
+        Some(card) => log::info!("microSD card id: {card}"),
+        None => log::warn!("microSD card id unreadable (CMD10 failed)"),
+    }
+    Ok((device, blocks, card))
 }
 
 #[path = "sd_worker.rs"]

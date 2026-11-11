@@ -1,0 +1,148 @@
+//! Which card an `sd-provision` firmware build may erase (ADR-0021).
+//!
+//! The build carries `THEO_SD_PROVISION`, parsed at compile time by
+//! [`parse_request`] so a malformed value fails the build instead of booting
+//! as a silent no-op. [`Target::authorizes`] is the whole run-time guard.
+use core::fmt;
+use theo_storage::card_layout::{CardLayout, LayoutError};
+
+/// An SD card's identity: CID manufacturer ID and product serial number.
+///
+/// Displayed and parsed as ten hex digits, `MMSSSSSSSS`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CardId(u64);
+
+impl CardId {
+    /// The identity read from a card's CID register.
+    pub const fn new(manufacturer: u8, serial: u32) -> Self {
+        Self(((manufacturer as u64) << 32) | serial as u64)
+    }
+}
+
+impl fmt::Display for CardId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:010x}", self.0)
+    }
+}
+
+/// What an `sd-provision` build was asked to do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Request {
+    /// `format`: format a blank card as a whole-card LittleFS (legacy).
+    Format,
+    /// `v2:<sectors>:<card id>`: erase that one card and publish layout v2.
+    V2(Target),
+}
+
+/// The one card a `v2` request may erase.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Target {
+    /// Exact capacity in 512-byte sectors (boot log "microSD capacity").
+    pub sectors: u64,
+    /// Identity (boot log "microSD card id").
+    pub card: CardId,
+}
+
+/// Why a [`Target`] refused a card; nothing was written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Refusal {
+    /// The card has another capacity.
+    Size(u64),
+    /// The card has another identity, or none could be read.
+    Card(Option<CardId>),
+    /// The card already has layout v2.
+    AlreadyV2,
+    /// A descriptor is unreadable as a v2 layout of this card.
+    Descriptor(LayoutError),
+}
+
+impl fmt::Display for Refusal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Size(sectors) => write!(f, "the card has {sectors} sectors"),
+            Self::Card(Some(card)) => write!(f, "the card id is {card}"),
+            Self::Card(None) => f.write_str("the card id could not be read"),
+            Self::AlreadyV2 => f.write_str("the card already has layout v2"),
+            Self::Descriptor(error) => write!(f, "invalid descriptor ({error:?})"),
+        }
+    }
+}
+
+impl Target {
+    /// Allows erasing only this exact card, and only before it has a v2 layout.
+    ///
+    /// `first` and `second` are the card's descriptor sectors. A blank card
+    /// or a legacy whole-card LittleFS passes.
+    pub fn authorizes(
+        &self,
+        sectors: u64,
+        card: Option<CardId>,
+        first: &[u8; 512],
+        second: &[u8; 512],
+    ) -> Result<(), Refusal> {
+        if sectors != self.sectors {
+            return Err(Refusal::Size(sectors));
+        }
+        if card != Some(self.card) {
+            return Err(Refusal::Card(card));
+        }
+        match CardLayout::select(first, second, sectors) {
+            Ok(None) => Ok(()),
+            Ok(Some(_)) => Err(Refusal::AlreadyV2),
+            Err(error) => Err(Refusal::Descriptor(error)),
+        }
+    }
+}
+
+/// Parses `format` or `v2:<decimal sectors>:<10 hex digit card id>`.
+///
+/// `const` so the firmware rejects a malformed value at compile time.
+pub const fn parse_request(spec: &str) -> Option<Request> {
+    let bytes = spec.as_bytes();
+    if matches!(bytes, b"format") {
+        return Some(Request::Format);
+    }
+    let [b'v', b'2', b':', rest @ ..] = bytes else {
+        return None;
+    };
+    let mut sectors: u64 = 0;
+    let mut index = 0;
+    while index < rest.len() && rest[index] != b':' {
+        let digit = rest[index];
+        if !digit.is_ascii_digit() {
+            return None;
+        }
+        sectors = match sectors.checked_mul(10) {
+            Some(value) => match value.checked_add((digit - b'0') as u64) {
+                Some(value) => value,
+                None => return None,
+            },
+            None => return None,
+        };
+        index += 1;
+    }
+    // At least one digit, then ':' and exactly ten hex digits.
+    if index == 0 || rest.len() != index + 11 {
+        return None;
+    }
+    let mut card: u64 = 0;
+    index += 1;
+    while index < rest.len() {
+        let nibble = match rest[index] {
+            digit @ b'0'..=b'9' => digit - b'0',
+            digit @ b'a'..=b'f' => digit - b'a' + 10,
+            digit @ b'A'..=b'F' => digit - b'A' + 10,
+            _ => return None,
+        };
+        card = (card << 4) | nibble as u64;
+        index += 1;
+    }
+    Some(Request::V2(Target {
+        sectors,
+        card: CardId(card),
+    }))
+}
+
+#[cfg(test)]
+#[path = "provision_guard_tests.rs"]
+mod tests;

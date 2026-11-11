@@ -207,11 +207,11 @@ fn deadline_hook_runs_before_every_sector_and_its_failure_poisons_session() {
 fn actual_ekv_and_littlefs_share_one_device_and_reopen() {
     // Regression (t-106): actual engines use disjoint regions of one device and logs make progress during DB work.
     futures::executor::block_on(async {
-        let (db_region, media, image, layout) = setup();
+        let (db_region, log, image, layout) = setup();
         let geometry = Geometry::new(layout.log().sectors() as u64).unwrap();
-        let mut media = SectorStorage::new(media, geometry);
-        Filesystem::format(&mut media, &geometry.config()).unwrap();
-        let fs = Filesystem::mount(media, geometry.config())
+        let mut log = SectorStorage::new(log, geometry);
+        Filesystem::format(&mut log, &geometry.config()).unwrap();
+        let fs = Filesystem::mount(log, geometry.config())
             .map_err(|(e, _)| e)
             .unwrap();
         let store = PageStore::create(AsyncRegion::new(db_region), 32)
@@ -247,7 +247,7 @@ fn actual_ekv_and_littlefs_share_one_device_and_reopen() {
         futures::join!(database, logger);
         drop(db);
         fs.unmount().unwrap();
-        let (db_region, media, _media_region) = split(Disk(image), layout);
+        let (db_region, log, _media) = split(Disk(image), layout);
         let store = PageStore::open(AsyncRegion::new(db_region), 32)
             .await
             .unwrap();
@@ -263,7 +263,7 @@ fn actual_ekv_and_littlefs_share_one_device_and_reopen() {
             8
         );
         assert_eq!(u64::from_le_bytes(out), 15);
-        let fs = Filesystem::mount(SectorStorage::new(media, geometry), geometry.config())
+        let fs = Filesystem::mount(SectorStorage::new(log, geometry), geometry.config())
             .map_err(|(e, _)| e)
             .unwrap();
         let tail = crate::littlefs::log_tail(&fs, "/theo.log").unwrap();
@@ -429,4 +429,45 @@ fn dropped_async_region_future_still_disables_all_regions() {
     }
     assert_eq!(log.read_sector(0, &mut [0; 512]), Err(Error::Io));
     assert_eq!(media.sync(), Err(Error::Io));
+}
+
+/// (sector reads, sector writes) of a log-region mount plus one append, after
+/// `media_sectors` sectors were written through the media half.
+fn log_mount_and_append_cost(media_sectors: u32) -> (usize, usize) {
+    let (_db, log, mut media, image, layout) = setup3();
+    let geometry = Geometry::new(layout.log().sectors() as u64).unwrap();
+    let mut storage = SectorStorage::new(log, geometry);
+    Filesystem::format(&mut storage, &geometry.config()).unwrap();
+    let fs = crate::littlefs::mount_for_writes(storage, geometry).unwrap();
+    let mut buffer = LogBuffer::<64>::new();
+    buffer.push(b"before\n");
+    crate::littlefs::append_log(&fs, &mut buffer, "/theo.log", "/theo.1.log").unwrap();
+    fs.unmount().unwrap();
+    for sector in 0..media_sectors.min(layout.media().sectors()) {
+        media.write_sector(sector, &[0xA5; 512]).unwrap();
+    }
+    // A fresh split, as after a reboot.
+    let (_db, log, _media) = split(Disk(image.clone()), layout);
+    let (calls, mutations, syncs) = {
+        let image = image.borrow();
+        (image.calls.len(), image.mutations, image.syncs)
+    };
+    let fs =
+        crate::littlefs::mount_for_writes(SectorStorage::new(log, geometry), geometry).unwrap();
+    let mut buffer = LogBuffer::<64>::new();
+    buffer.push(b"after\n");
+    crate::littlefs::append_log(&fs, &mut buffer, "/theo.log", "/theo.1.log").unwrap();
+    let image = image.borrow();
+    let writes = (image.mutations - mutations) - (image.syncs - syncs);
+    (image.calls.len() - calls - writes, writes)
+}
+
+// Regression (t-121): log mount and append cost do not depend on media
+// written to the separate media region.
+#[test]
+fn log_mount_and_append_cost_is_independent_of_media() {
+    let without = log_mount_and_append_cost(0);
+    let with = log_mount_and_append_cost(u32::MAX);
+    assert!(without.0 > 0 && without.1 > 0, "{without:?}");
+    assert_eq!(without, with);
 }

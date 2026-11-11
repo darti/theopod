@@ -128,3 +128,4 @@ it does not authorize tracking the fork or unrelated changes. A path patch
 retains both0.1.1crate source snapshots under `vendor/littlefs`, with provenance
 and removal criteria in `THEO-PATCH.md`. Public safe API and on-disk format stay
 the same. Adopt upstream once the correction or reviewed equivalent merges.
+

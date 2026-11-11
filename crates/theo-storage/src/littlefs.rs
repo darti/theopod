@@ -3,6 +3,10 @@
 use littlefs_rust::{Config, Error, Filesystem, OpenFlags, SeekFrom, Storage};
 
 use crate::LogBuffer;
+use allocator_api2::{
+    alloc::{Allocator, Global},
+    vec::Vec,
+};
 use core::sync::atomic::{AtomicBool, Ordering};
 
 /// One in-flight request. Dropping its future before success permanently
@@ -44,8 +48,36 @@ pub const SECTOR_SIZE: usize = 512;
 pub const BLOCK_SIZE: u32 = 4096;
 const SECTORS_PER_BLOCK: u32 = BLOCK_SIZE / SECTOR_SIZE as u32;
 
+/// Mount an existing volume and prepare it for bounded foreground writes.
+///
+/// Never formats the medium. See [`prepare_for_writes`] for what preparation
+/// costs and why it runs here rather than on the first append.
+pub fn mount_for_writes<S: Storage>(
+    storage: S,
+    geometry: Geometry,
+) -> Result<Filesystem<S>, Error> {
+    let fs = Filesystem::mount(storage, geometry.config()).map_err(|(error, _)| error)?;
+    prepare_for_writes(&fs)?;
+    Ok(fs)
+}
+
+/// Run LittleFS's deferred startup maintenance before publishing the volume.
+///
+/// LittleFS otherwise defers its consistency pass and first free-block scan
+/// to the first allocation, charging them to a 500 ms foreground append. Both
+/// run here instead, under the 2 s mount budget. The consistency pass may
+/// write (orphan and pending-move repair); it never formats. The free-block
+/// scan reads every file's block list, so its cost grows with stored data:
+/// it is paid once per mount here, and again whenever the lookahead window is
+/// exhausted (see [`Geometry::config`]). A failure disables the session like
+/// any other storage error.
+pub fn prepare_for_writes<S: Storage>(fs: &Filesystem<S>) -> Result<(), Error> {
+    fs.gc()
+}
+
 /// Explicit provisioning only: a valid existing LittleFS is preserved. An I/O
-/// failure never becomes permission to format. Normal boot must use mount.
+/// failure never becomes permission to format. Normal boot must use
+/// [`mount_for_writes`]; callers prepare a provisioned volume the same way.
 pub fn provision_once<S: Storage>(
     storage: S,
     geometry: Geometry,
@@ -96,25 +128,128 @@ impl Geometry {
 /// Synchronous sector contract. Implementations must wait for card completion
 /// and impose their own operation deadline. A failed write may damage its
 /// sector, but must not affect other sectors; sync orders completed writes.
+///
+/// Implement this trait to back [`SectorStorage`] with a block device.
 pub trait SectorIo {
     fn read_sector(&mut self, sector: u32, out: &mut [u8; SECTOR_SIZE]) -> Result<(), Error>;
     fn write_sector(&mut self, sector: u32, data: &[u8; SECTOR_SIZE]) -> Result<(), Error>;
     fn sync(&mut self) -> Result<(), Error>;
+    /// Fail without device I/O once the current operation may not proceed.
+    ///
+    /// [`SectorStorage`] calls this before serving a cached sector, so cache
+    /// hits stay bounded by the same deadline and disable state as real I/O.
+    /// Devices without deadlines return `Ok(())`; wrappers must forward it.
+    fn check(&mut self) -> Result<(), Error>;
 }
 
-pub struct SectorStorage<D> {
+// Enough for two metadata blocks plus a file tail and verification reads.
+// Read-through only: write data must never satisfy LittleFS's media readback.
+const CACHED_SECTORS: usize = 32;
+const _: () = assert!(CACHED_SECTORS > 0);
+
+struct CachedSector {
+    sector: Option<u32>,
+    used: u64,
+    bytes: [u8; SECTOR_SIZE],
+}
+
+/// Bytes the read cache reserves: 32 x 528 = 16,896 (ADR-0019).
+pub const READ_CACHE_BYTES: usize = CACHED_SECTORS * core::mem::size_of::<CachedSector>();
+
+/// LittleFS [`Storage`] over whole SD sectors, with a bounded read cache.
+///
+/// The adapter must own its sectors exclusively for the life of the mount:
+/// cached bytes are never revalidated against other writers. Any failed
+/// device call disables it permanently, cache hits included. The cache is
+/// read-through only (writes and erases invalidate, never fill it), so
+/// LittleFS's post-write readback always reaches the medium.
+pub struct SectorStorage<D, A: Allocator = Global> {
     device: D,
     geometry: Geometry,
     enabled: bool,
+    cache: Vec<CachedSector, A>,
+    clock: u64,
 }
 
 impl<D: SectorIo> SectorStorage<D> {
+    /// Host and tooling constructor on the global heap.
+    ///
+    /// # Panics
+    ///
+    /// If the read cache cannot be reserved; firmware uses [`Self::try_new_in`].
     pub fn new(device: D, geometry: Geometry) -> Self {
-        Self {
+        Self::try_new_in(device, geometry, Global).expect("sector read cache allocation")
+    }
+}
+
+impl<D: SectorIo, A: Allocator> SectorStorage<D, A> {
+    /// Reserve the bounded read cache in the caller's memory domain.
+    /// Firmware uses PSRAM; a failed reservation performs no device I/O.
+    pub fn try_new_in(device: D, geometry: Geometry, allocator: A) -> Result<Self, Error> {
+        let mut cache = Vec::new_in(allocator);
+        cache
+            .try_reserve_exact(CACHED_SECTORS)
+            .map_err(|_| Error::NoMemory)?;
+        Ok(Self {
             device,
             geometry,
             enabled: true,
+            cache,
+            clock: 0,
+        })
+    }
+
+    fn invalidate(&mut self, start: u32, len: u32) {
+        for entry in &mut self.cache {
+            if entry
+                .sector
+                .is_some_and(|sector| (start..start + len).contains(&sector))
+            {
+                entry.sector = None;
+            }
         }
+    }
+
+    fn read_sector(&mut self, sector: u32, out: &mut [u8; SECTOR_SIZE]) -> Result<(), Error> {
+        self.clock = self.clock.saturating_add(1);
+        let clock = self.clock;
+        if let Some(index) = self
+            .cache
+            .iter()
+            .position(|entry| entry.sector == Some(sector))
+        {
+            // A hit performs no device I/O, so it must still honour the
+            // operation deadline: an expired request fails and disables.
+            self.io(SectorIo::check)?;
+            let entry = &mut self.cache[index];
+            entry.used = clock;
+            out.copy_from_slice(&entry.bytes);
+            return Ok(());
+        }
+        self.io(|device| device.read_sector(sector, out))?;
+        let slot = match self.cache.iter().position(|entry| entry.sector.is_none()) {
+            Some(index) => index,
+            None if self.cache.len() < CACHED_SECTORS => {
+                // Capacity was reserved before any device I/O: no reallocation.
+                self.cache.push(CachedSector {
+                    sector: None,
+                    used: 0,
+                    bytes: [0; SECTOR_SIZE],
+                });
+                self.cache.len() - 1
+            }
+            None => self
+                .cache
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, entry)| entry.used)
+                .map_or(0, |(index, _)| index),
+        };
+        let entry = &mut self.cache[slot];
+        entry.sector = Some(sector);
+        entry.used = clock;
+        entry.bytes.copy_from_slice(out);
+        Ok(())
     }
 
     fn sector(&self, block: u32, offset: u32, len: usize) -> Result<u32, Error> {
@@ -142,17 +277,18 @@ impl<D: SectorIo> SectorStorage<D> {
     }
 }
 
-impl<D: SectorIo> Storage for SectorStorage<D> {
+impl<D: SectorIo, A: Allocator> Storage for SectorStorage<D, A> {
     fn read(&mut self, block: u32, offset: u32, buf: &mut [u8]) -> Result<(), Error> {
         let start = self.sector(block, offset, buf.len())?;
         for (index, chunk) in buf.as_chunks_mut::<SECTOR_SIZE>().0.iter_mut().enumerate() {
-            self.io(|device| device.read_sector(start + index as u32, chunk))?;
+            self.read_sector(start + index as u32, chunk)?;
         }
         Ok(())
     }
 
     fn write(&mut self, block: u32, offset: u32, data: &[u8]) -> Result<(), Error> {
         let start = self.sector(block, offset, data.len())?;
+        self.invalidate(start, (data.len() / SECTOR_SIZE) as u32);
         for (index, chunk) in data.as_chunks::<SECTOR_SIZE>().0.iter().enumerate() {
             self.io(|device| device.write_sector(start + index as u32, chunk))?;
         }
@@ -161,6 +297,7 @@ impl<D: SectorIo> Storage for SectorStorage<D> {
 
     fn erase(&mut self, block: u32) -> Result<(), Error> {
         let start = self.sector(block, 0, BLOCK_SIZE as usize)?;
+        self.invalidate(start, SECTORS_PER_BLOCK);
         for index in 0..SECTORS_PER_BLOCK {
             self.io(|device| device.write_sector(start + index, &[0xff; SECTOR_SIZE]))?;
         }

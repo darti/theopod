@@ -32,13 +32,21 @@ use theo_storage::{
     card_layout::CardLayout,
     page_store::{PageError, PageStore},
     regions::{self, AsyncRegion, RegionIo},
-    scope::{OWNER_MARGIN_MS, RequestKind, Scope, failure_scope},
+    scope::{OWNER_MARGIN_MS, ReplyKind, RequestKind, after_failure, failure_scope},
 };
 
 use super::{SdInitError, io};
 use theo_storage::sector_bus::{Operation, Request as SectorRequest, SectorBus, SectorClient};
 
 const IO_BUDGET: Duration = Duration::from_millis(500);
+/// Budget of the mount request: descriptors, log mount and catalogue open.
+const MOUNT_BUDGET: Duration = Duration::from_secs(2);
+// The owner's margin must leave it time to work within every request budget.
+const _: () = assert!(
+    0 < OWNER_MARGIN_MS
+        && OWNER_MARGIN_MS < IO_BUDGET.as_millis()
+        && OWNER_MARGIN_MS < MOUNT_BUDGET.as_millis()
+);
 pub(super) static SECTORS: SectorBus = SectorBus::new();
 static COMMANDS: Channel<CriticalSectionRawMutex, Request, 1> = Channel::new();
 static REPLY: Signal<CriticalSectionRawMutex, Result<Reply, Error>> = Signal::new();
@@ -174,9 +182,7 @@ pub async fn init(
 }
 
 pub async fn mount(mut storage: SdStorage) -> Result<SdStorage, Error> {
-    storage
-        .request_done(Command::Mount, Duration::from_secs(2))
-        .await?;
+    storage.request_done(Command::Mount, MOUNT_BUDGET).await?;
     Ok(storage)
 }
 
@@ -524,21 +530,28 @@ async fn owner(geometry: Geometry, sectors: u64, _stack_bottom: usize) {
         } else {
             // A scope failure is a completed reply: the caller's guard
             // completes and only a bus failure poisons the session.
-            match failure_scope(poisoned, kind) {
-                Scope::Bus => {
-                    SECTORS.disable();
-                    volume = None;
-                    podcasts = None;
-                    card = None;
-                    result
-                }
-                Scope::Logs => {
-                    volume = None;
+            let effect = after_failure(failure_scope(poisoned, kind));
+            if effect.disable_bus {
+                SECTORS.disable();
+                card = None;
+            }
+            if effect.drop_logs {
+                // On a legacy whole-card mount the log volume holds the only
+                // `CardIo`: dropping it drops the `SectorClient`, which
+                // disables the bus, as losing the last live scope does on a
+                // v2 card.
+                volume = None;
+            }
+            if effect.drop_podcasts {
+                podcasts = None;
+            }
+            match effect.reply {
+                ReplyKind::Error => result,
+                ReplyKind::LogsOffline => {
                     log::warn!("SD logs offline until reboot: {:?}", result.err());
                     Ok(Reply::Offline)
                 }
-                Scope::Podcasts => {
-                    podcasts = None;
+                ReplyKind::PodcastsOffline => {
                     log::warn!("podcasts offline until reboot: {:?}", result.err());
                     Ok(Reply::Domain(runtime::Reply::Offline))
                 }
@@ -705,16 +718,23 @@ async fn mount_owner(
     Ok((logs, podcasts))
 }
 
+#[cfg_attr(
+    not(feature = "sd-provision"),
+    expect(
+        unused_variables,
+        reason = "only the sd-provision build formats, and only a legacy card"
+    )
+)]
 fn mount_logs(
     io: MediaIo,
     geometry: Result<Geometry, Error>,
-    _legacy_card: bool,
+    legacy_card: bool,
 ) -> Result<MediaFs, Error> {
     let geometry = geometry?;
     let storage = SectorStorage::try_new_in(io, geometry, &esp_alloc::ExternalMemory)?;
     // Explicit provisioning remains legacy-only; normal boot never formats.
     #[cfg(feature = "sd-provision")]
-    if option_env!("THEO_SD_PROVISION") == Some("format") && _legacy_card {
+    if option_env!("THEO_SD_PROVISION") == Some("format") && legacy_card {
         let (fs, _) = littlefs::provision_once(storage, geometry)?;
         littlefs::prepare_for_writes(&fs)?;
         return Ok(fs);

@@ -33,8 +33,10 @@ pub enum ChunkOutcome {
     Written,
     WaitingForSpace,
 }
-// Caller-owned bounded session: boxing would hide allocator/placement policy.
-#[allow(clippy::large_enum_variant)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "caller-owned bounded session: boxing would hide allocator/placement policy"
+)]
 pub enum Start {
     Ready(DownloadSession),
     WaitingForSpace,
@@ -49,6 +51,9 @@ enum Phase {
     /// The announced length exceeds the media capacity; abort marks the
     /// episode `Missing` instead of re-queuing it.
     Oversize,
+    /// The body grew past the media capacity: the episode is already
+    /// `Missing` and its units freed, so abort and finish do nothing more.
+    Refused,
     Poisoned,
 }
 pub struct DownloadSession {
@@ -186,6 +191,7 @@ impl DownloadSession {
         }
         if end > self.capacity {
             refuse_oversize(cat, media, self.job.id, scratch).await?;
+            self.phase = Phase::Refused;
             return Err(MediaError::InvalidInput);
         }
         let required = if self.expected.is_some() {
@@ -213,7 +219,7 @@ impl DownloadSession {
         media: &mut M,
         scratch: &mut [u8],
     ) -> Result<DownloadOutcome, MediaError<F::Error, M::Error>> {
-        if self.phase == Phase::Poisoned {
+        if matches!(self.phase, Phase::Poisoned | Phase::Refused) {
             return Ok(DownloadOutcome::RetryLater);
         }
         if media.active(self.job.id) {

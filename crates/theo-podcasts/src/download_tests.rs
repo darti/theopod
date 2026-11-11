@@ -602,6 +602,18 @@ mod capacity {
         assert_eq!(space.free, space.capacity);
     }
 
+    /// No unit owned, no write since `writes`, and the store still answers.
+    async fn assert_untouched_after(
+        cat: &mut Catalogue<PageStore<HostFile>>,
+        media: &mut Media,
+        writes: usize,
+    ) {
+        assert_eq!(media.table.used(), 0);
+        assert_eq!(media.device().writes, writes);
+        let space = media.space(cat).await.unwrap();
+        assert_eq!(space.free, space.capacity);
+    }
+
     // Regression (t-121): a known length over the capacity is refused at
     // start, before any unlink, eviction or allocation.
     #[test]
@@ -686,8 +698,16 @@ mod capacity {
             ));
             assert_eq!(media.device().writes, writes);
             assert_eq!(media.table.used(), 0);
-            let space = media.space(&mut cat).await.unwrap();
-            assert_eq!(space.free, space.capacity);
+            // The network task always aborts after a failed chunk: that must
+            // succeed and neither re-queue the episode nor touch the store.
+            assert_eq!(
+                session
+                    .abort(&mut cat, &mut media, &mut scratch)
+                    .await
+                    .unwrap(),
+                DownloadOutcome::RetryLater
+            );
+            assert_untouched_after(&mut cat, &mut media, writes).await;
             assert_eq!(audio(&mut cat, id).await, AudioState::Missing);
         });
     }

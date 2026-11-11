@@ -341,8 +341,11 @@ impl<D: SectorIo, A: Allocator + Clone> UnitMedia<D, A> {
             {
                 break;
             }
+            let Some(units) = plan.units.checked_add(run.count) else {
+                break;
+            };
             plan.dirty = dirty;
-            plan.units += run.count;
+            plan.units = units;
             extents += usize::from(!merges);
             last_end = Some(end);
             reached = distance(run.start) + u64::from(run.count);
@@ -357,10 +360,12 @@ impl<D: SectorIo, A: Allocator + Clone> UnitMedia<D, A> {
         for &run in &plan.runs {
             self.table.claim(run);
             match self.temp.extents.last_mut() {
-                Some(last) if last.end() == Some(run.start) => last.count += run.count,
+                Some(last) if last.end() == Some(run.start) => {
+                    last.count = last.count.checked_add(run.count)?
+                }
                 _ => self.temp.extents.push(run).ok()?,
             }
-            self.temp.owned += run.count;
+            self.temp.owned = self.temp.owned.checked_add(run.count)?;
         }
         Some(())
     }
@@ -481,7 +486,11 @@ impl<D: SectorIo, A: Allocator + Clone> UnitMedia<D, A> {
             if at + n == SECTOR {
                 self.write(self.temp.sector(self.temp.len))?;
             }
-            self.temp.len += n as u64;
+            self.temp.len = self
+                .temp
+                .len
+                .checked_add(n as u64)
+                .ok_or(UnitError::Catalogue(Error::Corrupt))?;
         }
         Ok(())
     }
@@ -511,12 +520,12 @@ impl<D: SectorIo, A: Allocator + Clone> UnitMedia<D, A> {
         while excess > 0 {
             let last = self.temp.extents.last_mut()?;
             let cut = excess.min(last.count);
-            last.count -= cut;
-            let from = last.start + last.count;
+            last.count = last.count.checked_sub(cut)?;
+            let from = last.start.checked_add(last.count)?;
             if last.count == 0 {
                 self.temp.extents.pop();
             }
-            for unit in from..from + cut {
+            for unit in from..from.checked_add(cut)? {
                 if !self.table.release(unit) {
                     return None;
                 }
@@ -525,8 +534,8 @@ impl<D: SectorIo, A: Allocator + Clone> UnitMedia<D, A> {
                     dirty.insert(at, page).ok()?;
                 }
             }
-            excess -= cut;
-            self.temp.owned -= cut;
+            excess = excess.checked_sub(cut)?;
+            self.temp.owned = self.temp.owned.checked_sub(cut)?;
         }
         Some(dirty)
     }

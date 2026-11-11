@@ -10,7 +10,6 @@ use crate::{
 use ekv::flash::Flash;
 use heapless::{String, Vec};
 pub type Chunk = Vec<u8, AUDIO_CHUNK>;
-#[allow(clippy::large_enum_variant)]
 pub enum Command {
     Recover,
     Follow(String<256>),
@@ -36,7 +35,6 @@ pub enum Command {
     DownloadEnd(bool),
     Abort,
 }
-#[allow(clippy::large_enum_variant)]
 pub enum Reply {
     Offline,
     Rejected,

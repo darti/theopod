@@ -143,13 +143,17 @@ impl CardLayout {
         if &bytes[..8] != MAGIC && !v1 {
             return Ok(None);
         }
-        if u32::from_le_bytes(bytes[508..].try_into().unwrap()) != crc32(&bytes[..508]) {
+        let words = bytes.as_chunks::<4>().0;
+        let (Some(&crc), Some(&pages)) = (words.get(508 / 4), words.get(72 / 4)) else {
+            return Err(LayoutError::Geometry);
+        };
+        if u32::from_le_bytes(crc) != crc32(&bytes[..508]) {
             return Err(LayoutError::Checksum);
         }
         if v1 || bytes[8..12] != VERSION.to_le_bytes() {
             return Err(LayoutError::Version);
         }
-        let pages = u32::from_le_bytes(bytes[72..76].try_into().unwrap()) as usize;
+        let pages = u32::from_le_bytes(pages) as usize;
         let layout = Self::new(card_sectors, pages)?;
         // Exact canonical encoding also checks card size, sector size, offsets,
         // capacities and every reserved byte. No arbitrary overlapping ranges.

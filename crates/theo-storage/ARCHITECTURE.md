@@ -15,24 +15,36 @@ Used by the firmware (`src/device/sd_worker.rs`) and `theo-podcasts`.
   / `prepare_for_writes` (ADR-0019), `provision_once` (explicit format only),
   `append_log`, `log_tail`, `RequestGuard` (cancellation poisons a session).
 - `card_layout.rs`, `regions.rs`: versioned region descriptors (sectors 0
-  and 8) and `RegionIo`, one device split into database and media ranges;
-  `discover` is for host tooling.
+  and 8) and `RegionIo`, one device split into database, log and media
+  ranges; `discover` is for host tooling.
+- `scope.rs`: failure scopes, the owner's `after_failure`, `OWNER_MARGIN_MS`.
 - `sector_bus.rs`: owned-buffer mailbox from the synchronous filesystem core
   to the async SD service; late replies after cancellation are refused.
 - `page_store.rs`: copy-on-write EKV pages on raw sectors (ADR-0011/0015).
-- `future.rs`: fallible PSRAM placement of large futures.
+- `future.rs`: PSRAM placement of large futures; `run_in` polls one apart.
 - `fat_page_file.rs` (`legacy-fat` feature): the former FAT page transport.
+
+## Card layout v2
+
+Only v2 descriptors are accepted: the EKV database from sector 16, a 16 MiB
+log LittleFS (`LOG_SECTORS`), then raw 1 MiB media units (`UNIT_SECTORS`).
+`regions::split` yields three disjoint `RegionIo` halves over one sector
+client. Layout, unit store and failure scopes: ADR-0020.
 
 ## Extension points
 
 - Implement `littlefs::SectorIo` to back `SectorStorage` with a device. It
   must wait for completion, enforce its own deadline, and fail `check()`
   once the current operation may not proceed (cache hits rely on it).
+  Override `device_failed()` to return `false` for errors that leave the
+  device usable (a passed soft deadline): shared regions then keep it.
 - Pass an `allocator_api2::alloc::Allocator` to `SectorStorage::try_new_in`
   to choose where the read cache lives; `new` uses the global heap.
 
 ## Invariants
 
 - Nothing formats except `provision_once` on a `Corrupt` mount.
-- Any failed device call disables its adapter until reboot; the firmware
-  then disables both regions (ADR-0018).
+- Any failed device call disables its adapter until reboot. `RegionIo`
+  drops the shared device, disabling every region, only when
+  `device_failed()` or an in-flight `AsyncRegion` sector is cancelled;
+  other failures stay in their scope (`failure_scope`, `after_failure`).

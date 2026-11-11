@@ -27,6 +27,35 @@ fn failed_future_placement_does_not_construct_or_start_storage() {
     assert!(!constructed.get());
 }
 #[test]
+fn run_in_returns_the_placed_futures_output() {
+    // Regression (t-121): the storage owner awaits large one-shot futures
+    // through `run_in` so they are never built on core1's stack.
+    let output = futures::executor::block_on(run_in(
+        || async {
+            embassy_futures::yield_now().await;
+            7
+        },
+        Global,
+        4096,
+    ));
+    assert_eq!(output, Ok(7));
+}
+#[test]
+fn run_in_refuses_a_future_it_cannot_place_without_constructing_it() {
+    // Regression (t-121): a failed placement is reported, never run on the stack.
+    let constructed = Cell::new(false);
+    let output = futures::executor::block_on(run_in(
+        || {
+            constructed.set(true);
+            async { 7 }
+        },
+        Reject,
+        4096,
+    ));
+    assert_eq!(output, Err(AllocError));
+    assert!(!constructed.get());
+}
+#[test]
 fn allocated_future_retains_its_local_address_across_yields() {
     // Regression (t-110): polling a placed future must not move its borrowed local state.
     futures::executor::block_on(

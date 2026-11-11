@@ -154,3 +154,11 @@ real catalogue and a simulated external transport. Stop drops pending work;
 a single supplied deadline spans network acknowledgment and final flush. These
 host proofs do not measure physical radio/SD timing. Separate review found no
 remaining actionable issue in the scoped fixes, placement or image publication.
+
+## 2026-11-11 amendment
+
+ADR-0020 stores podcast audio in raw allocation units instead of the shared
+LittleFS volume and narrows "any failed storage request disables both
+regions": log and podcast failures now disable only their own scope, while bus
+faults and caller-side cancellation still disable both. The 500 ms, 1.2 s and
+2 s budgets are unchanged. The sections above are kept as written.

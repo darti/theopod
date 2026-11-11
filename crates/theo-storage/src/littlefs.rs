@@ -140,6 +140,11 @@ pub trait SectorIo {
     /// hits stay bounded by the same deadline and disable state as real I/O.
     /// Devices without deadlines return `Ok(())`; wrappers must forward it.
     fn check(&mut self) -> Result<(), Error>;
+    /// True when the device itself is unusable (not merely past a deadline).
+    /// Wrappers that share a device use it to decide whether to drop it.
+    fn device_failed(&self) -> bool {
+        true
+    }
 }
 
 // Enough for two metadata blocks plus a file tail and verification reads.

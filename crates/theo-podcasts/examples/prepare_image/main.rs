@@ -61,9 +61,9 @@ fn create_image(path: &Path, sectors: u64) -> Result<(), String> {
     // Initialization is unpublished: defer physical flushes until every region
     // is ready. The single sync before descriptor publication flushes all of
     // this inode's writes. A reset before then cannot discover the new layout.
-    let (db, media) = split(ImageIo(file.try_clone().map_err(report)?, false), layout);
-    let geometry = Geometry::new(layout.media().sectors() as u64).map_err(report)?;
-    let mut storage = SectorStorage::new(media, geometry);
+    let (db, log, _media) = split(ImageIo(file.try_clone().map_err(report)?, false), layout);
+    let geometry = Geometry::new(layout.log().sectors() as u64).map_err(report)?;
+    let mut storage = SectorStorage::new(log, geometry);
     littlefs_rust::Filesystem::format(&mut storage, &geometry.config()).map_err(report)?;
     let fs =
         littlefs_rust::Filesystem::mount(storage, geometry.config()).map_err(|(e, _)| report(e))?;

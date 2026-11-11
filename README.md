@@ -103,8 +103,9 @@ flush before deep sleep; a sudden reset can lose the current in-memory batch.
 Startup identification/mount waits are bounded at 3 s/2 s, and each write
 batch at 500 ms. Mount also runs LittleFS's deferred maintenance so the first
 append does not pay for it, and a 32-sector read cache (about 16.5 KiB of
-PSRAM) absorbs repeated metadata reads (ADR-0019). That maintenance grows with
-stored data; large podcast libraries are not yet bounded. A card/write/sync error or timeout disables SD logging until
+PSRAM) absorbs repeated metadata reads (ADR-0019). On a v2 card the
+log volume is separate from media, so that maintenance no longer grows with
+stored podcasts (ADR-0020); a legacy whole-card volume is unchanged. A card/write/sync error or timeout disables SD logging until
 the next boot, preserves the unwritten batch in RAM, and leaves the UI and
 serial logging running. Reinsertion takes effect after reboot.
 
@@ -291,8 +292,9 @@ credentials.
 Podcasts require an already prepared versioned card layout. Existing whole-card
 LittleFS cards keep their logs and remain podcast-offline. Boot never formats,
 partitions or migrates them. `just prepare-image NEW_PATH EXACT_CARD_SECTORS`
-creates a **new regular host image**, prepares a4096-page database and LittleFS,
-syncs both stores and the catalogue schema, then publishes immutable descriptors.
+creates a **new regular host image**, prepares a4096-page database (catalogue schema 2) and a 16 MiB log-only
+LittleFS, leaves the rest as raw 1 MiB media units, syncs the stores, then
+publishes immutable v2 descriptors (ADR-0020).
 It refuses every existing destination, including device paths and symlinks.
 This command does not install an image onto a card. Installing one is a separate
 destructive action requiring explicit authorization and an exact capacity match.
@@ -324,10 +326,14 @@ unread files and read tombstones remain protected. Capacity waits resume on
 mark-read or explicit retry, rather than polling downloads on every tick.
 Playback and a subscription/player UI remain future work.
 
-Storage owns the sole LittleFS mount and catalogue on core1. Commands and audio
+Podcast audio is stored in raw 1 MiB allocation units owned by catalogue
+extent records, not in a filesystem, so per-chunk storage cost does not depend
+on how much is stored (ADR-0020). A known-length download reserves its units
+up front; an episode larger than the media region is marked missing, not retried. Storage owns the sole log LittleFS mount and catalogue on core1. Commands and audio
 chunks cross cores as bounded owned messages; log and data admissions alternate.
-Recovery proceeds one bounded scan or identity repair per admission. Cancelled
-or failed storage invalidates the shared mount until reboot. Sleep closes network
+Recovery proceeds one bounded scan or identity repair per admission. A log
+or podcast storage failure disables only its own scope until reboot;
+card/bus faults and caller-side cancellation disable both. Sleep closes network
 work and bounds its combined stop/final-log-flush handshake to1.2s. Physical SD
 power-loss guarantees, radio/crypto latency, memory peaks and throughput still
 require separately authorized hardware tests; no hardware action is part of

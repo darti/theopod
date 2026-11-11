@@ -73,16 +73,50 @@ impl SectorIo for Disk {
         }
     }
 }
-fn setup() -> (
+type Setup3 = (
+    RegionIo<Disk>,
     RegionIo<Disk>,
     RegionIo<Disk>,
     Rc<RefCell<Image>>,
     CardLayout,
-) {
+);
+fn setup3() -> Setup3 {
     let image = Rc::new(RefCell::new(Image::default()));
     let layout = CardLayout::new(128 * 1024, 32).unwrap();
-    let (db, media) = split(Disk(image.clone()), layout);
-    (db, media, image, layout)
+    let (db, log, media) = split(Disk(image.clone()), layout);
+    (db, log, media, image, layout)
+}
+/// Database and log handles; the media handle is not needed by most tests.
+/// The log region plays the role of the "other" region sharing the device.
+type Setup = (
+    RegionIo<Disk>,
+    RegionIo<Disk>,
+    Rc<RefCell<Image>>,
+    CardLayout,
+);
+fn setup() -> Setup {
+    let (db, log, _media, image, layout) = setup3();
+    (db, log, image, layout)
+}
+// Regression (t-121): three handles translate to database, log and media starts.
+#[test]
+fn split_yields_database_log_and_media_handles() {
+    let (mut db, mut log, mut media, image, layout) = setup3();
+    db.write_sector(0, &[1; 512]).unwrap();
+    log.write_sector(0, &[2; 512]).unwrap();
+    media.write_sector(0, &[3; 512]).unwrap();
+    let image = image.borrow();
+    assert_eq!(image.sectors[&layout.database().start()], [1; 512]);
+    assert_eq!(image.sectors[&layout.log().start()], [2; 512]);
+    assert_eq!(image.sectors[&layout.media().start()], [3; 512]);
+    assert_eq!(
+        image.calls,
+        vec![
+            layout.database().start(),
+            layout.log().start(),
+            layout.media().start()
+        ]
+    );
 }
 #[test]
 fn translates_disjoint_regions_and_rejects_out_of_bounds_before_io() {
@@ -92,7 +126,7 @@ fn translates_disjoint_regions_and_rejects_out_of_bounds_before_io() {
     media.write_sector(0, &[0x24; 512]).unwrap();
     assert_eq!(
         image.borrow().calls,
-        vec![layout.database().start(), layout.media().start()]
+        vec![layout.database().start(), layout.log().start()]
     );
     let calls = image.borrow().calls.len();
     assert_eq!(
@@ -173,11 +207,11 @@ fn deadline_hook_runs_before_every_sector_and_its_failure_poisons_session() {
 fn actual_ekv_and_littlefs_share_one_device_and_reopen() {
     // Regression (t-106): actual engines use disjoint regions of one device and logs make progress during DB work.
     futures::executor::block_on(async {
-        let (db_region, media, image, layout) = setup();
-        let geometry = Geometry::new(layout.media().sectors() as u64).unwrap();
-        let mut media = SectorStorage::new(media, geometry);
-        Filesystem::format(&mut media, &geometry.config()).unwrap();
-        let fs = Filesystem::mount(media, geometry.config())
+        let (db_region, log, image, layout) = setup();
+        let geometry = Geometry::new(layout.log().sectors() as u64).unwrap();
+        let mut log = SectorStorage::new(log, geometry);
+        Filesystem::format(&mut log, &geometry.config()).unwrap();
+        let fs = Filesystem::mount(log, geometry.config())
             .map_err(|(e, _)| e)
             .unwrap();
         let store = PageStore::create(AsyncRegion::new(db_region), 32)
@@ -213,7 +247,7 @@ fn actual_ekv_and_littlefs_share_one_device_and_reopen() {
         futures::join!(database, logger);
         drop(db);
         fs.unmount().unwrap();
-        let (db_region, media) = split(Disk(image), layout);
+        let (db_region, log, _media) = split(Disk(image), layout);
         let store = PageStore::open(AsyncRegion::new(db_region), 32)
             .await
             .unwrap();
@@ -229,7 +263,7 @@ fn actual_ekv_and_littlefs_share_one_device_and_reopen() {
             8
         );
         assert_eq!(u64::from_le_bytes(out), 15);
-        let fs = Filesystem::mount(SectorStorage::new(media, geometry), geometry.config())
+        let fs = Filesystem::mount(SectorStorage::new(log, geometry), geometry.config())
             .map_err(|(e, _)| e)
             .unwrap();
         let tail = crate::littlefs::log_tail(&fs, "/theo.log").unwrap();
@@ -283,4 +317,157 @@ fn legacy_mount_does_not_create_regions_or_write_descriptors() {
         .unwrap();
     assert!(crate::littlefs::log_tail(&fs, "/theo.log").unwrap().size > 0);
     assert_eq!(image.borrow().sectors, before);
+}
+
+/// A device that fails while `expired` is set, reporting `device_failed()`
+/// as `poisoned`: a soft (deadline) or hard (bus) failure.
+struct Timed {
+    disk: Disk,
+    expired: Rc<core::cell::Cell<bool>>,
+    poisoned: bool,
+}
+impl Timed {
+    fn live(&self) -> Result<(), Error> {
+        if self.expired.get() {
+            Err(Error::Io)
+        } else {
+            Ok(())
+        }
+    }
+}
+impl SectorIo for Timed {
+    fn read_sector(&mut self, s: u32, out: &mut [u8; 512]) -> Result<(), Error> {
+        self.live()?;
+        self.disk.read_sector(s, out)
+    }
+    fn write_sector(&mut self, s: u32, data: &[u8; 512]) -> Result<(), Error> {
+        self.live()?;
+        self.disk.write_sector(s, data)
+    }
+    fn sync(&mut self) -> Result<(), Error> {
+        self.live()?;
+        self.disk.sync()
+    }
+    fn check(&mut self) -> Result<(), Error> {
+        self.live()
+    }
+    fn device_failed(&self) -> bool {
+        self.poisoned
+    }
+}
+type TimedSetup = (
+    RegionIo<Timed>,
+    RegionIo<Timed>,
+    RegionIo<Timed>,
+    Rc<core::cell::Cell<bool>>,
+);
+fn timed(poisoned: bool) -> TimedSetup {
+    let expired = Rc::new(core::cell::Cell::new(false));
+    let device = Timed {
+        disk: Disk(Rc::new(RefCell::new(Image::default()))),
+        expired: expired.clone(),
+        poisoned,
+    };
+    let (db, log, media) = split(device, CardLayout::new(128 * 1024, 32).unwrap());
+    (db, log, media, expired)
+}
+
+// Regression (t-121): a deadline error in one region must not take the shared device.
+#[test]
+fn soft_failure_keeps_shared_device_for_other_regions() {
+    let (_db, mut log, mut media, expired) = timed(false);
+    expired.set(true);
+    assert_eq!(media.read_sector(0, &mut [0; 512]), Err(Error::Io));
+    assert_eq!(media.check(), Err(Error::Io));
+    assert!(!media.device_failed());
+    expired.set(false);
+    log.read_sector(0, &mut [0; 512]).unwrap();
+    media.read_sector(0, &mut [0; 512]).unwrap();
+}
+
+// Regression (t-121): a bus-level failure still disables every region.
+#[test]
+fn hard_failure_still_disables_every_region() {
+    let (_db, mut log, mut media, expired) = timed(true);
+    expired.set(true);
+    assert_eq!(media.read_sector(0, &mut [0; 512]), Err(Error::Io));
+    expired.set(false);
+    assert_eq!(log.read_sector(0, &mut [0; 512]), Err(Error::Io));
+    assert!(log.device_failed());
+}
+
+// Regression (t-121): an EKV sector call that returns a soft error completes
+// its guard, so the log handle stays usable.
+#[test]
+fn async_region_soft_error_keeps_log_handle() {
+    let (db, mut log, _media, expired) = timed(false);
+    let mut file = AsyncRegion::new(db);
+    futures::executor::block_on(async {
+        expired.set(true);
+        assert_eq!(file.read_sector(0, &mut [0; 512]).await, Err(Error::Io));
+        assert_eq!(file.write_sector(0, &[1; 512]).await, Err(Error::Io));
+        assert_eq!(SectorFile::sync(&mut file).await, Err(Error::Io));
+        expired.set(false);
+        file.read_sector(0, &mut [0; 512]).await.unwrap();
+    });
+    log.read_sector(0, &mut [0; 512]).unwrap();
+}
+
+// Regression (t-121): cancelling an in-flight EKV sector still disables every
+// region, even on a device that reports no hard failure.
+#[test]
+fn dropped_async_region_future_still_disables_all_regions() {
+    let (db, mut log, mut media, _expired) = timed(false);
+    let mut file = AsyncRegion::new(db);
+    let mut out = [0; 512];
+    {
+        let mut op = pin!(file.read_sector(0, &mut out));
+        assert!(matches!(
+            op.as_mut().poll(&mut Context::from_waker(Waker::noop())),
+            Poll::Pending
+        ));
+    }
+    assert_eq!(log.read_sector(0, &mut [0; 512]), Err(Error::Io));
+    assert_eq!(media.sync(), Err(Error::Io));
+}
+
+/// (sector reads, sector writes) of a log-region mount plus one append, after
+/// `media_sectors` sectors were written through the media half.
+fn log_mount_and_append_cost(media_sectors: u32) -> (usize, usize) {
+    let (_db, log, mut media, image, layout) = setup3();
+    let geometry = Geometry::new(layout.log().sectors() as u64).unwrap();
+    let mut storage = SectorStorage::new(log, geometry);
+    Filesystem::format(&mut storage, &geometry.config()).unwrap();
+    let fs = crate::littlefs::mount_for_writes(storage, geometry).unwrap();
+    let mut buffer = LogBuffer::<64>::new();
+    buffer.push(b"before\n");
+    crate::littlefs::append_log(&fs, &mut buffer, "/theo.log", "/theo.1.log").unwrap();
+    fs.unmount().unwrap();
+    for sector in 0..media_sectors.min(layout.media().sectors()) {
+        media.write_sector(sector, &[0xA5; 512]).unwrap();
+    }
+    // A fresh split, as after a reboot.
+    let (_db, log, _media) = split(Disk(image.clone()), layout);
+    let (calls, mutations, syncs) = {
+        let image = image.borrow();
+        (image.calls.len(), image.mutations, image.syncs)
+    };
+    let fs =
+        crate::littlefs::mount_for_writes(SectorStorage::new(log, geometry), geometry).unwrap();
+    let mut buffer = LogBuffer::<64>::new();
+    buffer.push(b"after\n");
+    crate::littlefs::append_log(&fs, &mut buffer, "/theo.log", "/theo.1.log").unwrap();
+    let image = image.borrow();
+    let writes = (image.mutations - mutations) - (image.syncs - syncs);
+    (image.calls.len() - calls - writes, writes)
+}
+
+// Regression (t-121): log mount and append cost do not depend on media
+// written to the separate media region.
+#[test]
+fn log_mount_and_append_cost_is_independent_of_media() {
+    let without = log_mount_and_append_cost(0);
+    let with = log_mount_and_append_cost(u32::MAX);
+    assert!(without.0 > 0 && without.1 > 0, "{without:?}");
+    assert_eq!(without, with);
 }

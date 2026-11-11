@@ -38,7 +38,7 @@ use crate::{
 };
 use ekv::flash::Flash;
 /// Make room for one actual pending append/download. No clock or purge path.
-pub async fn make_space<F: Flash, M: MediaStore>(
+pub async fn make_space<F: Flash, M: MediaStore<F>>(
     cat: &mut Catalogue<F>,
     media: &mut M,
     required: u64,
@@ -50,7 +50,7 @@ pub async fn make_space<F: Flash, M: MediaStore>(
         return Ok(true);
     }
     loop {
-        let space = media.space().await.map_err(MediaError::Media)?;
+        let space = media.space(cat).await.map_err(MediaError::Media)?;
         if space.free > space.capacity {
             return Err(MediaError::InvalidState);
         }
@@ -104,7 +104,7 @@ pub async fn make_space<F: Flash, M: MediaStore>(
             return Ok(false);
         }
         media
-            .unlink_audio(candidate.id)
+            .unlink_audio(cat, candidate.id)
             .await
             .map_err(MediaError::Media)?;
         cat.transition_audio(candidate.id, AudioState::Reclaimed, scratch)

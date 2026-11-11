@@ -411,13 +411,74 @@ fn schema_rejection_does_not_write_or_reformat() {
         db.format().await.unwrap();
         let mut tx = db.write_transaction().await;
         tx.write(NEXT_KEY, &1u64.to_le_bytes()).await.unwrap();
-        tx.write(SCHEMA_KEY, &2u32.to_le_bytes()).await.unwrap();
+        tx.write(SCHEMA_KEY, &3u32.to_le_bytes()).await.unwrap();
         tx.commit().await.unwrap();
         drop(db);
         let before = image.writes.get();
         let result = Catalogue::open(PageStore::open(image.file(), 32).await.unwrap()).await;
         assert!(matches!(result, Err(Error::Schema)));
         assert_eq!(image.writes.get(), before);
+    });
+}
+
+#[test]
+fn open_into_fills_the_slot_with_a_usable_catalogue() {
+    // Regression (t-121): the storage owner opens the catalogue in its PSRAM
+    // slot; moving the opened value overflowed core1's stack at boot.
+    block_on(async {
+        let image = Image::new();
+        let mut cat = image.create().await;
+        let mut scratch = [0; MAX_RECORD_BYTES];
+        let first = cat
+            .upsert(
+                SubscriptionId(1),
+                metadata(Some("a"), "a", "url/a"),
+                &mut scratch,
+            )
+            .await
+            .unwrap();
+        drop(cat);
+        let mut slot = None;
+        Catalogue::open_into(&mut slot, PageStore::open(image.file(), 32).await.unwrap())
+            .await
+            .unwrap();
+        let mut cat = slot.unwrap();
+        let second = cat
+            .upsert(
+                SubscriptionId(1),
+                metadata(Some("b"), "b", "url/b"),
+                &mut scratch,
+            )
+            .await
+            .unwrap();
+        assert!(cat.get(first.id, &mut scratch).await.unwrap().is_some());
+        assert_ne!(
+            first.id, second.id,
+            "the reopened catalogue keeps its next id"
+        );
+    });
+}
+
+#[test]
+fn open_into_rejected_store_leaves_the_slot_empty() {
+    // Regression (t-121): a failed in-place open must not leave a half-validated catalogue.
+    block_on(async {
+        let image = Image::new();
+        let db = ekv::Database::<_, NoopRawMutex>::new(
+            PageStore::create(image.file(), 32).await.unwrap(),
+            ekv::Config::default(),
+        );
+        db.format().await.unwrap();
+        let mut tx = db.write_transaction().await;
+        tx.write(NEXT_KEY, &1u64.to_le_bytes()).await.unwrap();
+        tx.write(SCHEMA_KEY, &3u32.to_le_bytes()).await.unwrap();
+        tx.commit().await.unwrap();
+        drop(db);
+        let mut slot = None;
+        let result =
+            Catalogue::open_into(&mut slot, PageStore::open(image.file(), 32).await.unwrap()).await;
+        assert!(matches!(result, Err(Error::Schema)));
+        assert!(slot.is_none());
     });
 }
 

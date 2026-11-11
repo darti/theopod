@@ -122,4 +122,9 @@ No region-layout (v1) card exists, so the layout may change without migration.
 
 Commands: `just fmt`, `just check`, `just test`, `just lint`, `just build`.
 
-Results: recorded at merge (Task 8).
+Results (2026-11-11, host): `just fmt` clean; `just check`, `just lint` and
+`RUSTFLAGS="-C link-arg=-Tlinkall.x" just build` pass; `just test` passes
+(theo-podcasts 109, 1 ignored; theo-storage 80, 5 ignored; drivers 308;
+frame-dump 22; frame-png 3; prepare_image 3). The unit-store bound test measures zero
+catalogue commits, reads and writes for `space()` and appends inside reserved
+units with 1, 16 and 64 stored episodes. Not yet validated on the board.

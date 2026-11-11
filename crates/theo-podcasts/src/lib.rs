@@ -21,6 +21,7 @@ mod test_support;
 
 pub mod subscriptions;
 
+pub mod unit_media;
 pub mod units;
 
 pub mod runtime;

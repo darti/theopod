@@ -37,6 +37,9 @@ impl SectorIo for ImageIo {
             Ok(())
         }
     }
+    fn check(&mut self) -> Result<(), Error> {
+        Ok(())
+    }
 }
 fn create_image(path: &Path, sectors: u64) -> Result<(), String> {
     use theo_storage::{

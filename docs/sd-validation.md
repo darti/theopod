@@ -129,3 +129,197 @@ full-media error without filling the physical 59,700 MiB card.
 Actual SD supply power cuts, physical card removal, and actual physical full/
 write-protected media are outside what this USB connection can actuate. The
 host torn-sector tests and injected on-board failures remain distinct evidence.
+
+### Follow-up on current firmware — 2026-11-01 (t-103)
+
+Baseline source: `3befa3d`. The same onboard card reports 122,265,600
+sectors. No provisioning or formatting was performed.
+
+The normal release build failed in LLVM `XtensaSizeReduce` during ThinLTO,
+both with the default size optimization and with optimization level 2.
+The local `sccache` also stalled during Cargo's compiler-version query;
+`RUSTC_WRAPPER=` bypassed that separate host-side problem.
+
+A normal-firmware build with `CARGO_PROFILE_RELEASE_LTO=false` compiled and
+was flashed. It mounted the existing LittleFS and read a 14,215-byte log,
+but panicked at `src/device/logging.rs:36` (`RefCell already borrowed`)
+during the first-frame heap report. Watchdog resets followed. This build
+does not establish a healthy baseline. Capture:
+`target/t-103-2026-11-01-baseline.log`.
+
+The existing `sd-check` build with `THEO_SD_FAULT=observe` compiled with the
+normal release settings. `observe` matches no fault-injection branch.
+After a physical reset it mounted in 24,656 us and read the same previous
+log in 45,802 us. Its first append failed at 500,067 us and disabled storage
+until reboot. The minimum sampled stack margin was 10,483 of 49,152 bytes;
+this remains a callback sample, not a stack high-water measurement.
+Capture: `target/t-103-2026-11-01-physical.log`. The logger panic was not
+observed in this diagnostic boot. No causal explanation for the difference
+between the two builds has been established.
+
+Physical removal after this timeout cannot validate interruption of an
+active write: storage was already disabled. Physical power-loss resilience
+remains unvalidated, and t-103 remains open.
+
+The user then physically removed the card and confirmed that panel rotation
+and touch still responded. The serial capture records orientation changes.
+After the user restarted without the card, initialization reported an SD
+card timeout and continued without storage. Startup reached the first IMU
+sample and subsequent orientation changes; no panic was observed in this
+captured boot. The passive capture does not timestamp individual log lines,
+so it does not independently measure the initialization timeout duration.
+
+After reinsertion and restart, the volume mounted in 24,653 us and its
+14,215-byte log was readable again (tail request: 45,826 us). The first
+append again failed at 500,071 us; recovery of mounting/reading passed,
+but recovery of log persistence did not.
+
+Diagnostic-only counters were added to distinguish time spent waiting for
+sector RPCs from other worker work, without printing inside callbacks.
+In `target/t-103-2026-11-01-io.log`, another boot reports:
+
+| Request | Worker us | Read/write/sync attempts | Sector RPC total us | Longest RPC us | Result |
+| --- | ---: | --- | ---: | ---: | --- |
+| Mount | 24500 | 12 / 0 / 0 | 22739 | 2624 | Passed |
+| Tail | 45276 | 23 / 0 / 0 | 42877 | 2351 | Passed |
+| Append | 500108 | 181 / 22 / 1 | 474451 | 53538 | Failed; storage disabled |
+
+Counts include an unsuccessful final attempt. RPC durations include waiting
+for core 0 and the card; they are not pure SPI/card timings. These results
+show cumulative request cost reaching the budget, rather than one sector
+RPC occupying the full 500 ms. They do not establish which layer should be
+changed or justify increasing the watchdog-sensitive frontend timeout.
+No physical power cut during a healthy append has been validated.
+
+Fresh `just fmt`, `just check`, `just test`, `just lint` (all configured
+features and host crates), and default release `just build` pass with
+`RUSTC_WRAPPER=`. The earlier compiler crashes did not recur in the final
+default release build; no compiler fix or explanation is claimed.
+A read-only independent review found no correctness issues in the counters.
+
+Normal firmware was restored with default release settings, without
+`sd-check`, provisioning or the no-LTO override. Its final capture,
+`target/t-103-2026-11-01-restored-normal.log`, confirms mount, the same
+14,215-byte previous log, first IMU sample, and then storage disabling with
+`Ok(Err(Io))`. No logger panic was observed in this final boot. Thus the
+device is left on normal firmware with SD logging disabled for this boot;
+successful new persistence is not claimed. The repeatable first-append
+failure must be resolved before testing interruption of healthy writes.
+
+### First-append correction — 2026-11-01 (t-103)
+
+The first allocation deferred a free-block scan until the foreground append.
+The safe LittleFS `gc()` operation performs this initial allocation preparation
+and consistency/metadata maintenance. `mount_for_writes` now runs it before
+returning the mounted filesystem; the board's explicit provisioning branch
+does the same. All of this remains inside the existing two-second mount
+deadline. Foreground requests still have a 500 ms deadline; shutdown still has
+its 1.2 s budget. No volume was formatted for this correction.
+
+A host fixture recreates a 14,215-byte journal built by repeated appends,
+a 128 KiB log archive and isolated 128 KiB/4 KiB rotation fixtures. Without
+preparation, its first 4 KiB append required 102 sector reads; preparation
+reduced that to 36 (29 sector writes in either case). The regression limited
+that append to 64 reads: before the read cache below, it failed with I/O
+error without the fix, then passed
+and verified exact log/archive contents after remount. This budget belongs to
+the fixture, not all possible filesystems. Another regression fails sector
+reads after raw mount succeeds, checks that preparation returns I/O failure
+without changing the image, then successfully reopens the existing file.
+
+| Board capture | Mount service | Successful append service times |
+| --- | --- | --- |
+| `target/t-103-2026-11-01-prepared.log` | 89.083 ms, 48 reads, no writes | 496.759 / 134.953 / 142.298 ms |
+| `target/t-103-2026-11-01-prepared-reboot1.log` | Early mount lines not captured | 240.752 / 111.852 / 113.502 ms |
+| `target/t-103-2026-11-01-prepared-reboot2.log` | Early mount lines not captured | 178.657 / 163.208 / 404.543 ms |
+
+The first corrected append still had little margin below 500 ms; these are
+successful samples, not worst-case guarantees. Later allocation scans and
+metadata work can still increase request cost. The safety deadline and
+disable-until-reboot behavior remain in force. The board diagnostics above
+show no append failure; the separate `podcasts network stopped: Storage`
+message also occurs because this legacy whole-card volume has no podcast
+database region, and does not by itself mean the SD logger failed.
+
+Final normal firmware restoration (without diagnostic/provisioning features)
+is captured in `target/t-103-2026-11-01-fixed-normal.log`: the previous log
+had grown to 20,667 bytes. A second normal boot, captured in
+`target/t-103-2026-11-01-fixed-normal-reopen.log`, read 22,576 bytes,
+confirming another 1,909 bytes persisted from the normal firmware. No
+storage-disable message or logger panic was observed in these final boots.
+The second tail begins inside a UTF-8 sequence and is displayed as
+`<UTF-8 boundary>` by the existing tail printer; the log-size read succeeded.
+This supersedes the pre-fix final-device-state paragraph above: the device
+is now left running corrected normal firmware with logging operational.
+
+`just fmt`, `just check`, `just test` (466 passed; six existing extended
+tests ignored), `just lint` and default release `just build` pass with
+`RUSTC_WRAPPER=`. Independent review found no blocking issue. No dependency
+or unsafe-driver change was made. The t-103 physical power-cut/active-write
+removal/full/protected-media scope and merge requirement remain open.
+
+### Physical removal after the correction — confirmed 2026-11-02 (t-103)
+
+The user removed the onboard card while the device remained USB-powered.
+`target/t-103-physical-removal-power.log` records six successful appends
+(229.365 / 130.336 / 123.074 / 136.271 / 135.603 / 157.000 ms), followed
+by an append failing in 1.768 ms with I/O error. That request attempted one
+sector read and no write; storage disabled until reboot. Two subsequent
+orientation changes were logged, with no panic or reset in this capture.
+
+This is physical removal during a functioning logging workload. It does not
+establish removal during a card's internal sector-programming phase, since
+the failing request stopped at its first read. The user confirmed that touch
+still responded after removal. After USB power-off, reinsertion and reconnect,
+the volume mounted in 121.914 ms and its 27,388-byte journal remained readable.
+However, the first append again exceeded 500 ms (188 read attempts, 24 writes,
+one sync attempt), disabling storage. Thus startup preparation alone was
+insufficient; the earlier successful samples did not establish a complete fix.
+
+### Read-amplification correction — 2026-11-02 (t-103)
+
+`target/t-103-sector-amplification.log` records a further failed first append:
+500.112 ms, 169 read RPCs but only 23 distinct sectors, one read 20 times.
+This isolates repeated metadata reads as an additional cost, rather than one
+hung sector. Each physical read also incurs the board's I2C chip-select work.
+
+The sector adapter now reserves a 32-sector read-through LRU cache. Board
+allocation is fallible and explicitly uses PSRAM (16,896 bytes measured in
+the heap report). All affected entries are invalidated before writes/erases;
+write data never fills entries, preserving real-media readback validation.
+Failed I/O still prevents all subsequent reads, including cache hits. No
+request, shutdown or watchdog budget was increased, and no card was formatted.
+
+A real LittleFS regression formerly failed at cold-mount/append cycle 2 under
+a 64-sector-read budget. It now passes 64 fresh-adapter mount/append cycles,
+including rotation, and verifies exact log/archive data after cold remounts.
+Additional tests check physical readback after an acknowledged-but-missing
+write, erase invalidation, and poisoned cached reads after partial erase or
+failed sync. The adapter readback test passes both Miri aliasing models.
+
+`target/t-103-sector-cache.log` verifies the same 27,388-byte journal on board:
+mount 57.815 ms (30 reads), tail 9.435 ms (four reads), and successful appends
+174.976 / 175.686 / 47.066 ms. The first append required 13 physical reads.
+These are samples, not universal bounds for all cards and volume states.
+An independent review found no blocking coherence or cancellation issue.
+
+### Review follow-up — 2026-11-11 (t-103)
+
+A multi-reviewer pass found that, with the read cache in place, the first
+append needs only 50 reads without preparation, so the 64-read regression
+no longer detected a missing `gc()`. The regression now compares a prepared
+and an unprepared first append on identical images (18 vs 50 reads on the
+host) and limits the prepared one to 32. Mutation checks confirm that each
+of these fails its test: no preparation, single-sector write or erase
+invalidation, no deadline check on cache hits, no up-front cache reservation,
+and no LRU refresh.
+
+Cache hits now call `SectorIo::check`, so they fail once the request deadline
+has passed or the session is disabled. The board figures above predate this
+check; it performs no I/O, but they have not been re-measured with it.
+
+A host measurement quantifies the open limit recorded in ADR-0019: preparing
+a volume with 4 MiB of media costs 516 extra sector reads, about one per two
+data blocks. All board evidence above is from a log-only volume; a card
+holding downloaded episodes has not been measured.
+

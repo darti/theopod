@@ -34,7 +34,8 @@ the ESP toolchain and target are defined in `rust-toolchain.toml`.
 - Regression tests live in the side-by-side `*_tests.rs` files, each
   tagged `// Regression (t-N): ...` (or `Regression guard`), not in
   `tests/regressions/` (ADR-0007).
-- Layout: `README.md`; driver map in `crates/theo-drivers/ARCHITECTURE.md`.
+- Layout: `README.md`; driver map in `crates/theo-drivers/ARCHITECTURE.md`;
+  storage map in `crates/theo-storage/ARCHITECTURE.md`.
   Debug tooling: `crates/theo-frame-dump` (`no_std`, shared by the firmware
   and the host), the host-only `tools/frame-png`, and
   `tools/passive-monitor.py` (serial log without reset).

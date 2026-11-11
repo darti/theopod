@@ -907,3 +907,34 @@ fn only_inconsistent_state_errors_are_fatal() {
         assert!(fatal(&e), "{e:?}");
     }
 }
+
+// Regression (t-121): the storage owner future runs on core1's 48 KiB stack
+// before it is pinned in PSRAM. A 4 KiB extent plan held across an await was
+// copied into every enclosing future and overflowed that stack at boot, so no
+// unit-store future may hold extent-sized state across an await.
+#[test]
+fn store_futures_hold_no_extent_sized_state() {
+    // Below one extent plan (510 x 8 bytes), so holding one fails the test.
+    const MAX_FUTURE: usize = 4096;
+    block_on(async {
+        let image = image(32);
+        let mut cat = image.create().await;
+        let mut media = open(&mut cat, Disk::counting(8 * SECTORS), 8).await;
+        let id = EpisodeId(1);
+        let reset = size_of_val(&media.reset_temp(&mut cat, id, Some(1)));
+        let append = size_of_val(&media.append_temp(&mut cat, id, &[0]));
+        let publish = size_of_val(&media.publish_temp(&mut cat, id));
+        let unlink = size_of_val(&media.unlink_temp(&mut cat, id));
+        let unlink_audio = size_of_val(&media.unlink_audio(&mut cat, id));
+        let sizes = [
+            ("reset_temp", reset),
+            ("append_temp", append),
+            ("publish_temp", publish),
+            ("unlink_temp", unlink),
+            ("unlink_audio", unlink_audio),
+        ];
+        for (name, size) in sizes {
+            assert!(size <= MAX_FUTURE, "{name} future is {size} bytes");
+        }
+    });
+}

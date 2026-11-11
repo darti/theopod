@@ -137,7 +137,29 @@ impl<F: Flash> Catalogue<F> {
     }
     /// Read-only mount/schema validation. Never formats or migrates on failure.
     pub async fn open(flash: F) -> Result<Self, Error<F::Error>> {
-        let db = ekv::Database::new(flash, ekv::Config::default());
+        let mut slot = None;
+        Self::open_into(&mut slot, flash).await?;
+        slot.ok_or(Error::Corrupt)
+    }
+    /// [`Self::open`], built in `slot` rather than returned.
+    ///
+    /// The catalogue is about 10 KiB: each by-value move costs that much
+    /// stack, which the storage owner's 48 KiB core1 stack cannot spare.
+    /// `slot` is `None` after a failure.
+    pub async fn open_into(slot: &mut Option<Self>, flash: F) -> Result<(), Error<F::Error>> {
+        let catalogue = slot.insert(Self {
+            db: ekv::Database::new(flash, ekv::Config::default()),
+            next: 0,
+            enabled: true,
+        });
+        let result = catalogue.validate().await;
+        if result.is_err() {
+            *slot = None;
+        }
+        result
+    }
+    async fn validate(&mut self) -> Result<(), Error<F::Error>> {
+        let db = &self.db;
         db.mount().await.map_err(|e| match e {
             ekv::MountError::Flash(e) => Error::Storage(e),
             ekv::MountError::Corrupted => Error::Corrupt,
@@ -158,11 +180,8 @@ impl<F: Flash> Catalogue<F> {
             return Err(Error::Corrupt);
         }
         drop(tx);
-        Ok(Self {
-            db,
-            next,
-            enabled: true,
-        })
+        self.next = next;
+        Ok(())
     }
     pub async fn completed_audio_len(
         &mut self,

@@ -370,13 +370,10 @@ impl<D: SectorIo, A: Allocator + Clone> UnitMedia<D, A> {
         Some(())
     }
 
-    /// Own `plan` in one commit, before any data reaches it.
-    async fn own<F: Flash>(
-        &mut self,
-        cat: &mut Catalogue<F>,
-        id: EpisodeId,
-        plan: Plan,
-    ) -> Result<(), UnitError<F::Error>> {
+    /// Claim `plan` and encode the temp record; returns the pages to commit
+    /// and the record length. Synchronous so the 4 KiB plan never lives in a
+    /// future: the owner future is built on core1's stack (t-121).
+    fn stage<E>(&mut self, plan: Plan) -> Result<(Dirty, usize), UnitError<E>> {
         // `plan` checked extent room, so this cannot fail; if it did, RAM
         // is suspect and the store disables.
         self.apply(&plan)
@@ -384,7 +381,17 @@ impl<D: SectorIo, A: Allocator + Clone> UnitMedia<D, A> {
         let n = self
             .encode_temp(RecordState::Temp)
             .ok_or(UnitError::Catalogue(Error::Corrupt))?;
-        self.commit(cat, &plan.dirty, id, Some(n)).await
+        Ok((plan.dirty, n))
+    }
+
+    /// Own staged units in one commit, before any data reaches them.
+    async fn own<F: Flash>(
+        &mut self,
+        cat: &mut Catalogue<F>,
+        id: EpisodeId,
+        (dirty, n): (Dirty, usize),
+    ) -> Result<(), UnitError<F::Error>> {
+        self.commit(cat, &dirty, id, Some(n)).await
     }
 
     async fn reset<F: Flash>(
@@ -426,13 +433,21 @@ impl<D: SectorIo, A: Allocator + Clone> UnitMedia<D, A> {
         }
         self.temp.clear();
         if want > 0 {
-            let plan = self.plan(want);
-            if plan.units < want {
-                // Free units exist but would need more than `MAX_EXTENTS`.
-                return Err(UnitError::Invalid);
-            }
-            self.temp.id = Some(id);
-            if let Err(error) = self.own(cat, id, plan).await {
+            // Scoped so the plan is not part of this future (see `stage`).
+            let staged = {
+                let plan = self.plan(want);
+                if plan.units < want {
+                    // Free units exist but would need more than `MAX_EXTENTS`.
+                    return Err(UnitError::Invalid);
+                }
+                self.temp.id = Some(id);
+                self.stage(plan)
+            };
+            let result = match staged {
+                Ok(staged) => self.own(cat, id, staged).await,
+                Err(error) => Err(error),
+            };
+            if let Err(error) = result {
                 self.temp.clear();
                 return Err(error);
             }
@@ -451,12 +466,16 @@ impl<D: SectorIo, A: Allocator + Clone> UnitMedia<D, A> {
         if self.table.free() == 0 {
             return Err(UnitError::Full);
         }
-        let plan = self.plan(self.temp.owned.clamp(1, MAX_BATCH));
-        if plan.units == 0 {
-            // Free units exist, but none merges and the extents are full.
-            return Err(UnitError::Invalid);
-        }
-        self.own(cat, id, plan).await
+        // Scoped so the plan is not part of this future (see `stage`).
+        let staged = {
+            let plan = self.plan(self.temp.owned.clamp(1, MAX_BATCH));
+            if plan.units == 0 {
+                // Free units exist, but none merges and the extents are full.
+                return Err(UnitError::Invalid);
+            }
+            self.stage(plan)?
+        };
+        self.own(cat, id, staged).await
     }
 
     async fn append<F: Flash>(

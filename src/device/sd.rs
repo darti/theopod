@@ -493,7 +493,8 @@ mod worker;
 #[cfg(feature = "sd-check")]
 pub use worker::test_rotation;
 pub use worker::{
-    PodcastRequest, SdStorage, append_log, disable, domain, guard, init, mount, report_log_tail,
+    PodcastRequest, SdStorage, append_log, disable, domain, guard, init, mount, provisions_v2,
+    report_log_tail,
 };
 
 #[path = "sd_io.rs"]

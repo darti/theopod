@@ -217,6 +217,17 @@ pub async fn append_log<const N: usize>(
 pub fn disable() {
     SECTORS.disable();
 }
+
+/// Whether this build provisions layout v2 (ADR-0021).
+///
+/// Core0 must then send no request: the run holds the owner for minutes,
+/// and a timed-out request would poison the bus mid-run.
+pub const fn provisions_v2() -> bool {
+    #[cfg(feature = "sd-provision")]
+    return matches!(provision::REQUEST, provision::Request::V2(_));
+    #[cfg(not(feature = "sd-provision"))]
+    false
+}
 pub fn guard() -> Result<RequestGuard<'static>, Error> {
     RequestGuard::begin(SECTORS.poison_flag())
 }

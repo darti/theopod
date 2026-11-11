@@ -315,6 +315,13 @@ impl Board {
         )
         .await
         {
+            Ok(Ok(device)) if sd::provisions_v2() => {
+                // Never dropped: dropping the token disables the bus, and
+                // any request would time out and poison it mid-run.
+                core::mem::forget(device);
+                log::info!("microSD left to the v2 provisioning run");
+                (None, SdStatus::MountFailed)
+            }
             Ok(Ok(device)) => {
                 watchdog.feed();
                 match embassy_time::with_timeout(

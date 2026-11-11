@@ -1,6 +1,6 @@
 # ADR-0021: Provision layout v2 on the device
 
-- Status: Implemented; board validation pending
+- Status: Implemented; provisioning validated on the board
 - Date: 2026-11-11
 - Related: t-133, t-121; ADR-0015, ADR-0018, ADR-0020
 
@@ -51,6 +51,10 @@ volume). At about 2 ms per board sector write that takes minutes, far past the
 - This erases whatever the card held, including a whole-card LittleFS with
   logs. It is the one deliberate exception to "never carve out of an existing
   whole-card LittleFS": an explicit, separately built, card-bound request.
+- In a v2 build, core0 skips the mount and keeps its storage token without
+  dropping it (`sd::provisions_v2`): a core0 request would time out during
+  the run and poison the shared sector bus (first board run: failed after
+  1 s, `Io`).
 - Each sector operation keeps its own `IO_BUDGET` (500 ms) deadline; no
   request deadline covers the whole run. The run happens on core1 and the
   storage stays offline for that boot. A PSRAM allocation failure before the
@@ -90,5 +94,15 @@ the last descriptor copy, which leaves a complete layout; a sync failure
 publishes nothing; syncs happen only at the barriers; an undersized card
 writes nothing); `provision_guard` tests (parsing, size, id, descriptor
 refusals); `create_into` and `prepare_image` tests. A malformed
-`THEO_SD_PROVISION` fails `cargo check --features sd-provision`. Board:
-pending.
+`THEO_SD_PROVISION` fails `cargo check --features sd-provision`.
+
+Board (2026-11-11, 59700 MiB card `c9000031f6`, previously a whole-card
+LittleFS): the normal firmware logged the card id. The first v2 run failed
+after 1 s (core0's mount request poisoned the bus, fixed above) and left the
+card blank as designed. The second run finished in 242 s: "SD v2
+provisioning done ... 59647 media units". The normal firmware then
+discovered the layout and mounted the new log region (`theo.log` 0 bytes).
+The catalogue does not open: "catalogue open failed: Storage(Disabled)".
+On the host, opening a freshly provisioned 4096-page catalogue takes 73,872
+sector reads (18 per page), far beyond the 2 s mount budget; podcasts stay
+offline until that open path is fixed (follow-up to t-121/ADR-0020).

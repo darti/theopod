@@ -26,7 +26,5 @@ pub mod units;
 
 pub mod runtime;
 
-pub mod littlefs_media;
-
 pub mod setup;
 pub mod worker;

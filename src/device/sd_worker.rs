@@ -18,8 +18,8 @@ use littlefs_rust::{Error, Filesystem};
 use static_cell::{ConstStaticCell, StaticCell};
 use theo_podcasts::{
     catalogue::Catalogue,
-    littlefs_media::LittlefsMedia,
     runtime::{self, Runtime},
+    unit_media::UnitMedia,
 };
 use theo_storage::{
     LogBuffer,
@@ -532,7 +532,8 @@ pub async fn test_rotation(storage: &mut SdStorage) -> Result<(), Error> {
 type DbFlash = PageStore<AsyncRegion<CardIo>, &'static esp_alloc::ExternalMemory>;
 type MediaStorage = SectorStorage<MediaIo, &'static esp_alloc::ExternalMemory>;
 type MediaFs = Filesystem<MediaStorage>;
-type PodcastOwner = Runtime<DbFlash, LittlefsMedia<MediaStorage>>;
+type UnitStore = UnitMedia<RegionIo<CardIo>, &'static esp_alloc::ExternalMemory>;
+type PodcastOwner = Runtime<DbFlash, UnitStore>;
 enum MediaIo {
     Legacy(CardIo),
     Region(RegionIo<CardIo>),
@@ -579,12 +580,11 @@ async fn mount_owner(
     let (io, geometry, database) = match layout {
         None => (MediaIo::Legacy(card), legacy, None),
         Some(layout) => {
-            // The media handle is unused until the raw unit store lands (t-121).
-            let (db, log, _media) = regions::split(card, layout);
+            let (db, log, media) = regions::split(card, layout);
             (
                 MediaIo::Region(log),
                 Geometry::new(layout.log().sectors() as u64).map_err(|e| (e, ()))?,
-                Some((db, layout)),
+                Some((db, media, layout)),
             )
         }
     };
@@ -604,7 +604,7 @@ async fn mount_owner(
     #[cfg(not(feature = "sd-provision"))]
     let fs = littlefs::mount_for_writes(storage, geometry).map_err(|e| (e, ()))?;
     let fs = Rc::new(fs);
-    if let Some((db, layout)) = database {
+    if let Some((db, media, layout)) = database {
         if allocated {
             let store = PageStore::open_in(
                 AsyncRegion::new(db),
@@ -613,13 +613,18 @@ async fn mount_owner(
             )
             .await
             .map_err(|_| (Error::Io, ()))?;
-            let catalogue = Catalogue::open(store)
+            let mut catalogue = Catalogue::open(store)
                 .await
                 .map_err(|_| (Error::Corrupt, ()))?;
-            *owner = Some(Runtime::new(
-                catalogue,
-                LittlefsMedia::new(fs.clone(), layout.log().byte_len()),
-            ));
+            let units = UnitMedia::open_in(
+                &mut catalogue,
+                media,
+                layout.media_units(),
+                &esp_alloc::ExternalMemory,
+            )
+            .await
+            .map_err(|_| (Error::Corrupt, ()))?;
+            *owner = Some(Runtime::new(catalogue, units));
         } else {
             log::warn!("podcasts offline: PSRAM scratch allocation failed");
         }

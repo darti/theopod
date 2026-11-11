@@ -128,3 +128,18 @@ it does not authorize tracking the fork or unrelated changes. A path patch
 retains both0.1.1crate source snapshots under `vendor/littlefs`, with provenance
 and removal criteria in `THEO-PATCH.md`. Public safe API and on-disk format stay
 the same. Adopt upstream once the correction or reviewed equivalent merges.
+
+## 2026-11-01 upstream integration status (t-104)
+
+A fresh GitHub check of PR #12 still reports `open`, `merged: false` and
+`merged_at: null`; its base `main` is `732d038b`, and its corrected head is
+`e51ca62c`. Therefore the upstream-main lock update and removal of the
+temporary patch are still pending. The authorized temporary adoption does
+not complete t-104.
+
+The retained crate trees again compare byte-for-byte with a clean checkout
+of `e51ca62cd33dbd9564d07f718214cae842f0d22f`. Both safe-API regressions pass
+directly against the retained workspace under Miri Stacked Borrows and Tree
+Borrows (two tests in each model). Captures:
+`target/t-104-miri-stacked.log` and `target/t-104-miri-tree.log`.
+No dependency revision or patch source was changed by this verification.

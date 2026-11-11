@@ -327,8 +327,9 @@ mark-read or explicit retry, rather than polling downloads on every tick.
 Playback and a subscription/player UI remain future work.
 
 Podcast audio is stored in raw 1 MiB allocation units owned by catalogue
-records, not in a filesystem, so per-chunk storage cost does not depend on how
-much is stored (ADR-0020). Storage owns the sole log LittleFS mount and catalogue on core1. Commands and audio
+extent records, not in a filesystem, so per-chunk storage cost does not depend
+on how much is stored (ADR-0020). A known-length download reserves its units
+up front; an episode larger than the media region is marked missing, not retried. Storage owns the sole log LittleFS mount and catalogue on core1. Commands and audio
 chunks cross cores as bounded owned messages; log and data admissions alternate.
 Recovery proceeds one bounded scan or identity repair per admission. A log
 or podcast storage failure disables only its own scope until reboot;

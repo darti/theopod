@@ -17,8 +17,10 @@ const MIN_MEDIA_SECTORS: u32 = 65536; // 32 MiB; the download reserve is separat
 const MAGIC: &[u8; 8] = b"THEOSD02";
 const VERSION: u32 = 2;
 const V1_MAGIC: &[u8; 8] = b"THEOSD01";
-pub const LOG_SECTORS: u32 = 32_768; // 16 MiB: two 128 KiB log files plus LittleFS headroom.
-pub const UNIT_SECTORS: u32 = 2_048; // 1 MiB raw media allocation unit.
+/// Sectors of the log region (16 MiB): two 128 KiB log files plus LittleFS headroom.
+pub const LOG_SECTORS: u32 = 32_768;
+/// Sectors of one raw media allocation unit (1 MiB).
+pub const UNIT_SECTORS: u32 = 2_048;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LayoutError {

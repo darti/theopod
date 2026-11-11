@@ -17,8 +17,7 @@ Used by the firmware (`src/device/sd_worker.rs`) and `theo-podcasts`.
 - `card_layout.rs`, `regions.rs`: versioned region descriptors (sectors 0
   and 8) and `RegionIo`, one device split into database, log and media
   ranges; `discover` is for host tooling.
-- `scope.rs`: `failure_scope`, which scope (bus, logs, podcasts) a failed
-  request disables, and `OWNER_MARGIN_MS`.
+- `scope.rs`: failure scopes, the owner's `after_failure`, `OWNER_MARGIN_MS`.
 - `sector_bus.rs`: owned-buffer mailbox from the synchronous filesystem core
   to the async SD service; late replies after cancellation are refused.
 - `page_store.rs`: copy-on-write EKV pages on raw sectors (ADR-0011/0015).
@@ -27,13 +26,10 @@ Used by the firmware (`src/device/sd_worker.rs`) and `theo-podcasts`.
 
 ## Card layout v2
 
-Only v2 descriptors (`THEOSD02`, sectors 0 and 8) are accepted; v1 is
-rejected. After the descriptors (sectors 0..16): the EKV database from sector
-16, a 16 MiB log region (`LOG_SECTORS`, LittleFS holding only logs), then the
-media region from the next 1 MiB boundary (`UNIT_SECTORS` = 2,048 sectors per
-raw allocation unit, no filesystem; minimum 32 MiB). Log work therefore does
-not scale with stored media. `regions::split` yields three disjoint
-`RegionIo` halves over one shared sector client. See ADR-0020.
+Only v2 descriptors are accepted: the EKV database from sector 16, a 16 MiB
+log LittleFS (`LOG_SECTORS`), then raw 1 MiB media units (`UNIT_SECTORS`).
+`regions::split` yields three disjoint `RegionIo` halves over one sector
+client. Layout, unit store and failure scopes: ADR-0020.
 
 ## Extension points
 
@@ -50,11 +46,5 @@ not scale with stored media. `regions::split` yields three disjoint
 - Nothing formats except `provision_once` on a `Corrupt` mount.
 - Any failed device call disables its adapter until reboot. `RegionIo`
   drops the shared device, disabling every region, only when
-  `device_failed()`; otherwise the failure stays in its scope
-  (`failure_scope`, t-121). Cancelling an in-flight `AsyncRegion` sector
-  still disables every region.
-- Bus faults (card or HAL error, aborted in-flight sector RPC, caller-side
-  cancellation) disable every scope; a missed soft deadline between sector
-  RPCs and logical errors (LittleFS, EKV, unit store) disable one scope.
-  When the last live scope goes offline the shared client is dropped, so
-  later requests may report an I/O error instead of Offline.
+  `device_failed()` or an in-flight `AsyncRegion` sector is cancelled;
+  other failures stay in their scope (`failure_scope`, `after_failure`).

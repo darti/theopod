@@ -1,4 +1,8 @@
-use crate::{catalogue::EpisodeId, media::*};
+use crate::{
+    catalogue::{Catalogue, EpisodeId},
+    media::*,
+};
+use ekv::flash::Flash;
 use std::{
     collections::BTreeSet,
     fs::{self, File, OpenOptions},
@@ -90,12 +94,12 @@ impl Drop for HostMedia {
         let _ = fs::remove_dir_all(&self.root);
     }
 }
-impl MediaStore for HostMedia {
+impl<F: Flash> MediaStore<F> for HostMedia {
     type Error = io::Error;
     fn active(&self, id: EpisodeId) -> bool {
         self.active.contains(&id.0)
     }
-    async fn space(&mut self) -> io::Result<Space> {
+    async fn space(&mut self, _: &mut Catalogue<F>) -> io::Result<Space> {
         self.operation(|this| {
             let mut used = this.other_bytes;
             for entry in fs::read_dir(&this.root)? {
@@ -109,13 +113,18 @@ impl MediaStore for HostMedia {
             })
         })
     }
-    async fn reset_temp(&mut self, id: EpisodeId) -> io::Result<()> {
+    async fn reset_temp(&mut self, _: &mut Catalogue<F>, id: EpisodeId) -> io::Result<()> {
         self.operation(|this| {
             File::create(this.path(id, true))?;
             Ok(())
         })
     }
-    async fn append_temp(&mut self, id: EpisodeId, bytes: &[u8]) -> io::Result<()> {
+    async fn append_temp(
+        &mut self,
+        _: &mut Catalogue<F>,
+        id: EpisodeId,
+        bytes: &[u8],
+    ) -> io::Result<()> {
         if self.hang_append {
             self.enabled = false;
             core::future::pending::<()>().await;
@@ -127,7 +136,7 @@ impl MediaStore for HostMedia {
                 .write_all(bytes)
         })
     }
-    async fn sync_temp(&mut self, id: EpisodeId) -> io::Result<u64> {
+    async fn sync_temp(&mut self, _: &mut Catalogue<F>, id: EpisodeId) -> io::Result<u64> {
         self.operation(|this| {
             let f = File::open(this.path(id, true))?;
             if this.physical_sync {
@@ -136,7 +145,7 @@ impl MediaStore for HostMedia {
             Ok(f.metadata()?.len())
         })
     }
-    async fn publish_temp(&mut self, id: EpisodeId) -> io::Result<()> {
+    async fn publish_temp(&mut self, _: &mut Catalogue<F>, id: EpisodeId) -> io::Result<()> {
         let result = self.operation(|this| {
             if this.path(id, false).exists() {
                 return Err(io::Error::other("refuse overwrite"));
@@ -151,10 +160,10 @@ impl MediaStore for HostMedia {
         }
         result
     }
-    async fn unlink_temp(&mut self, id: EpisodeId) -> io::Result<()> {
+    async fn unlink_temp(&mut self, _: &mut Catalogue<F>, id: EpisodeId) -> io::Result<()> {
         self.operation(|this| this.unlink(id, true))
     }
-    async fn unlink_audio(&mut self, id: EpisodeId) -> io::Result<()> {
+    async fn unlink_audio(&mut self, _: &mut Catalogue<F>, id: EpisodeId) -> io::Result<()> {
         let result = self.operation(|this| this.unlink(id, false));
         if result.is_ok()
             && let Some(flag) = &self.after_unlink
@@ -163,7 +172,7 @@ impl MediaStore for HostMedia {
         }
         result
     }
-    async fn audio_len(&mut self, id: EpisodeId) -> io::Result<Option<u64>> {
+    async fn audio_len(&mut self, _: &mut Catalogue<F>, id: EpisodeId) -> io::Result<Option<u64>> {
         self.operation(|this| match fs::metadata(this.path(id, false)) {
             Ok(m) => Ok(Some(m.len())),
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
@@ -172,6 +181,7 @@ impl MediaStore for HostMedia {
     }
     async fn list_ids(
         &mut self,
+        _: &mut Catalogue<F>,
         after: Option<EpisodeId>,
         out: &mut [EpisodeId; FILE_PAGE],
     ) -> io::Result<usize> {

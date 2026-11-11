@@ -186,7 +186,10 @@ fn unknown_length_never_spends_reserve_or_publishes_while_waiting() {
                 .unwrap(),
             ChunkOutcome::WaitingForSpace
         );
-        assert_eq!(media.space().await.unwrap().free, reserve(media.capacity));
+        assert_eq!(
+            media.space(&mut cat).await.unwrap().free,
+            reserve(media.capacity)
+        );
         assert_eq!(
             s.finish(&mut cat, &mut media, true, &mut scratch)
                 .await

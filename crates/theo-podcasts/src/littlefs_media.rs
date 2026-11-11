@@ -1,7 +1,11 @@
 //! ID-only files on the filesystem held by the unique service owner.
-use crate::{catalogue::EpisodeId, media::*};
+use crate::{
+    catalogue::{Catalogue, EpisodeId},
+    media::*,
+};
 use alloc::rc::Rc;
 use core::fmt::Write;
+use ekv::flash::Flash;
 use littlefs_rust::{Error, Filesystem, OpenFlags, Storage};
 /// The Rc stays on the storage core; it permits log operations between domain
 /// requests without constructing a second mount or exposing file handles.
@@ -34,19 +38,19 @@ impl<S: Storage> LittlefsMedia<S> {
         }
     }
 }
-impl<S: Storage> MediaStore for LittlefsMedia<S> {
+impl<S: Storage, F: Flash> MediaStore<F> for LittlefsMedia<S> {
     type Error = Error;
     fn active(&self, _: EpisodeId) -> bool {
         false
     } // Playback/leases are not yet implemented.
-    async fn space(&mut self) -> Result<Space, Error> {
+    async fn space(&mut self, _: &mut Catalogue<F>) -> Result<Space, Error> {
         let used = self.fs.fs_size()? as u64 * 4096;
         Ok(Space {
             capacity: self.capacity,
             free: self.capacity.saturating_sub(used),
         })
     }
-    async fn reset_temp(&mut self, id: EpisodeId) -> Result<(), Error> {
+    async fn reset_temp(&mut self, _: &mut Catalogue<F>, id: EpisodeId) -> Result<(), Error> {
         self.fs
             .open(
                 &Self::path(id, true)?,
@@ -54,7 +58,12 @@ impl<S: Storage> MediaStore for LittlefsMedia<S> {
             )?
             .close()
     }
-    async fn append_temp(&mut self, id: EpisodeId, bytes: &[u8]) -> Result<(), Error> {
+    async fn append_temp(
+        &mut self,
+        _: &mut Catalogue<F>,
+        id: EpisodeId,
+        bytes: &[u8],
+    ) -> Result<(), Error> {
         if bytes.is_empty() || bytes.len() > AUDIO_CHUNK {
             return Err(Error::Invalid);
         }
@@ -66,7 +75,7 @@ impl<S: Storage> MediaStore for LittlefsMedia<S> {
         }
         file.close()
     }
-    async fn sync_temp(&mut self, id: EpisodeId) -> Result<u64, Error> {
+    async fn sync_temp(&mut self, _: &mut Catalogue<F>, id: EpisodeId) -> Result<u64, Error> {
         let file = self
             .fs
             .open(&Self::path(id, true)?, OpenFlags::READ | OpenFlags::WRITE)?;
@@ -75,7 +84,7 @@ impl<S: Storage> MediaStore for LittlefsMedia<S> {
         file.close()?;
         Ok(len)
     }
-    async fn publish_temp(&mut self, id: EpisodeId) -> Result<(), Error> {
+    async fn publish_temp(&mut self, _: &mut Catalogue<F>, id: EpisodeId) -> Result<(), Error> {
         let target = Self::path(id, false)?;
         match self.fs.stat(&target) {
             Err(Error::NoEntry) => (),
@@ -86,13 +95,17 @@ impl<S: Storage> MediaStore for LittlefsMedia<S> {
         // before success; the card backend has no additional write cache.
         self.fs.rename(&Self::path(id, true)?, &target)
     }
-    async fn unlink_temp(&mut self, id: EpisodeId) -> Result<(), Error> {
+    async fn unlink_temp(&mut self, _: &mut Catalogue<F>, id: EpisodeId) -> Result<(), Error> {
         self.unlink(id, true)
     }
-    async fn unlink_audio(&mut self, id: EpisodeId) -> Result<(), Error> {
+    async fn unlink_audio(&mut self, _: &mut Catalogue<F>, id: EpisodeId) -> Result<(), Error> {
         self.unlink(id, false)
     }
-    async fn audio_len(&mut self, id: EpisodeId) -> Result<Option<u64>, Error> {
+    async fn audio_len(
+        &mut self,
+        _: &mut Catalogue<F>,
+        id: EpisodeId,
+    ) -> Result<Option<u64>, Error> {
         match self.fs.stat(&Self::path(id, false)?) {
             Ok(meta) => Ok(Some(meta.size as u64)),
             Err(Error::NoEntry) => Ok(None),
@@ -101,6 +114,7 @@ impl<S: Storage> MediaStore for LittlefsMedia<S> {
     }
     async fn list_ids(
         &mut self,
+        _: &mut Catalogue<F>,
         after: Option<EpisodeId>,
         out: &mut [EpisodeId; FILE_PAGE],
     ) -> Result<usize, Error> {

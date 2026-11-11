@@ -63,7 +63,7 @@ pub enum Error {
     Invalid,
     Storage,
 }
-pub struct Runtime<F: Flash, M: MediaStore> {
+pub struct Runtime<F: Flash, M: MediaStore<F>> {
     catalogue: Catalogue<F>,
     pub media: M,
     recovery: Recovery,
@@ -71,7 +71,7 @@ pub struct Runtime<F: Flash, M: MediaStore> {
     download: Option<DownloadSession>,
     enabled: bool,
 }
-impl<F: Flash, M: MediaStore> Runtime<F, M> {
+impl<F: Flash, M: MediaStore<F>> Runtime<F, M> {
     pub fn new(catalogue: Catalogue<F>, media: M) -> Self {
         Self {
             catalogue,

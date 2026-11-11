@@ -888,3 +888,22 @@ fn reset_frees_a_previous_temp() {
         assert_bitmap_matches_records(&mut cat, &mut media).await;
     });
 }
+
+// Regression (t-121): only errors that may leave RAM inconsistent are fatal.
+#[test]
+fn only_inconsistent_state_errors_are_fatal() {
+    type M = UnitMedia<Disk, Global>;
+    type E = UnitError<theo_storage::page_store::PageError<std::io::Error>>;
+    let fatal = |e: &E| <M as MediaStore<PageStore<HostFile>>>::is_fatal(e);
+    for e in [UnitError::Invalid, UnitError::Exists, UnitError::Full] {
+        assert!(!fatal(&e), "{e:?}");
+    }
+    for e in [
+        UnitError::Catalogue(Error::Corrupt),
+        UnitError::Device(littlefs_rust::Error::Io),
+        UnitError::Alloc,
+        UnitError::Disabled,
+    ] {
+        assert!(fatal(&e), "{e:?}");
+    }
+}

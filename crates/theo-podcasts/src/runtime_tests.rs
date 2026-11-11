@@ -470,3 +470,161 @@ fn cancelled_audio_append_stays_unpublished_and_recovery_requeues_after_reopen()
         );
     });
 }
+
+/// HostMedia whose `space()` can fail with a fatal or a non-fatal error.
+struct Classified {
+    inner: HostMedia,
+    fail: Option<bool>,
+}
+#[derive(Debug)]
+enum ClassifiedError {
+    Io,
+    Refused,
+}
+impl<F: Flash> MediaStore<F> for Classified {
+    type Error = ClassifiedError;
+    fn is_fatal(error: &ClassifiedError) -> bool {
+        matches!(error, ClassifiedError::Io)
+    }
+    fn active(&self, id: EpisodeId) -> bool {
+        MediaStore::<F>::active(&self.inner, id)
+    }
+    async fn space(&mut self, cat: &mut Catalogue<F>) -> Result<Space, ClassifiedError> {
+        match self.fail {
+            Some(true) => Err(ClassifiedError::Io),
+            Some(false) => Err(ClassifiedError::Refused),
+            None => self.inner.space(cat).await.map_err(|_| ClassifiedError::Io),
+        }
+    }
+    async fn reset_temp(
+        &mut self,
+        cat: &mut Catalogue<F>,
+        id: EpisodeId,
+        expected: Option<u64>,
+    ) -> Result<(), ClassifiedError> {
+        let r = self.inner.reset_temp(cat, id, expected).await;
+        r.map_err(|_| ClassifiedError::Io)
+    }
+    async fn append_temp(
+        &mut self,
+        cat: &mut Catalogue<F>,
+        id: EpisodeId,
+        bytes: &[u8],
+    ) -> Result<(), ClassifiedError> {
+        let r = self.inner.append_temp(cat, id, bytes).await;
+        r.map_err(|_| ClassifiedError::Io)
+    }
+    async fn sync_temp(
+        &mut self,
+        cat: &mut Catalogue<F>,
+        id: EpisodeId,
+    ) -> Result<u64, ClassifiedError> {
+        let r = self.inner.sync_temp(cat, id).await;
+        r.map_err(|_| ClassifiedError::Io)
+    }
+    async fn publish_temp(
+        &mut self,
+        cat: &mut Catalogue<F>,
+        id: EpisodeId,
+    ) -> Result<(), ClassifiedError> {
+        let r = self.inner.publish_temp(cat, id).await;
+        r.map_err(|_| ClassifiedError::Io)
+    }
+    async fn unlink_temp(
+        &mut self,
+        cat: &mut Catalogue<F>,
+        id: EpisodeId,
+    ) -> Result<(), ClassifiedError> {
+        let r = self.inner.unlink_temp(cat, id).await;
+        r.map_err(|_| ClassifiedError::Io)
+    }
+    async fn unlink_audio(
+        &mut self,
+        cat: &mut Catalogue<F>,
+        id: EpisodeId,
+    ) -> Result<(), ClassifiedError> {
+        let r = self.inner.unlink_audio(cat, id).await;
+        r.map_err(|_| ClassifiedError::Io)
+    }
+    async fn audio_len(
+        &mut self,
+        cat: &mut Catalogue<F>,
+        id: EpisodeId,
+    ) -> Result<Option<u64>, ClassifiedError> {
+        let r = self.inner.audio_len(cat, id).await;
+        r.map_err(|_| ClassifiedError::Io)
+    }
+    async fn list_ids(
+        &mut self,
+        cat: &mut Catalogue<F>,
+        after: Option<EpisodeId>,
+        out: &mut [EpisodeId; FILE_PAGE],
+    ) -> Result<usize, ClassifiedError> {
+        let r = self.inner.list_ids(cat, after, out).await;
+        r.map_err(|_| ClassifiedError::Io)
+    }
+}
+
+// Regression (t-121): a non-fatal store error rejects only the request and
+// the runtime keeps answering; a fatal one still disables it.
+#[test]
+fn non_fatal_media_error_is_rejected_not_disabling() {
+    block_on(async {
+        let image = Image::new();
+        let mut cat = image.create().await;
+        let mut scratch = [0; MAX_RECORD_BYTES];
+        let id = cat
+            .upsert(
+                SubscriptionId(1),
+                EpisodeMetadata {
+                    guid: Some("one"),
+                    title: "one",
+                    enclosure: "https://cdn.example/audio",
+                    description: None,
+                    published: Some(1),
+                    enclosure_bytes: Some(4),
+                    duration_seconds: None,
+                },
+                &mut scratch,
+            )
+            .await
+            .unwrap()
+            .id;
+        let job =
+            DownloadJob::from_episode(cat.get(id, &mut scratch).await.unwrap().unwrap()).unwrap();
+        let media = Classified {
+            inner: HostMedia::new(root_for(&image)),
+            fail: Some(false),
+        };
+        let mut owner = Runtime::new(cat, media);
+        assert_eq!(
+            owner
+                .handle(Command::DownloadStart(job.clone()), &mut scratch)
+                .await
+                .err(),
+            Some(Error::Invalid)
+        );
+        assert!(
+            owner
+                .handle(Command::NextJob(None), &mut scratch)
+                .await
+                .is_ok()
+        );
+        owner.media.fail = Some(true);
+        assert_eq!(
+            owner
+                .handle(Command::DownloadStart(job), &mut scratch)
+                .await
+                .err(),
+            Some(Error::Storage)
+        );
+        owner.media.fail = None;
+        assert_eq!(
+            owner
+                .handle(Command::NextJob(None), &mut scratch)
+                .await
+                .err(),
+            Some(Error::Storage)
+        );
+    });
+}

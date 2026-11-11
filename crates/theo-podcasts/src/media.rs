@@ -34,6 +34,14 @@ pub fn reserve(capacity: u64) -> u64 {
 pub trait MediaStore<F: Flash> {
     /// The store's error.
     type Error;
+    /// Whether `error` may have left the store inconsistent, so it is now
+    /// disabled. A non-fatal error was detected before any change: the
+    /// store is unchanged and still enabled, and only the request failed.
+    /// The default treats every error as fatal.
+    fn is_fatal(error: &Self::Error) -> bool {
+        let _ = error;
+        true
+    }
     /// Whether `id`'s audio is leased for playback.
     fn active(&self, id: EpisodeId) -> bool;
     /// Capacity and free bytes.

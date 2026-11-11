@@ -583,6 +583,13 @@ impl<D: SectorIo, A: Allocator + Clone> UnitMedia<D, A> {
 
 impl<F: Flash, D: SectorIo, A: Allocator + Clone> MediaStore<F> for UnitMedia<D, A> {
     type Error = UnitError<F::Error>;
+    /// `Invalid`, `Exists` and `Full` are detected before any change.
+    fn is_fatal(error: &Self::Error) -> bool {
+        !matches!(
+            error,
+            UnitError::Invalid | UnitError::Exists | UnitError::Full
+        )
+    }
     /// Always false: playback must not read units before leases exist
     /// (ADR-0020), so nothing is ever active.
     fn active(&self, _: EpisodeId) -> bool {

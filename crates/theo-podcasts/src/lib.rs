@@ -21,6 +21,8 @@ mod test_support;
 
 pub mod subscriptions;
 
+pub mod units;
+
 pub mod runtime;
 
 pub mod littlefs_media;

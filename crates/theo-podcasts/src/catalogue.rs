@@ -91,9 +91,9 @@ pub fn should_queue(state: &EpisodeState) -> bool {
 
 use embassy_sync_06::blocking_mutex::raw::NoopRawMutex;
 use sha2::{Digest, Sha256};
-const SCHEMA: u32 = 1;
-const NEXT_KEY: &[u8] = b"m/next";
-const SCHEMA_KEY: &[u8] = b"m/schema";
+const SCHEMA: u32 = 2;
+pub(crate) const NEXT_KEY: &[u8] = b"m/next";
+pub(crate) const SCHEMA_KEY: &[u8] = b"m/schema";
 const AUDIO_OFFSET: usize = 18;
 const READ_OFFSET: usize = 19;
 const _: () =
@@ -122,6 +122,10 @@ impl<F: Flash> Catalogue<F> {
             .await
             .map_err(write_error)?;
         tx.write(SCHEMA_KEY, &SCHEMA.to_le_bytes())
+            .await
+            .map_err(write_error)?;
+        // `m/units` sorts after `m/schema`.
+        tx.write(crate::units::UNITS_KEY, &0u32.to_le_bytes())
             .await
             .map_err(write_error)?;
         tx.commit().await.map_err(commit_error)?;

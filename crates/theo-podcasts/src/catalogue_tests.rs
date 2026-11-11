@@ -411,7 +411,7 @@ fn schema_rejection_does_not_write_or_reformat() {
         db.format().await.unwrap();
         let mut tx = db.write_transaction().await;
         tx.write(NEXT_KEY, &1u64.to_le_bytes()).await.unwrap();
-        tx.write(SCHEMA_KEY, &2u32.to_le_bytes()).await.unwrap();
+        tx.write(SCHEMA_KEY, &3u32.to_le_bytes()).await.unwrap();
         tx.commit().await.unwrap();
         drop(db);
         let before = image.writes.get();

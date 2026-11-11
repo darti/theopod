@@ -1,4 +1,8 @@
 //! Bounded Radio France catalogue and persistent episode lifecycle.
+//!
+//! Audio bodies live in raw 1 MiB allocation units: `units` persists the
+//! bitmap, counter and per-episode unit records in the catalogue, and
+//! `unit_media` is the media store over them (ADR-0020).
 #![no_std]
 extern crate alloc;
 pub mod catalogue;

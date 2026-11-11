@@ -25,6 +25,16 @@ Used by the firmware (`src/device/sd_worker.rs`) and `theo-podcasts`.
 - `future.rs`: fallible PSRAM placement of large futures.
 - `fat_page_file.rs` (`legacy-fat` feature): the former FAT page transport.
 
+## Card layout v2
+
+Only v2 descriptors (`THEOSD02`, sectors 0 and 8) are accepted; v1 is
+rejected. After the descriptors (sectors 0..16): the EKV database from sector
+16, a 16 MiB log region (`LOG_SECTORS`, LittleFS holding only logs), then the
+media region from the next 1 MiB boundary (`UNIT_SECTORS` = 2,048 sectors per
+raw allocation unit, no filesystem; minimum 32 MiB). Log work therefore does
+not scale with stored media. `regions::split` yields three disjoint
+`RegionIo` halves over one shared sector client. See ADR-0020.
+
 ## Extension points
 
 - Implement `littlefs::SectorIo` to back `SectorStorage` with a device. It
@@ -43,3 +53,8 @@ Used by the firmware (`src/device/sd_worker.rs`) and `theo-podcasts`.
   `device_failed()`; otherwise the failure stays in its scope
   (`failure_scope`, t-121). Cancelling an in-flight `AsyncRegion` sector
   still disables every region.
+- Bus faults (card or HAL error, aborted in-flight sector RPC, caller-side
+  cancellation) disable every scope; a missed soft deadline between sector
+  RPCs and logical errors (LittleFS, EKV, unit store) disable one scope.
+  When the last live scope goes offline the shared client is dropped, so
+  later requests may report an I/O error instead of Offline.

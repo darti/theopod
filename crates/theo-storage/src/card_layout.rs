@@ -1,8 +1,8 @@
 //! Checked, versioned SD region descriptors. Parsing never writes or formats media.
 //!
-//! Layout v2 places four ranges after the descriptors: the database (raw page
-//! store), the log (LittleFS, fixed `LOG_SECTORS`), and the media region
-//! (raw allocation units of `UNIT_SECTORS`). Sectors 0..16 hold the descriptors.
+//! Layout v2 places three ranges after the descriptors in sectors 0..16: the
+//! database (raw page store), the log (LittleFS, fixed `LOG_SECTORS`), and the
+//! media region (raw allocation units of `UNIT_SECTORS`, no filesystem).
 //!
 //! Two immutable descriptor copies occupy sectors 0 and 8. Provisioning must
 //! initialize/sync both regions before publishing either descriptor. Missing

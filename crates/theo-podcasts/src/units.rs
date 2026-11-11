@@ -170,7 +170,10 @@ fn record_key(id: EpisodeId) -> [u8; 9] {
 }
 
 // Consumed by `UnitMedia` (t-121, next tasks).
-#[allow(dead_code)]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "consumed by UnitMedia (t-121 Task 4)")
+)]
 impl<F: Flash> Catalogue<F> {
     /// Fill `table` from the catalogue, checking bitmap against the counter.
     pub(crate) async fn load_units<A: Allocator>(

@@ -53,12 +53,16 @@ Keys are written in lexical order inside a transaction (EKV contract):
 |---|---|
 | `b` + page `u16` BE | Bitmap page, 4096 bytes, bit set = unit allocated |
 | `m/units` | Allocated unit count, `u32` LE |
-| `u` + episode `u64` BE | `state u8` (0 temp, 1 published), `len u64` LE, then unit indices `u32` LE |
+| `u` + episode `u64` BE | `state u8` (0 temp, 1 published), `len u64` LE, then extents `(start u32 LE, count u32 LE)` |
 
-A unit record holds at most `(4096 - 9) / 4 = 1021` units; an episode needing
-more is refused (`InvalidInput` before any allocation when the expected length
-is known, otherwise when the next unit would exceed it). Schema 1 catalogues are
-rejected as `Schema` (none exist; no migration).
+A unit record holds at most `(4096 - 9) / 8 = 510` extents. Adjacent units
+merge into one extent, and next-fit keeps a download contiguous, so the record
+size depends on fragmentation, not on episode length. The only episode cap is
+the card capacity: the download layer refuses an episode whose known length
+exceeds it (`InvalidInput`, episode set `Missing` so it is not retried) before
+any eviction or allocation, and refuses a body that grows past it. A growth that
+would need a 511th extent is refused without disabling the store. Schema 1
+catalogues are rejected as `Schema` (none exist; no migration).
 
 ### Invariant
 
@@ -73,18 +77,23 @@ go offline, logs continue, nothing is formatted.
 
 - `space()`: from in-RAM counters, no I/O. Free bytes are free units times
   1 MiB plus the unused tail of the active temporary episode's last unit.
-- `reset_temp(id)`: frees any existing temp record for `id`, then starts an
-  empty temp in RAM (no unit is allocated until the first byte).
-- `append_temp(id, bytes)` (≤ 4096 bytes): when the current unit cannot hold
-  the bytes, first commit one transaction allocating the next free unit
-  (next-fit cursor) and appending it to the temp `u` record; only then write
-  the data sectors. A chunk may span two units. Data writes are raw sector
-  writes inside owned units; no catalogue write happens between unit
-  boundaries (one catalogue commit per 256 chunks).
+- `reset_temp(id, expected)`: frees any existing temp record for `id`, then
+  starts a temp. When `expected` is known, it reserves `ceil(expected / 1 MiB)`
+  units up front in one transaction (a temp record of length 0), so streaming
+  makes no catalogue commit. Not enough free units is `Full`, before any change.
+- `append_temp(id, bytes)` (≤ 4096 bytes): when the owned units are full, first
+  commit one transaction owning a batch of free units (next-fit, byte-wise
+  bitmap scan skipping full bytes): as many units as are already owned, at
+  least 1 and at most 64; only then write the data sectors. With a known length
+  this only happens if the server sends more than announced (refused earlier by
+  the download layer). Data writes are raw sector writes inside owned units.
+- `publish_temp(id)` releases owned units past `ceil(len / 1 MiB)` in the same
+  transaction that publishes the record.
 - `sync_temp(id)`: sector writes complete before their RPC replies and there
   is no write cache; returns the temp length held in RAM (one active temp).
-- `publish_temp(id)`: one transaction sets the record state to published and
-  stores the final length. Refuses if a published record already exists.
+- `publish_temp(id)`: one transaction sets the record state to published,
+  stores the final length and trims unused reserved units. Refuses if a
+  published record already exists.
   `finish_download` then writes `a`/`e` as today.
 - `unlink_temp(id)` / `unlink_audio(id)`: one transaction clears the record's
   bits, decrements `m/units` and deletes the record, only if the record has
@@ -92,6 +101,12 @@ go offline, logs continue, nothing is formatted.
 - `audio_len(id)`: published record length. `list_ids`: paged range scan of
   the `u` prefix (`FILE_PAGE` ids, strictly after the cursor).
 - `active(id)`: false, unchanged (playback is not implemented).
+
+### Error policy
+
+Input and state errors (`Invalid`, `Exists`, `Full`) are detected before any
+change and leave the store enabled. Catalogue, device and allocation errors
+disable the store until reopen, since RAM may no longer match the card.
 
 ### Crash consistency
 
@@ -149,12 +164,14 @@ Regression tests are tagged `// Regression (t-121): ...` in side-by-side
   writes:
   - `space()` and `append_temp` read/write counts are identical with 1, 4 and
     64 MiB already stored (the counterpart of the `fs_size()` growth test);
-  - exactly one catalogue commit per allocated unit;
+  - no catalogue commit while appending inside reserved units; one per batch
+    otherwise;
   - bitmap = counter = union of records after mixed allocate/free histories;
   - a cut after each step (allocation, data write, publish, unlink) followed by
     reopen and recovery leaks no unit;
-  - bitmap/counter mismatch → `Corrupt`; >1021 units refused; full card →
-    `WaitingForSpace`.
+  - bitmap/counter mismatch → `Corrupt`; an episode larger than the card
+    refused before any write; extent overflow and full card leave the store
+    enabled.
 - LittleFS: log mount and append counts on the 16 MiB log region do not depend
   on media (separate regions).
 - Existing `download`, `reclaim`, `recovery`, `runtime`, `worker` tests move to
@@ -179,3 +196,13 @@ Regression tests are tagged `// Regression (t-121): ...` in side-by-side
 - Reply sequence numbers to isolate caller-side cancellation.
 - Multi-sector transfers (t-122).
 - Board validation, which needs an explicit request to flash.
+
+## Amendment (review, 2026-11-11)
+
+The branch review found that one catalogue transaction per 1 MiB (a 4 KiB
+bitmap page plus a record of up to 4 KiB) puts EKV compaction on the streaming
+path, and that a > 1021-unit episode disabled the store after ~1 GiB of writes.
+With the user's agreement: extent records, up-front reservation, publish-time
+trimming, the capacity cap at the download layer and the error policy above
+replace the per-unit list. The raw device interface is the existing
+`theo_storage::littlefs::SectorIo` (not a new `UnitDevice` trait).

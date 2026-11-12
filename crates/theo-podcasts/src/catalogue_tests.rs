@@ -788,6 +788,9 @@ fn missing_table_is_refused_without_recreating_it() {
     tamper(&image, |tx| {
         tx.delete_table(crate::tables::SYNC).unwrap();
     });
+    // redb itself writes (45 sectors: repair/header) on this open, so raw
+    // writes cannot be asserted zero; a second refusal proves nothing
+    // recreated the table.
     assert!(matches!(
         Catalogue::open(image.backend()),
         Err(Error::Schema)

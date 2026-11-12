@@ -52,6 +52,7 @@ fn open_at_scale_reads_at_most_96_sectors() {
     assert!(reads <= 96, "{reads} reads");
 }
 
+// Regression (t-133): a feed scan page plus its commit stay within the IO budget.
 #[test]
 #[cfg_attr(debug_assertions, ignore = "sector bounds are release-only")]
 fn scan_page_and_commit_stay_within_the_io_budget() {
@@ -81,6 +82,7 @@ fn scan_page_and_commit_stay_within_the_io_budget() {
 
 // One synced episode is one commit (episode, identity and counter), within
 // a podcast request's budget.
+// Regression (t-133): an upsert commit stays within the IO budget.
 #[test]
 #[cfg_attr(debug_assertions, ignore = "sector bounds are release-only")]
 fn upsert_commit_stays_within_the_io_budget() {
@@ -336,11 +338,13 @@ fn make_space_steps(cold: bool) {
     let state = c.get(EpisodeId(2), &mut scratch).unwrap().unwrap().state;
     assert_eq!(state.audio, AudioState::Available);
 }
+// Regression (t-133): each make-space step (warm cache) stays within the IO budget.
 #[test]
 #[cfg_attr(debug_assertions, ignore = "sector bounds are release-only")]
 fn make_space_steps_stay_within_the_io_budget() {
     make_space_steps(false);
 }
+// Regression (t-133): each make-space step (cold cache) stays within the IO budget.
 #[test]
 #[cfg_attr(debug_assertions, ignore = "sector bounds are release-only")]
 fn make_space_steps_stay_within_the_io_budget_cold() {
@@ -453,11 +457,13 @@ fn sync_chunk_requests(cold: bool) {
         worst.0, worst.1
     );
 }
+// Regression (t-133): sync-chunk requests (warm cache) stay within the IO budget.
 #[test]
 #[cfg_attr(debug_assertions, ignore = "sector bounds are release-only")]
 fn sync_chunk_requests_stay_within_the_io_budget() {
     sync_chunk_requests(false);
 }
+// Regression (t-133): sync-chunk requests (cold cache) stay within the IO budget.
 #[test]
 #[cfg_attr(debug_assertions, ignore = "sector bounds are release-only")]
 fn sync_chunk_requests_stay_within_the_io_budget_cold() {

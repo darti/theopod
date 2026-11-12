@@ -3,13 +3,18 @@
 //! `THEO_SD_PROVISION` is parsed at compile time ([`REQUEST`]); a missing or
 //! malformed value fails the build. A `v3` request erases only the card
 //! whose exact size and CID identity it names, and only before that card has
-//! a v3 layout (ADR-0021, ADR-0022).
+//! a usable v3 layout: a v3 card whose catalogue is corrupt may be erased
+//! (ADR-0021, ADR-0022).
 
 use allocator_api2::alloc::AllocError;
 use embassy_time::{Duration, Instant};
 use littlefs_rust::Error;
-use theo_podcasts::provision::{CardId, Target, parse_request, provision_v3};
-use theo_storage::{card_layout::DESCRIPTOR_SECTORS, littlefs::SectorIo, scope::OWNER_MARGIN_MS};
+use theo_podcasts::provision::{CardId, CatalogueHead, Target, parse_request, provision_v3};
+use theo_storage::{
+    card_layout::{CardLayout, DESCRIPTOR_SECTORS},
+    littlefs::SectorIo,
+    scope::OWNER_MARGIN_MS,
+};
 
 pub(super) use theo_podcasts::provision::Request;
 
@@ -52,7 +57,11 @@ async fn provision(card: &mut CardIo, card_id: Option<CardId>, target: Target) -
         log::warn!("SD v3 provisioning refused: descriptor read failed: {error:?}");
         return false;
     }
-    if let Err(refusal) = target.authorizes(sectors, card_id, &first, &second) {
+    let catalogue = match CardLayout::select(&first, &second, sectors) {
+        Ok(Some(layout)) => read_catalogue_head(&mut paced, layout),
+        _ => None,
+    };
+    if let Err(refusal) = target.authorizes(sectors, card_id, &first, &second, catalogue.as_ref()) {
         log::warn!(
             "SD v3 provisioning refused: {refusal}; this build targets card {} with {} sectors",
             target.card,
@@ -77,6 +86,20 @@ async fn provision(card: &mut CardIo, card_id: Option<CardId>, target: Target) -
         ),
     }
     true
+}
+
+/// The head of a v3 card's database region, for the guard; `None` (logged)
+/// if unreadable, which keeps the card refused.
+fn read_catalogue_head(card: &mut Paced<'_>, layout: CardLayout) -> Option<CatalogueHead> {
+    let mut head: CatalogueHead = [[0; 512]; 3];
+    let start = layout.database().start();
+    for (offset, sector) in (0..).zip(head.iter_mut()) {
+        if let Err(error) = card.read_sector(start + offset, sector) {
+            log::warn!("SD v3 provisioning: catalogue head read failed: {error:?}");
+            return None;
+        }
+    }
+    Some(head)
 }
 
 /// Gives each sector operation its own `IO_BUDGET` deadline.

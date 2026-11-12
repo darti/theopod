@@ -21,7 +21,7 @@ use esp_hal::{
 use littlefs_rust::{Error, Filesystem};
 use static_cell::{ConstStaticCell, StaticCell};
 use theo_podcasts::{
-    catalogue::Catalogue,
+    catalogue::{Catalogue, Error as CatalogueError},
     provision::CardId,
     runtime::{self, Runtime},
     unit_media::{UnitError, UnitMedia},
@@ -32,7 +32,7 @@ use theo_storage::{
 };
 use theo_storage::{
     card_layout::{CardLayout, LayoutError},
-    redb_backend::RegionBackend,
+    redb_backend::{BackendError, RegionBackend},
     regions::{self, RegionIo},
     scope::{OWNER_MARGIN_MS, ReplyKind, RequestKind, after_failure, failure_scope},
 };
@@ -834,6 +834,10 @@ async fn open_podcasts(
     }
 }
 
+/// A corrupt catalogue is never repaired at boot (ADR-0015); the explicit
+/// provisioning build accepts such a v3 card.
+const CORRUPT_HINT: &str = "Corrupt; re-provision (erases the card) with `just sd-provision-v3`";
+
 /// Open the redb catalogue on the database region; `None` (logged) leaves
 /// podcasts offline.
 #[inline(never)]
@@ -844,6 +848,10 @@ fn open_catalogue(db: RegionIo<CardIo>, layout: CardLayout) -> Option<Catalogue>
     // `!Send` and the compiler keeps the database on this core.
     let backend = match unsafe { RegionBackend::new(db, sectors) } {
         Ok(backend) => backend,
+        Err(BackendError::Corrupt) => {
+            log::warn!("podcasts offline: database region unusable: {CORRUPT_HINT}");
+            return None;
+        }
         Err(error) => {
             log::warn!("podcasts offline: database region unusable: {error:?}");
             return None;
@@ -851,6 +859,10 @@ fn open_catalogue(db: RegionIo<CardIo>, layout: CardLayout) -> Option<Catalogue>
     };
     match Catalogue::open(backend) {
         Ok(catalogue) => Some(catalogue),
+        Err(CatalogueError::Corrupt) => {
+            log::warn!("podcasts offline: catalogue open failed: {CORRUPT_HINT}");
+            None
+        }
         Err(error) => {
             log::warn!("podcasts offline: catalogue open failed: {error:?}");
             None

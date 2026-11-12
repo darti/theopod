@@ -17,7 +17,7 @@ use theo_storage::{
     regions::split,
 };
 
-pub use crate::provision_guard::{CardId, Refusal, Request, Target, parse_request};
+pub use crate::provision_guard::{CardId, CatalogueHead, Refusal, Request, Target, parse_request};
 
 /// Why provisioning stopped; no descriptor was published.
 #[derive(Debug)]

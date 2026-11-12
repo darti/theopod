@@ -4,7 +4,14 @@
 //! [`parse_request`] so a malformed value fails the build instead of booting
 //! as a silent no-op. [`Target::authorizes`] is the whole run-time guard.
 use core::fmt;
-use theo_storage::card_layout::{CardLayout, LayoutError};
+use theo_storage::{
+    card_layout::{CardLayout, LayoutError},
+    redb_backend::{LENGTH_SECTORS, region_is_corrupt},
+};
+
+/// The first sectors of a v3 card's database region: both length record
+/// copies, then the start of the redb file.
+pub type CatalogueHead = [[u8; 512]; LENGTH_SECTORS as usize + 1];
 
 /// An SD card's identity: CID manufacturer ID and product serial number.
 ///
@@ -50,7 +57,7 @@ pub enum Refusal {
     Size(u64),
     /// The card has another identity, or none could be read.
     Card(Option<CardId>),
-    /// The card already has layout v3.
+    /// The card already has layout v3 and a catalogue that is not corrupt.
     AlreadyV3,
     /// A descriptor is unreadable as a v3 layout of this card.
     Descriptor(LayoutError),
@@ -69,17 +76,23 @@ impl fmt::Display for Refusal {
 }
 
 impl Target {
-    /// Allows erasing only this exact card, and only before it has a v3 layout.
+    /// Allows erasing only this exact card, and only before it has a usable
+    /// v3 layout.
     ///
     /// `first` and `second` are the card's descriptor sectors. A blank card,
     /// a legacy whole-card LittleFS or an obsolete (v1/v2) layout passes; an
-    /// unknown version or a damaged descriptor does not.
+    /// unknown version or a damaged descriptor does not. A valid v3 layout
+    /// passes only if `catalogue`, the head of its database region (`None`
+    /// if unread), shows a corrupt catalogue: no valid length record, or a
+    /// non-empty redb file without redb's magic. Nothing boot could open is
+    /// erased.
     pub fn authorizes(
         &self,
         sectors: u64,
         card: Option<CardId>,
         first: &[u8; 512],
         second: &[u8; 512],
+        catalogue: Option<&CatalogueHead>,
     ) -> Result<(), Refusal> {
         if sectors != self.sectors {
             return Err(Refusal::Size(sectors));
@@ -89,7 +102,10 @@ impl Target {
         }
         match CardLayout::select(first, second, sectors) {
             Ok(None) | Err(LayoutError::Obsolete) => Ok(()),
-            Ok(Some(_)) => Err(Refusal::AlreadyV3),
+            Ok(Some(layout)) => match catalogue {
+                Some(head) if region_is_corrupt(head, layout.database().sectors()) => Ok(()),
+                _ => Err(Refusal::AlreadyV3),
+            },
             Err(error) => Err(Refusal::Descriptor(error)),
         }
     }

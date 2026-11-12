@@ -125,8 +125,8 @@ header-first `PageStore::load()` change, and the `ekv` workspace dependency.
   interrupted sync keeps the committed episodes and resumes from the last
   persisted `SYNC` state; re-upserting is idempotent through the identity
   table.
-- One commit per podcast request (`IO_BUDGET`, 250 sector commands at
-  2 ms). `Catalogue::begin_batch`/`end_batch` hold several operations'
+- One commit per podcast request (`PODCAST_BUDGET`, 1 s: 500 sector
+  commands at 2 ms). `Catalogue::begin_batch`/`end_batch` hold several operations'
   writes in one transaction (reads see them; a fatal error drops them and
   disables the owner). `SyncChunk` returns `Consumed(n)`: a push stops after
   the first committing upsert, or after `MAX_CHUNK_ITEMS` (4) known
@@ -135,12 +135,12 @@ header-first `PageStore::load()` change, and the `ekv` workspace dependency.
   settles the state in one batch. `DownloadStart` and `DownloadChunk`
   answer `Pending` after one bounded step (this job's orphan unlinks, one
   reclaim step, or the start batch) and are resent unchanged.
-- Reclaim is a cursor carried by the runtime (`Reclaim`): each step scans
-  at most `RECLAIM_SCAN_PAGES` (2) episode pages or makes one commit (the
-  `Deleting` intent, then unlink and `Reclaimed` in one batch). The
-  candidate is checked again before eviction; an episode that becomes
-  eligible behind the cursor waits for the next round, so it may be
-  evicted after a newer one.
+- Reclaim reads the `EVICTABLE` index (key: no date last, date, import
+  order = id; one entry per read `Available` episode, written in the
+  episode's own transaction) instead of scanning: its first entry not
+  leased is the policy's choice. Each step makes one commit (the
+  `Deleting` intent, then unlink and `Reclaimed` in one batch); the
+  runtime's `Reclaim` carries the intent between requests.
 
 Layout v3:
 
@@ -191,10 +191,8 @@ Host tests:
 - A scale test at 5,000 episodes and 50 subscriptions bounds open, a
   16-record range and a commit in sector counts, and each changed podcast
   request (sync chunk, `DownloadEnd`, `recover_one`, every `make_space`
-  step) to 250 commands (`just test-catalogue-bounds`). The `make_space`
-  eviction commits exceed it (a commit after a scan that evicted redb's
-  cache: up to 194 reads + 210 writes); that test is ignored and t-133
-  stays open on it.
+  step) to 500 commands (`just test-catalogue-bounds`), warm and with a
+  cache emptied by a reopen and a full scan (sync push, eviction).
 
 Target checks: `just check`, `just lint`, `just build` on xtensa with redb
 pinned `default-features = false`, `features = ["experimental-api-5"]`;
@@ -234,9 +232,16 @@ intact.
 - **One commit per podcast request (final review).** One commit per
   podcast request; sync chunk resend; bounded reclaim cursor (see §3).
   Measured at 5,000 episodes: sync push 42 + 114, `DownloadEnd` 2 + 107,
-  `recover_one` 2 + 106, reclaim scan step at most 128 reads; the
-  eviction commits after a full scan 114 + 114 (`Deleting`) and
-  194 + 210 (unlink and `Reclaimed`), over the 250 bound.
+  `recover_one` 2 + 106.
+- **Eviction index (final review).** `EVICTABLE` (policy-ordered key →
+  episode) is maintained in the transaction of every episode write, so
+  reclaim reads its first entry instead of scanning 5,000 episodes; schema
+  stays 3 (v3 not deployed). Eviction steps measured 26 + 98 and 26 + 138
+  warm, 74 + 98 and 162 + 130 cold.
+- **PODCAST_BUDGET 1 s (final review, user-approved).** A redb commit after
+  a scan that emptied the page cache measured ~250 commands (e.g. 122 +
+  130), at the old 500 ms bound; podcast requests get 1 s (500 commands),
+  other requests keep theirs.
 - **Open cost.** Catalogue::open measured 80 reads at scale (table checks); bound 96, raw redb open ≤64.
 - **Fixed bug.** The ekv units range scan (`unit_ids`, prefix `u`) also
   reached the 37-byte show-index keys (`u` + show id) and returned `Corrupt`

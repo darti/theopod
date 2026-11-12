@@ -82,7 +82,7 @@ type Setup3 = (
 );
 fn setup3() -> Setup3 {
     let image = Rc::new(RefCell::new(Image::default()));
-    let layout = CardLayout::new(128 * 1024, 32).unwrap();
+    let layout = CardLayout::new(300_000).unwrap();
     let (db, log, media) = split(Disk(image.clone()), layout);
     (db, log, media, image, layout)
 }
@@ -203,6 +203,23 @@ fn deadline_hook_runs_before_every_sector_and_its_failure_poisons_session() {
     assert_eq!(calls.get(), 3);
     assert_eq!(media.sync(), Err(Error::Io));
 }
+/// Presents the first 32-page extent of the (now 64 MiB) database region.
+struct Ekv32<F>(F);
+impl<F: SectorFile> SectorFile for Ekv32<F> {
+    type Error = F::Error;
+    fn byte_len(&self) -> u64 {
+        crate::page_store::file_len(32)
+    }
+    async fn read_sector(&mut self, s: u64, out: &mut [u8; 512]) -> Result<(), F::Error> {
+        self.0.read_sector(s, out).await
+    }
+    async fn write_sector(&mut self, s: u64, data: &[u8; 512]) -> Result<(), F::Error> {
+        self.0.write_sector(s, data).await
+    }
+    async fn sync(&mut self) -> Result<(), F::Error> {
+        self.0.sync().await
+    }
+}
 #[test]
 fn actual_ekv_and_littlefs_share_one_device_and_reopen() {
     // Regression (t-106): actual engines use disjoint regions of one device and logs make progress during DB work.
@@ -214,7 +231,7 @@ fn actual_ekv_and_littlefs_share_one_device_and_reopen() {
         let fs = Filesystem::mount(log, geometry.config())
             .map_err(|(e, _)| e)
             .unwrap();
-        let store = PageStore::create(AsyncRegion::new(db_region), 32)
+        let store = PageStore::create(Ekv32(AsyncRegion::new(db_region)), 32)
             .await
             .unwrap();
         let db = ekv::Database::<_, NoopRawMutex>::new(store, ekv::Config::default());
@@ -248,7 +265,7 @@ fn actual_ekv_and_littlefs_share_one_device_and_reopen() {
         drop(db);
         fs.unmount().unwrap();
         let (db_region, log, _media) = split(Disk(image), layout);
-        let store = PageStore::open(AsyncRegion::new(db_region), 32)
+        let store = PageStore::open(Ekv32(AsyncRegion::new(db_region)), 32)
             .await
             .unwrap();
         let db = ekv::Database::<_, NoopRawMutex>::new(store, ekv::Config::default());
@@ -368,7 +385,7 @@ fn timed(poisoned: bool) -> TimedSetup {
         expired: expired.clone(),
         poisoned,
     };
-    let (db, log, media) = split(device, CardLayout::new(128 * 1024, 32).unwrap());
+    let (db, log, media) = split(device, CardLayout::new(300_000).unwrap());
     (db, log, media, expired)
 }
 

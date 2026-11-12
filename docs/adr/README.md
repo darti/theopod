@@ -12,7 +12,7 @@
 | [0008](0008-stop-with-a-boot-long-press-into-deep-sleep.md) | Stop with a BOOT long press into deep sleep | Accepted |
 | [0009](0009-feed-the-main-watchdog-from-the-ui-loop.md) | Feed the main watchdog from the UI loop | Accepted |
 | [0010](0010-microsd-over-sdmmc.md) | Use the onboard microSD over SPI | Accepted |
-| [0011](0011-adapt-ekv-to-sector-storage-with-copy-on-write-pages.md) | Adapt EKV to sector storage with copy-on-write pages | FAT backing direction superseded by ADR-0012 |
+| [0011](0011-adapt-ekv-to-sector-storage-with-copy-on-write-pages.md) | Adapt EKV to sector storage with copy-on-write pages | Superseded by ADR-0022 |
 | [0012](0012-use-the-safe-littlefs-rust-api.md) | Use the safe littlefs-rust API for SD files | Implemented; hardware validation pending |
 | [0013](0013-automate-github-firmware-releases.md) | Automate GitHub firmware releases | Accepted |
 | [0014](0014-gate-podcast-persistence-on-recovery.md) | Gate podcast persistence on interruption recovery | Recovery corrected by ADR-0015; integration gate remains |
@@ -23,3 +23,4 @@
 | [0019](0019-prepare-littlefs-at-mount-and-cache-sector-reads.md) | Prepare LittleFS at mount and cache sector reads | Implemented; board-verified on a log-only volume |
 | [0020](0020-store-media-in-raw-allocation-units.md) | Store media in raw allocation units and isolate failures per scope | Implemented in software; hardware validation pending |
 | [0021](0021-provision-layout-v2-on-the-device.md) | Provision layout v2 on the device | Implemented; board validation pending |
+| [0022](0022-store-the-podcast-catalogue-in-redb.md) | Store the podcast catalogue in redb | Accepted; implementation pending |

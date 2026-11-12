@@ -275,6 +275,7 @@ impl Catalogue {
         tx.open_table(SYNC).map_err(db_error)?;
         tx.open_table(UNIT_PAGES).map_err(db_error)?;
         tx.open_table(UNIT_EXTENTS).map_err(db_error)?;
+        tx.open_table(EVICTABLE).map_err(db_error)?;
         {
             let mut counters = tx.open_table(COUNTERS).map_err(db_error)?;
             for (key, value) in [
@@ -311,6 +312,7 @@ impl Catalogue {
         tx.open_table(SYNC).map_err(db_error)?;
         tx.open_table(UNIT_PAGES).map_err(db_error)?;
         tx.open_table(UNIT_EXTENTS).map_err(db_error)?;
+        tx.open_table(EVICTABLE).map_err(db_error)?;
         self.next = next;
         Ok(())
     }
@@ -472,6 +474,11 @@ impl Catalogue {
         if episode.state.audio != AudioState::Downloading {
             return Err(Error::InvalidState);
         }
+        let (before, published) = (episode.state, episode.metadata.published);
+        let after = EpisodeState {
+            audio: AudioState::Available,
+            ..before
+        };
         scratch[AUDIO_OFFSET] = AudioState::Available as u8;
         let tx = self.write()?;
         tx.open_table(AUDIO)
@@ -482,6 +489,7 @@ impl Catalogue {
             .map_err(db_error)?
             .insert(id.0, &scratch[..n])
             .map_err(db_error)?;
+        reindex(tx, id, Some((before, published)), (after, published))?;
         self.done()
     }
     /// Last completely reconciled history. Partial imports never replace this.
@@ -579,8 +587,10 @@ impl Catalogue {
     ) -> Result<UpsertOutcome, Error> {
         let index = identity(subscription, metadata);
         let existing = self.view()?.number(EPISODE_IDENTITY, index)?.map(EpisodeId);
+        let mut old = None;
         let (id, mut state, created) = if let Some(id) = existing {
             let (episode, _) = self.load(id, scratch)?.ok_or(Error::Corrupt)?;
+            old = Some((episode.state, episode.metadata.published));
             if episode.subscription != subscription || !same_identity(episode.metadata, metadata) {
                 return Err(Error::IdentityCollision);
             }
@@ -625,6 +635,7 @@ impl Catalogue {
             .map_err(db_error)?
             .insert(id.0, &scratch[..n])
             .map_err(db_error)?;
+        reindex(tx, id, old, (state, metadata.published))?;
         if created {
             tx.open_table(EPISODE_IDENTITY)
                 .map_err(db_error)?
@@ -724,9 +735,9 @@ impl Catalogue {
         next: Option<AudioState>,
         scratch: &mut [u8],
     ) -> Result<(), Error> {
-        let (mut state, n) = {
+        let (mut state, n, published) = {
             let (episode, n) = self.load(id, scratch)?.ok_or(Error::NotFound)?;
-            (episode.state, n)
+            (episode.state, n, episode.metadata.published)
         };
         let previous = state;
         if let Some(next) = next {
@@ -753,8 +764,69 @@ impl Catalogue {
             .map_err(db_error)?
             .insert(id.0, &scratch[..n])
             .map_err(db_error)?;
+        reindex(tx, id, Some((previous, published)), (state, published))?;
         self.done()
     }
+    /// The first evictable episode in the reclaim policy's order whose audio
+    /// is not `active`, among the first `MAX_SCAN_RECORDS` index entries:
+    /// one bounded range read, no episode scan (ADR-0022).
+    pub fn first_evictable(
+        &mut self,
+        active: impl Fn(EpisodeId) -> bool,
+    ) -> Result<Option<EpisodeId>, Error> {
+        self.begin()?;
+        let result = self.first_evictable_inner(active);
+        self.finish(result)
+    }
+    fn first_evictable_inner(
+        &self,
+        active: impl Fn(EpisodeId) -> bool,
+    ) -> Result<Option<EpisodeId>, Error> {
+        let tx = self.db.begin_read().map_err(db_error)?;
+        let table = tx.open_table(EVICTABLE).map_err(db_error)?;
+        for entry in table.iter().map_err(db_error)?.take(MAX_SCAN_RECORDS) {
+            let id = EpisodeId(entry.map_err(db_error)?.0.value().2);
+            if id.0 == 0 || id.0 >= self.next {
+                return Err(Error::Corrupt);
+            }
+            if !active(id) {
+                return Ok(Some(id));
+            }
+        }
+        Ok(None)
+    }
+}
+
+/// Whether the reclaim policy may evict an episode in `state`.
+pub(crate) fn evictable(state: EpisodeState) -> bool {
+    state.read && state.audio == AudioState::Available
+}
+/// The eviction index key: the reclaim policy's order.
+pub(crate) fn evict_key(id: EpisodeId, published: Option<i64>) -> (u8, i64, u64) {
+    (u8::from(published.is_none()), published.unwrap_or(0), id.0)
+}
+/// Keep `EVICTABLE` in step with an episode write, in its transaction.
+fn reindex(
+    tx: &WriteTransaction,
+    id: EpisodeId,
+    old: Option<(EpisodeState, Option<i64>)>,
+    (state, published): (EpisodeState, Option<i64>),
+) -> Result<(), Error> {
+    let old = old
+        .filter(|&(s, _)| evictable(s))
+        .map(|(_, p)| evict_key(id, p));
+    let new = evictable(state).then(|| evict_key(id, published));
+    if old == new {
+        return Ok(());
+    }
+    let mut table = tx.open_table(EVICTABLE).map_err(db_error)?;
+    if let Some(key) = old {
+        table.remove(key).map_err(db_error)?;
+    }
+    if let Some(key) = new {
+        table.insert(key, ()).map_err(db_error)?;
+    }
+    Ok(())
 }
 
 /// Errors that may follow a write, or that leave the database suspect:

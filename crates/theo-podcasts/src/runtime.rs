@@ -70,7 +70,7 @@ pub struct Runtime<M: MediaStore> {
     catalogue: Catalogue,
     pub media: M,
     recovery: Recovery,
-    /// The eviction round, carried across `DownloadStart`/`DownloadChunk`
+    /// The eviction in progress, carried across `DownloadStart`/`DownloadChunk`
     /// requests (each makes at most one commit, ADR-0022).
     reclaim: Reclaim,
     sync: Option<SyncSession>,

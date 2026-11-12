@@ -136,9 +136,9 @@ fn reclamation_stops_at_deficit_and_preserves_protected_files() {
     });
 }
 
-// Regression (t-133): the eviction round spans requests of at most one
-// commit each, and still evicts the policy's oldest choice when it lies
-// pages after the cursor's start.
+// Regression (t-133): eviction spans requests of at most one commit each
+// (`Deleting` intent, then unlink and `Reclaimed`) and takes the policy's
+// oldest choice from the index, wherever it was imported.
 #[test]
 fn each_reclaim_step_commits_at_most_once_and_keeps_the_policy_order() {
     use crate::{
@@ -154,9 +154,8 @@ fn each_reclaim_step_commits_at_most_once_and_keeps_the_policy_order() {
         let mut media = HostMedia::new(root_for(&image));
         media.physical_sync = false;
         let mut scratch = [0; MAX_RECORD_BYTES];
-        // More episodes than `RECLAIM_SCAN_PAGES` scan pages; the oldest
-        // was imported last.
-        let count = (RECLAIM_SCAN_PAGES * MAX_SCAN_RECORDS + 4) as i64;
+        // More episodes than one scan page; the oldest was imported last.
+        let count = (2 * MAX_SCAN_RECORDS + 4) as i64;
         let mut ids = std::vec::Vec::new();
         for i in 0..count {
             let guid = std::format!("e{i}");
@@ -186,8 +185,8 @@ fn each_reclaim_step_commits_at_most_once_and_keeps_the_policy_order() {
             }
             assert_eq!(step, SpaceStep::Pending);
         }
-        // Two scan steps, the `Deleting` intent, then unlink and `Reclaimed`.
-        assert_eq!(steps, 5);
+        // The `Deleting` intent, then unlink and `Reclaimed`, then ready.
+        assert_eq!(steps, 3);
         let state = cat.get(oldest, &mut scratch).unwrap().unwrap().state;
         assert_eq!(state.audio, AudioState::Reclaimed);
         assert!(!media.path(oldest, false).exists());

@@ -21,6 +21,10 @@ pub(crate) const SYNC: TableDefinition<u64, &[u8]> = TableDefinition::new("sync"
 pub(crate) const UNIT_PAGES: TableDefinition<u16, &[u8]> = TableDefinition::new("unit_pages");
 /// Episode id → unit record (state, length, extents).
 pub(crate) const UNIT_EXTENTS: TableDefinition<u64, &[u8]> = TableDefinition::new("unit_extents");
+/// Eviction index: one entry per read episode with `Available` audio, keyed
+/// in the reclaim policy's order (no publication date last, oldest date,
+/// import order = id); written in the same transaction as the episode.
+pub(crate) const EVICTABLE: TableDefinition<(u8, i64, u64), ()> = TableDefinition::new("evictable");
 /// Named `u64` counters, keyed by the constants below.
 pub(crate) const COUNTERS: TableDefinition<&str, u64> = TableDefinition::new("counters");
 

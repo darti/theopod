@@ -36,14 +36,13 @@ use crate::{
     catalogue::Catalogue,
     media::{MediaError, MediaStore},
 };
-use ekv::flash::Flash;
 /// Make room for one actual pending append/download. No clock or purge path.
-pub async fn make_space<F: Flash, M: MediaStore<F>>(
-    cat: &mut Catalogue<F>,
+pub async fn make_space<M: MediaStore>(
+    cat: &mut Catalogue,
     media: &mut M,
     required: u64,
     scratch: &mut [u8],
-) -> Result<bool, MediaError<F::Error, M::Error>> {
+) -> Result<bool, MediaError<M::Error>> {
     use crate::catalogue::AudioState;
     use crate::media::reserve;
     if required == 0 {
@@ -83,7 +82,6 @@ pub async fn make_space<F: Flash, M: MediaStore<F>>(
                         deficit,
                     );
                 })
-                .await
                 .map_err(MediaError::Catalogue)?;
             if !page.has_more {
                 break;
@@ -97,7 +95,6 @@ pub async fn make_space<F: Flash, M: MediaStore<F>>(
             return Ok(false);
         }
         cat.transition_audio(candidate.id, AudioState::Deleting, scratch)
-            .await
             .map_err(MediaError::Catalogue)?;
         // Lease admission for Deleting is forbidden by the storage-owner contract.
         if media.active(candidate.id) {
@@ -108,7 +105,6 @@ pub async fn make_space<F: Flash, M: MediaStore<F>>(
             .await
             .map_err(MediaError::Media)?;
         cat.transition_audio(candidate.id, AudioState::Reclaimed, scratch)
-            .await
             .map_err(MediaError::Catalogue)?;
     }
 }

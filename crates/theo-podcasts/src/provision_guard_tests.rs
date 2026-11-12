@@ -1,5 +1,4 @@
 use super::*;
-use crate::provision::PAGES;
 use std::string::ToString;
 
 const SECTORS: u64 = 122_265_600;
@@ -10,16 +9,16 @@ const TARGET: Target = Target {
 };
 const BLANK: [u8; 512] = [0; 512];
 
-fn v2() -> [u8; 512] {
-    CardLayout::new(SECTORS, PAGES).unwrap().encode()
+fn v3() -> [u8; 512] {
+    CardLayout::new(SECTORS).unwrap().encode()
 }
 
 #[test]
-fn parse_request_accepts_format_and_a_v2_target() {
+fn parse_request_accepts_format_and_a_v3_target() {
     assert_eq!(parse_request("format"), Some(Request::Format));
     assert_eq!(
-        parse_request("v2:122265600:1b1234ABcd"),
-        Some(Request::V2(TARGET))
+        parse_request("v3:122265600:1b1234ABcd"),
+        Some(Request::V3(TARGET))
     );
 }
 
@@ -29,17 +28,17 @@ fn parse_request_malformed_values_return_none() {
     // malformed value used to boot as a silent no-op.
     for spec in [
         "",
-        "v2",
-        "v2:",
-        "v2:122265600",
-        "v2:122265600:",
-        "v2::1b1234abcd",
-        "v2:122,265,600:1b1234abcd",
-        "v2:122265600:1b1234abc",
-        "v2:122265600:1b1234abcde",
-        "v2:122265600:1b1234abcg",
-        "v2:99999999999999999999:1b1234abcd",
-        "v3:122265600:1b1234abcd",
+        "v3",
+        "v3:",
+        "v3:122265600",
+        "v3:122265600:",
+        "v3::1b1234abcd",
+        "v3:122,265,600:1b1234abcd",
+        "v3:122265600:1b1234abc",
+        "v3:122265600:1b1234abcde",
+        "v3:122265600:1b1234abcg",
+        "v3:99999999999999999999:1b1234abcd",
+        "v2:122265600:1b1234abcd",
         "Format",
     ] {
         assert_eq!(parse_request(spec), None, "{spec:?}");
@@ -88,13 +87,13 @@ fn authorizes_refuses_another_size_or_card() {
 #[test]
 fn authorizes_refuses_a_card_with_any_descriptor() {
     assert_eq!(
-        TARGET.authorizes(SECTORS, Some(CARD), &v2(), &v2()),
-        Err(Refusal::AlreadyV2)
+        TARGET.authorizes(SECTORS, Some(CARD), &v3(), &v3()),
+        Err(Refusal::AlreadyV3)
     );
     // One published copy is a complete layout (regions precede descriptors).
     assert_eq!(
-        TARGET.authorizes(SECTORS, Some(CARD), &v2(), &BLANK),
-        Err(Refusal::AlreadyV2)
+        TARGET.authorizes(SECTORS, Some(CARD), &v3(), &BLANK),
+        Err(Refusal::AlreadyV3)
     );
     let mut v1 = BLANK;
     v1[..8].copy_from_slice(b"THEOSD01");
@@ -103,7 +102,7 @@ fn authorizes_refuses_a_card_with_any_descriptor() {
         TARGET.authorizes(SECTORS, Some(CARD), &v1, &BLANK),
         Err(Refusal::Descriptor(_))
     ));
-    let mut corrupt = v2();
+    let mut corrupt = v3();
     corrupt[100] ^= 1;
     assert_eq!(
         TARGET.authorizes(SECTORS, Some(CARD), &corrupt, &BLANK),

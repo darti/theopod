@@ -1,40 +1,35 @@
-//! Destructive initialization of a v2 card layout (ADR-0020, ADR-0021).
+//! Destructive initialization of a v3 card layout (ADR-0021, ADR-0022).
 //!
-//! [`provision_v2`] unpublishes the old contents, formats the log volume,
-//! creates an empty catalogue, and only then publishes both descriptors. An
-//! interrupted run leaves a blank card: no descriptor and no mountable
-//! whole-card LittleFS. The host `prepare_image` tool and the explicit
-//! `sd-provision-v2` firmware build both call it; [`Target`] decides which
+//! [`provision_v3`] unpublishes the old contents, formats the log volume,
+//! writes an empty database length record, and only then publishes both
+//! descriptors. The first catalogue open creates the tables. An interrupted
+//! run leaves a blank card: no descriptor and no mountable whole-card
+//! LittleFS. The host `prepare_image` tool and the explicit
+//! `sd-provision-v3` firmware build both call it; [`Target`] decides which
 //! card the firmware may erase. Nothing else may call it.
-use crate::catalogue::{self, Catalogue};
 use allocator_api2::alloc::Allocator;
 use core::fmt;
 use littlefs_rust::{Error, Filesystem, OpenFlags};
 use theo_storage::{
     card_layout::{CardLayout, DESCRIPTOR_SECTORS, LayoutError},
     littlefs::{Geometry, SectorIo, SectorStorage},
-    page_store::{PageError, PageStore},
-    regions::{AsyncRegion, split},
+    redb_backend::RegionBackend,
+    regions::split,
 };
 
 pub use crate::provision_guard::{CardId, Refusal, Request, Target, parse_request};
 
-/// Catalogue pages in a provisioned database region.
-pub const PAGES: usize = 4096;
-
 /// Why provisioning stopped; no descriptor was published.
 #[derive(Debug)]
 pub enum ProvisionError {
-    /// The card capacity cannot hold a v2 layout; nothing was written.
+    /// The card capacity cannot hold a v3 layout; nothing was written.
     Layout(LayoutError),
     /// Clearing the old descriptor sectors failed.
     Unpublish(Error),
     /// Formatting the log volume failed.
     Log(Error),
-    /// Creating the page store failed.
-    Pages(PageError<Error>),
-    /// Creating the catalogue failed.
-    Catalogue(catalogue::Error<PageError<Error>>),
+    /// Writing the database length record failed.
+    Database(Error),
     /// Syncing the regions or writing a descriptor failed.
     Publish(Error),
 }
@@ -42,28 +37,29 @@ pub enum ProvisionError {
 impl fmt::Display for ProvisionError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Layout(error) => write!(f, "card too small for layout v2 ({error:?})"),
+            Self::Layout(error) => write!(f, "card too small for layout v3 ({error:?})"),
             Self::Unpublish(error) => write!(f, "clearing old descriptors failed ({error:?})"),
             Self::Log(error) => write!(f, "formatting the log volume failed ({error:?})"),
-            Self::Pages(error) => write!(f, "creating the page store failed ({error:?})"),
-            Self::Catalogue(error) => write!(f, "creating the catalogue failed ({error:?})"),
+            Self::Database(error) => {
+                write!(f, "writing the database length record failed ({error:?})")
+            }
             Self::Publish(error) => write!(f, "publishing the descriptors failed ({error:?})"),
         }
     }
 }
 
-/// Erase `device` and publish a v2 layout for a card of `card_sectors`.
+/// Erase `device` and publish a v3 layout for a card of `card_sectors`.
 ///
-/// Destructive: the descriptor sectors, the database and the log volume are
-/// overwritten; the media region is left as is (units are claimed through
-/// the catalogue). Buffers come from `allocator`. `device.sync()` is called
-/// only at the two durability barriers below.
-pub async fn provision_v2<D: SectorIo, A: Allocator + Clone>(
+/// Destructive: the descriptor sectors, the database length record and the
+/// log volume are overwritten; the media region is left as is (units are
+/// claimed through the catalogue). Buffers come from `allocator`.
+/// `device.sync()` is called only at the two durability barriers below.
+pub fn provision_v3<D: SectorIo, A: Allocator + Clone>(
     device: &mut D,
     card_sectors: u64,
     allocator: A,
 ) -> Result<CardLayout, ProvisionError> {
-    let layout = CardLayout::new(card_sectors, PAGES).map_err(ProvisionError::Layout)?;
+    let layout = CardLayout::new(card_sectors).map_err(ProvisionError::Layout)?;
     let geometry = Geometry::new(layout.log().sectors() as u64).map_err(ProvisionError::Log)?;
     // Sectors 0 and 8 also hold a whole-card LittleFS's two superblocks
     // (4 KiB blocks): clearing them first turns an interrupted run into a
@@ -75,16 +71,10 @@ pub async fn provision_v2<D: SectorIo, A: Allocator + Clone>(
     }
     device.sync().map_err(ProvisionError::Unpublish)?;
     {
-        let (db, log, _media) = split(Deferred(&mut *device), layout);
-        format_log(log, geometry, allocator.clone()).map_err(ProvisionError::Log)?;
-        let store = PageStore::create_in(AsyncRegion::new(db), layout.pages(), allocator)
-            .await
-            .map_err(ProvisionError::Pages)?;
-        // In place: a by-value catalogue (10 KB) is too large for core1's stack.
-        let mut catalogue = None;
-        Catalogue::create_into(&mut catalogue, store)
-            .await
-            .map_err(ProvisionError::Catalogue)?;
+        let (mut db, log, _media) = split(Deferred(&mut *device), layout);
+        format_log(log, geometry, allocator).map_err(ProvisionError::Log)?;
+        // An empty database: the first catalogue open creates the tables.
+        RegionBackend::format(&mut db).map_err(ProvisionError::Database)?;
     }
     // Both regions are durable before either descriptor makes them
     // discoverable; one published copy is then already a complete layout.
@@ -115,7 +105,7 @@ fn format_log<D: SectorIo, A: Allocator>(
 ///
 /// Nothing can discover the regions before the descriptors, so their
 /// durability needs only the one barrier before publishing, not a device
-/// flush per LittleFS or page-store sync.
+/// flush per LittleFS or length-record sync.
 struct Deferred<'a, D>(&'a mut D);
 impl<D: SectorIo> SectorIo for Deferred<'_, D> {
     fn read_sector(&mut self, sector: u32, out: &mut [u8; 512]) -> Result<(), Error> {

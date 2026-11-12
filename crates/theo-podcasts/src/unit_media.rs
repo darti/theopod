@@ -26,7 +26,6 @@ use crate::{
 };
 use allocator_api2::{alloc::Allocator, boxed::Box, vec::Vec};
 use core::fmt;
-use ekv::flash::Flash;
 use theo_storage::littlefs::SectorIo;
 
 pub use crate::units::UNIT_BYTES;
@@ -44,9 +43,9 @@ type Dirty = heapless::Vec<u16, MAX_DIRTY_PAGES>;
 
 /// A unit media store failure.
 #[derive(Debug)]
-pub enum UnitError<E> {
+pub enum UnitError {
     /// The catalogue failed or holds inconsistent unit records; disables the store.
-    Catalogue(Error<E>),
+    Catalogue(Error),
     /// A raw sector write or sync failed; disables the store.
     Device(littlefs_rust::Error),
     /// Not enough free units; the store stays enabled.
@@ -139,19 +138,17 @@ impl<D: SectorIo, A: Allocator + Clone> fmt::Debug for UnitMedia<D, A> {
 impl<D: SectorIo, A: Allocator + Clone> UnitMedia<D, A> {
     /// Load the unit table of `units` units from the catalogue. `device`
     /// addresses the media region from its first sector.
-    pub async fn open_in<F: Flash>(
-        cat: &mut Catalogue<F>,
+    pub fn open_in(
+        cat: &mut Catalogue,
         device: D,
         units: u32,
         alloc: A,
-    ) -> Result<Self, UnitError<F::Error>> {
+    ) -> Result<Self, UnitError> {
         if units > MAX_UNITS {
             return Err(UnitError::Invalid);
         }
         let mut table = UnitTable::new_in(units, alloc.clone()).map_err(|_| UnitError::Alloc)?;
-        cat.load_units(&mut table)
-            .await
-            .map_err(UnitError::Catalogue)?;
+        cat.load_units(&mut table).map_err(UnitError::Catalogue)?;
         let mut buf = Vec::new_in(alloc.clone());
         buf.try_reserve_exact(PAGE_BYTES)
             .map_err(|_| UnitError::Alloc)?;
@@ -184,7 +181,7 @@ impl<D: SectorIo, A: Allocator + Clone> UnitMedia<D, A> {
         &self.device
     }
 
-    fn check<E>(&self) -> Result<(), UnitError<E>> {
+    fn check(&self) -> Result<(), UnitError> {
         if self.enabled {
             Ok(())
         } else {
@@ -195,7 +192,7 @@ impl<D: SectorIo, A: Allocator + Clone> UnitMedia<D, A> {
     /// Catalogue, device and allocation failures disable the store: RAM
     /// state may no longer match the card. Input and state errors are
     /// detected before any change and leave it enabled.
-    fn guard<T, E>(&mut self, result: Result<T, UnitError<E>>) -> Result<T, UnitError<E>> {
+    fn guard<T>(&mut self, result: Result<T, UnitError>) -> Result<T, UnitError> {
         if matches!(
             result,
             Err(UnitError::Catalogue(_) | UnitError::Device(_) | UnitError::Alloc)
@@ -205,7 +202,7 @@ impl<D: SectorIo, A: Allocator + Clone> UnitMedia<D, A> {
         result
     }
 
-    fn write<E>(&mut self, sector: Option<u32>) -> Result<(), UnitError<E>> {
+    fn write(&mut self, sector: Option<u32>) -> Result<(), UnitError> {
         // Ownership is checked before writing; a missing sector is a bug
         // that leaves RAM suspect, so it disables the store.
         let sector = sector.ok_or(UnitError::Catalogue(Error::Corrupt))?;
@@ -215,13 +212,13 @@ impl<D: SectorIo, A: Allocator + Clone> UnitMedia<D, A> {
     }
 
     /// Commit the dirty pages, the counter and `record` (`None` deletes it).
-    async fn commit<F: Flash>(
+    fn commit(
         &mut self,
-        cat: &mut Catalogue<F>,
+        cat: &mut Catalogue,
         dirty: &[u16],
         id: EpisodeId,
         record: Option<usize>,
-    ) -> Result<(), UnitError<F::Error>> {
+    ) -> Result<(), UnitError> {
         #[cfg(test)]
         {
             self.commits += 1;
@@ -235,7 +232,6 @@ impl<D: SectorIo, A: Allocator + Clone> UnitMedia<D, A> {
             None => None,
         };
         cat.commit_units(&self.table, dirty, id, record)
-            .await
             .map_err(UnitError::Catalogue)
     }
 
@@ -245,18 +241,17 @@ impl<D: SectorIo, A: Allocator + Clone> UnitMedia<D, A> {
     }
 
     /// Free the record of `id` if it is in `state`; idempotent when absent.
-    async fn unlink<F: Flash>(
+    fn unlink(
         &mut self,
-        cat: &mut Catalogue<F>,
+        cat: &mut Catalogue,
         id: EpisodeId,
         state: RecordState,
-    ) -> Result<(), UnitError<F::Error>> {
+    ) -> Result<(), UnitError> {
         if state == RecordState::Temp && self.temp.id == Some(id) {
             self.temp.clear();
         }
         let Some(record) = cat
             .unit_record(id, &mut self.buf)
-            .await
             .map_err(UnitError::Catalogue)?
         else {
             return Ok(());
@@ -285,7 +280,7 @@ impl<D: SectorIo, A: Allocator + Clone> UnitMedia<D, A> {
                 self.table.release(unit);
             }
         }
-        self.commit(cat, &dirty, id, None).await
+        self.commit(cat, &dirty, id, None)
     }
 
     /// Plan up to `want` new units after the temp's extents, next-fit from
@@ -373,7 +368,7 @@ impl<D: SectorIo, A: Allocator + Clone> UnitMedia<D, A> {
     /// Claim `plan` and encode the temp record; returns the pages to commit
     /// and the record length. Synchronous so the 4 KiB plan never lives in a
     /// future: the owner future is built on core1's stack (t-121).
-    fn stage<E>(&mut self, plan: Plan) -> Result<(Dirty, usize), UnitError<E>> {
+    fn stage(&mut self, plan: Plan) -> Result<(Dirty, usize), UnitError> {
         // `plan` checked extent room, so this cannot fail; if it did, RAM
         // is suspect and the store disables.
         self.apply(&plan)
@@ -385,21 +380,21 @@ impl<D: SectorIo, A: Allocator + Clone> UnitMedia<D, A> {
     }
 
     /// Own staged units in one commit, before any data reaches them.
-    async fn own<F: Flash>(
+    fn own(
         &mut self,
-        cat: &mut Catalogue<F>,
+        cat: &mut Catalogue,
         id: EpisodeId,
         (dirty, n): (Dirty, usize),
-    ) -> Result<(), UnitError<F::Error>> {
-        self.commit(cat, &dirty, id, Some(n)).await
+    ) -> Result<(), UnitError> {
+        self.commit(cat, &dirty, id, Some(n))
     }
 
-    async fn reset<F: Flash>(
+    fn reset(
         &mut self,
-        cat: &mut Catalogue<F>,
+        cat: &mut Catalogue,
         id: EpisodeId,
         expected: Option<u64>,
-    ) -> Result<(), UnitError<F::Error>> {
+    ) -> Result<(), UnitError> {
         if id.0 == 0 {
             return Err(UnitError::Invalid);
         }
@@ -410,7 +405,6 @@ impl<D: SectorIo, A: Allocator + Clone> UnitMedia<D, A> {
         // Read-only checks first: `Exists` and `Full` change nothing.
         let own = match cat
             .unit_record(id, &mut self.buf)
-            .await
             .map_err(UnitError::Catalogue)?
         {
             Some(r) if r.state == RecordState::Published => return Err(UnitError::Exists),
@@ -426,10 +420,10 @@ impl<D: SectorIo, A: Allocator + Clone> UnitMedia<D, A> {
             return Err(UnitError::Full);
         }
         if let Some(other) = self.temp.id.filter(|&other| other != id) {
-            self.unlink(cat, other, RecordState::Temp).await?;
+            self.unlink(cat, other, RecordState::Temp)?;
         }
         if own > 0 || self.temp.id == Some(id) {
-            self.unlink(cat, id, RecordState::Temp).await?;
+            self.unlink(cat, id, RecordState::Temp)?;
         }
         self.temp.clear();
         if want > 0 {
@@ -444,7 +438,7 @@ impl<D: SectorIo, A: Allocator + Clone> UnitMedia<D, A> {
                 self.stage(plan)
             };
             let result = match staged {
-                Ok(staged) => self.own(cat, id, staged).await,
+                Ok(staged) => self.own(cat, id, staged),
                 Err(error) => Err(error),
             };
             if let Err(error) = result {
@@ -458,11 +452,7 @@ impl<D: SectorIo, A: Allocator + Clone> UnitMedia<D, A> {
 
     /// Own the next batch of free units (as many as already owned, 1 to 64)
     /// in one commit, before any data reaches them.
-    async fn grow<F: Flash>(
-        &mut self,
-        cat: &mut Catalogue<F>,
-        id: EpisodeId,
-    ) -> Result<(), UnitError<F::Error>> {
+    fn grow(&mut self, cat: &mut Catalogue, id: EpisodeId) -> Result<(), UnitError> {
         if self.table.free() == 0 {
             return Err(UnitError::Full);
         }
@@ -475,15 +465,15 @@ impl<D: SectorIo, A: Allocator + Clone> UnitMedia<D, A> {
             }
             self.stage(plan)?
         };
-        self.own(cat, id, staged).await
+        self.own(cat, id, staged)
     }
 
-    async fn append<F: Flash>(
+    fn append(
         &mut self,
-        cat: &mut Catalogue<F>,
+        cat: &mut Catalogue,
         id: EpisodeId,
         mut bytes: &[u8],
-    ) -> Result<(), UnitError<F::Error>> {
+    ) -> Result<(), UnitError> {
         if bytes.is_empty() || bytes.len() > AUDIO_CHUNK || self.temp.id != Some(id) {
             return Err(UnitError::Invalid);
         }
@@ -494,7 +484,7 @@ impl<D: SectorIo, A: Allocator + Clone> UnitMedia<D, A> {
             .ok_or(UnitError::Invalid)?;
         // A chunk is far smaller than a unit: one batch always covers it.
         if end > self.temp.capacity() {
-            self.grow(cat, id).await?;
+            self.grow(cat, id)?;
         }
         self.temp.synced = None;
         while !bytes.is_empty() {
@@ -514,7 +504,7 @@ impl<D: SectorIo, A: Allocator + Clone> UnitMedia<D, A> {
         Ok(())
     }
 
-    fn sync<E>(&mut self, id: EpisodeId) -> Result<u64, UnitError<E>> {
+    fn sync(&mut self, id: EpisodeId) -> Result<u64, UnitError> {
         if self.temp.id != Some(id) {
             return Err(UnitError::Invalid);
         }
@@ -559,16 +549,11 @@ impl<D: SectorIo, A: Allocator + Clone> UnitMedia<D, A> {
         Some(dirty)
     }
 
-    async fn publish<F: Flash>(
-        &mut self,
-        cat: &mut Catalogue<F>,
-        id: EpisodeId,
-    ) -> Result<(), UnitError<F::Error>> {
+    fn publish(&mut self, cat: &mut Catalogue, id: EpisodeId) -> Result<(), UnitError> {
         if self.temp.id != Some(id) {
             return Err(
                 match cat
                     .unit_record(id, &mut self.buf)
-                    .await
                     .map_err(UnitError::Catalogue)?
                     .map(|r| r.state)
                 {
@@ -590,27 +575,26 @@ impl<D: SectorIo, A: Allocator + Clone> UnitMedia<D, A> {
         let n = self
             .encode_temp(RecordState::Published)
             .ok_or(UnitError::Catalogue(Error::Corrupt))?;
-        self.commit(cat, &dirty, id, Some(n)).await?;
+        self.commit(cat, &dirty, id, Some(n))?;
         self.temp.clear();
         Ok(())
     }
 
-    async fn published_len<F: Flash>(
+    fn published_len(
         &mut self,
-        cat: &mut Catalogue<F>,
+        cat: &mut Catalogue,
         id: EpisodeId,
-    ) -> Result<Option<u64>, UnitError<F::Error>> {
+    ) -> Result<Option<u64>, UnitError> {
         Ok(cat
             .unit_record(id, &mut self.buf)
-            .await
             .map_err(UnitError::Catalogue)?
             .filter(|r| r.state == RecordState::Published)
             .map(|r| r.len))
     }
 }
 
-impl<F: Flash, D: SectorIo, A: Allocator + Clone> MediaStore<F> for UnitMedia<D, A> {
-    type Error = UnitError<F::Error>;
+impl<D: SectorIo, A: Allocator + Clone> MediaStore for UnitMedia<D, A> {
+    type Error = UnitError;
     /// `Invalid`, `Exists` and `Full` are detected before any change.
     fn is_fatal(error: &Self::Error) -> bool {
         !matches!(
@@ -623,7 +607,7 @@ impl<F: Flash, D: SectorIo, A: Allocator + Clone> MediaStore<F> for UnitMedia<D,
     fn active(&self, _: EpisodeId) -> bool {
         false
     }
-    async fn space(&mut self, _: &mut Catalogue<F>) -> Result<Space, Self::Error> {
+    async fn space(&mut self, _: &mut Catalogue) -> Result<Space, Self::Error> {
         self.check()?;
         let tail = self.temp.capacity().saturating_sub(self.temp.len);
         Ok(Space {
@@ -633,76 +617,69 @@ impl<F: Flash, D: SectorIo, A: Allocator + Clone> MediaStore<F> for UnitMedia<D,
     }
     async fn reset_temp(
         &mut self,
-        cat: &mut Catalogue<F>,
+        cat: &mut Catalogue,
         id: EpisodeId,
         expected: Option<u64>,
     ) -> Result<(), Self::Error> {
         self.check()?;
-        let result = self.reset(cat, id, expected).await;
+        let result = self.reset(cat, id, expected);
         self.guard(result)
     }
     async fn append_temp(
         &mut self,
-        cat: &mut Catalogue<F>,
+        cat: &mut Catalogue,
         id: EpisodeId,
         bytes: &[u8],
     ) -> Result<(), Self::Error> {
         self.check()?;
-        let result = self.append(cat, id, bytes).await;
+        let result = self.append(cat, id, bytes);
         self.guard(result)
     }
-    async fn sync_temp(&mut self, _: &mut Catalogue<F>, id: EpisodeId) -> Result<u64, Self::Error> {
+    async fn sync_temp(&mut self, _: &mut Catalogue, id: EpisodeId) -> Result<u64, Self::Error> {
         self.check()?;
         let result = self.sync(id);
         self.guard(result)
     }
     async fn publish_temp(
         &mut self,
-        cat: &mut Catalogue<F>,
+        cat: &mut Catalogue,
         id: EpisodeId,
     ) -> Result<(), Self::Error> {
         self.check()?;
-        let result = self.publish(cat, id).await;
+        let result = self.publish(cat, id);
         self.guard(result)
     }
-    async fn unlink_temp(
-        &mut self,
-        cat: &mut Catalogue<F>,
-        id: EpisodeId,
-    ) -> Result<(), Self::Error> {
+    async fn unlink_temp(&mut self, cat: &mut Catalogue, id: EpisodeId) -> Result<(), Self::Error> {
         self.check()?;
-        let result = self.unlink(cat, id, RecordState::Temp).await;
+        let result = self.unlink(cat, id, RecordState::Temp);
         self.guard(result)
     }
     async fn unlink_audio(
         &mut self,
-        cat: &mut Catalogue<F>,
+        cat: &mut Catalogue,
         id: EpisodeId,
     ) -> Result<(), Self::Error> {
         self.check()?;
-        let result = self.unlink(cat, id, RecordState::Published).await;
+        let result = self.unlink(cat, id, RecordState::Published);
         self.guard(result)
     }
     async fn audio_len(
         &mut self,
-        cat: &mut Catalogue<F>,
+        cat: &mut Catalogue,
         id: EpisodeId,
     ) -> Result<Option<u64>, Self::Error> {
         self.check()?;
-        let result = self.published_len(cat, id).await;
+        let result = self.published_len(cat, id);
         self.guard(result)
     }
     async fn list_ids(
         &mut self,
-        cat: &mut Catalogue<F>,
+        cat: &mut Catalogue,
         after: Option<EpisodeId>,
         out: &mut [EpisodeId; FILE_PAGE],
     ) -> Result<usize, Self::Error> {
         self.check()?;
-        let result = cat
-            .unit_ids(after, out, &mut self.buf)
-            .await
-            .map_err(UnitError::Catalogue);
+        let result = cat.unit_ids(after, out).map_err(UnitError::Catalogue);
         self.guard(result)
     }
 }

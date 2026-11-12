@@ -7,7 +7,6 @@ use crate::{
     subscriptions::Subscription,
     sync::*,
 };
-use ekv::flash::Flash;
 use heapless::{String, Vec};
 pub type Chunk = Vec<u8, AUDIO_CHUNK>;
 pub enum Command {
@@ -61,16 +60,16 @@ pub enum Error {
     Invalid,
     Storage,
 }
-pub struct Runtime<F: Flash, M: MediaStore<F>> {
-    catalogue: Catalogue<F>,
+pub struct Runtime<M: MediaStore> {
+    catalogue: Catalogue,
     pub media: M,
     recovery: Recovery,
     sync: Option<SyncSession>,
     download: Option<DownloadSession>,
     enabled: bool,
 }
-impl<F: Flash, M: MediaStore<F>> Runtime<F, M> {
-    pub fn new(catalogue: Catalogue<F>, media: M) -> Self {
+impl<M: MediaStore> Runtime<M> {
+    pub fn new(catalogue: Catalogue, media: M) -> Self {
         Self {
             catalogue,
             media,
@@ -97,24 +96,18 @@ impl<F: Flash, M: MediaStore<F>> Runtime<F, M> {
                 self.recovery
                     .step(&mut self.catalogue, &mut self.media, scratch)
                     .await
-                    .map_err(media_error::<F, M>)?,
+                    .map_err(media_error::<M>)?,
             ),
             Command::Follow(url) => {
-                Reply::Followed(self.catalogue.follow(&url).await.map_err(cat_error)?)
+                Reply::Followed(self.catalogue.follow(&url).map_err(cat_error)?)
             }
             Command::MarkRead(id) => {
-                self.catalogue
-                    .mark_read(id, scratch)
-                    .await
-                    .map_err(cat_error)?;
+                self.catalogue.mark_read(id, scratch).map_err(cat_error)?;
                 Reply::Done
             }
-            Command::Subscription(after) => Reply::Subscription(
-                self.catalogue
-                    .next_subscription(after)
-                    .await
-                    .map_err(cat_error)?,
-            ),
+            Command::Subscription(after) => {
+                Reply::Subscription(self.catalogue.next_subscription(after).map_err(cat_error)?)
+            }
             Command::SyncStart(id, url) => {
                 if self.download.is_some() || self.sync.is_some() {
                     return Err(Error::Invalid);
@@ -122,7 +115,6 @@ impl<F: Flash, M: MediaStore<F>> Runtime<F, M> {
                 let prior = self
                     .catalogue
                     .sync_checkpoint(id, scratch)
-                    .await
                     .map_err(cat_error)?;
                 self.sync = Some(SyncSession::new(id, &url, prior).map_err(|_| Error::Invalid)?);
                 Reply::Done
@@ -150,7 +142,7 @@ impl<F: Flash, M: MediaStore<F>> Runtime<F, M> {
                 self.sync
                     .as_mut()
                     .ok_or(Error::Invalid)?
-                    .response::<F::Error>(
+                    .response(
                         status,
                         Validators {
                             etag: (!etag.is_empty()).then_some(etag.as_str()),
@@ -165,20 +157,18 @@ impl<F: Flash, M: MediaStore<F>> Runtime<F, M> {
                     .as_mut()
                     .ok_or(Error::Invalid)?
                     .push(&mut self.catalogue, &bytes, scratch)
-                    .await
                     .map_err(sync_error)?;
                 Reply::Done
             }
             Command::SyncEnd => {
                 let mut sync = self.sync.take().ok_or(Error::Invalid)?;
-                if sync.end_page::<F::Error>().map_err(sync_error)? {
+                if sync.end_page(&mut self.catalogue).map_err(sync_error)? {
                     let url = String::try_from(sync.url()).map_err(|_| Error::Invalid)?;
                     self.sync = Some(sync);
                     Reply::Url(url)
                 } else {
                     Reply::Synced(
                         sync.complete(&mut self.catalogue, scratch)
-                            .await
                             .map_err(sync_error)?,
                     )
                 }
@@ -195,7 +185,6 @@ impl<F: Flash, M: MediaStore<F>> Runtime<F, M> {
                             job = DownloadJob::from_episode(episode).ok();
                         }
                     })
-                    .await
                     .map_err(cat_error)?;
                 // A scan may contain several queued episodes. Resume after the
                 // emitted job, not after records the caller has not received.
@@ -209,7 +198,7 @@ impl<F: Flash, M: MediaStore<F>> Runtime<F, M> {
                 }
                 match DownloadSession::start(&mut self.catalogue, &mut self.media, job, scratch)
                     .await
-                    .map_err(media_error::<F, M>)?
+                    .map_err(media_error::<M>)?
                 {
                     Start::Ready(session) => {
                         self.download = Some(session);
@@ -238,7 +227,7 @@ impl<F: Flash, M: MediaStore<F>> Runtime<F, M> {
                     .ok_or(Error::Invalid)?
                     .push(&mut self.catalogue, &mut self.media, &bytes, scratch)
                     .await
-                    .map_err(media_error::<F, M>)?
+                    .map_err(media_error::<M>)?
                 {
                     ChunkOutcome::Written => Reply::Done,
                     ChunkOutcome::WaitingForSpace => {
@@ -252,7 +241,7 @@ impl<F: Flash, M: MediaStore<F>> Runtime<F, M> {
                     .ok_or(Error::Invalid)?
                     .finish(&mut self.catalogue, &mut self.media, complete, scratch)
                     .await
-                    .map_err(media_error::<F, M>)?,
+                    .map_err(media_error::<M>)?,
             ),
             Command::Abort => {
                 self.sync = None;
@@ -260,14 +249,14 @@ impl<F: Flash, M: MediaStore<F>> Runtime<F, M> {
                     download
                         .abort(&mut self.catalogue, &mut self.media, scratch)
                         .await
-                        .map_err(media_error::<F, M>)?;
+                        .map_err(media_error::<M>)?;
                 }
                 Reply::Done
             }
         })
     }
 }
-fn cat_error<E>(error: catalogue::Error<E>) -> Error {
+fn cat_error(error: catalogue::Error) -> Error {
     match error {
         catalogue::Error::FieldTooLong
         | catalogue::Error::InvalidMetadata
@@ -277,14 +266,14 @@ fn cat_error<E>(error: catalogue::Error<E>) -> Error {
         _ => Error::Storage,
     }
 }
-fn sync_error<E>(error: SyncError<E>) -> Error {
+fn sync_error(error: SyncError) -> Error {
     match error {
         SyncError::Catalogue(e) => cat_error(e),
         _ => Error::Invalid,
     }
 }
 /// A non-fatal store error left the store enabled: reject the request only.
-fn media_error<F: Flash, M: MediaStore<F>>(error: MediaError<F::Error, M::Error>) -> Error {
+fn media_error<M: MediaStore>(error: MediaError<M::Error>) -> Error {
     match error {
         MediaError::Catalogue(e) => cat_error(e),
         MediaError::Media(e) if M::is_fatal(&e) => Error::Storage,

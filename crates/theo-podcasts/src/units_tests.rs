@@ -1,8 +1,15 @@
 use super::*;
+use crate::tables::{COUNTERS, SCHEMA_KEY, UNIT_PAGES, UNITS_USED};
 use crate::{catalogue::*, test_support::Image};
 use allocator_api2::alloc::Global;
-use futures::executor::block_on;
-use theo_storage::page_store::PageStore;
+
+/// Write to the catalogue's tables behind its back, as damage would.
+fn write_raw(cat: &Catalogue, change: impl FnOnce(&redb::WriteTransaction)) {
+    let mut tx = cat.db.begin_write().unwrap();
+    tx.set_quick_repair(true);
+    change(&tx);
+    tx.commit().unwrap();
+}
 
 fn allocate<A: Allocator>(t: &mut UnitTable<A>, max: u32) -> Option<(u32, u32)> {
     let run = t.find_run(t.cursor(), max)?;
@@ -131,178 +138,181 @@ fn record_round_trips_and_rejects_invalid() {
 // Regression (t-121): bitmap, counter and records change in one transaction.
 #[test]
 fn committed_units_reload_with_matching_counter() {
-    block_on(async {
-        let image = Image::new();
-        let mut cat = image.create().await;
-        let mut t = UnitTable::new_in(100, Global).unwrap();
-        cat.load_units(&mut t).await.unwrap();
-        let (unit, _) = allocate(&mut t, 1).unwrap();
-        let mut rec = [0; 4096];
-        let n = encode_record(
-            RecordState::Temp,
-            0,
-            &[Extent {
-                start: unit,
-                count: 1,
-            }],
-            &mut rec,
-        )
+    let image = Image::new();
+    let mut cat = image.create();
+    let mut t = UnitTable::new_in(100, Global).unwrap();
+    cat.load_units(&mut t).unwrap();
+    let (unit, _) = allocate(&mut t, 1).unwrap();
+    let mut rec = [0; 4096];
+    let n = encode_record(
+        RecordState::Temp,
+        0,
+        &[Extent {
+            start: unit,
+            count: 1,
+        }],
+        &mut rec,
+    )
+    .unwrap();
+    cat.commit_units(&t, &[t.page_of(unit)], EpisodeId(3), Some(&rec[..n]))
         .unwrap();
-        cat.commit_units(&t, &[t.page_of(unit)], EpisodeId(3), Some(&rec[..n]))
-            .await
-            .unwrap();
-        drop(cat);
-        let mut cat = image.reopen().await;
-        let mut again = UnitTable::new_in(100, Global).unwrap();
-        cat.load_units(&mut again).await.unwrap();
-        assert_eq!(again.used(), 1);
-        let mut buf = [0; 4096];
-        assert_eq!(
-            cat.unit_record(EpisodeId(3), &mut buf)
-                .await
-                .unwrap()
-                .unwrap()
-                .extent(0),
-            Some(Extent {
-                start: unit,
-                count: 1
-            })
-        );
-        let mut ids = [EpisodeId(0); crate::media::FILE_PAGE];
-        assert_eq!(cat.unit_ids(None, &mut ids, &mut buf).await.unwrap(), 1);
-        assert_eq!(ids[0], EpisodeId(3));
-        assert_eq!(
-            cat.unit_ids(Some(EpisodeId(3)), &mut ids, &mut buf)
-                .await
-                .unwrap(),
-            0
-        );
-        // Deleting the record in a later commit removes it.
-        cat.commit_units(&again, &[], EpisodeId(3), None)
-            .await
-            .unwrap();
-        assert!(
-            cat.unit_record(EpisodeId(3), &mut buf)
-                .await
-                .unwrap()
-                .is_none()
-        );
-    });
+    drop(cat);
+    let mut cat = image.reopen();
+    let mut again = UnitTable::new_in(100, Global).unwrap();
+    cat.load_units(&mut again).unwrap();
+    assert_eq!(again.used(), 1);
+    let mut buf = [0; 4096];
+    assert_eq!(
+        cat.unit_record(EpisodeId(3), &mut buf)
+            .unwrap()
+            .unwrap()
+            .extent(0),
+        Some(Extent {
+            start: unit,
+            count: 1
+        })
+    );
+    let mut ids = [EpisodeId(0); crate::media::FILE_PAGE];
+    assert_eq!(cat.unit_ids(None, &mut ids).unwrap(), 1);
+    assert_eq!(ids[0], EpisodeId(3));
+    assert_eq!(cat.unit_ids(Some(EpisodeId(3)), &mut ids).unwrap(), 0);
+    // Deleting the record in a later commit removes it.
+    cat.commit_units(&again, &[], EpisodeId(3), None).unwrap();
+    assert!(cat.unit_record(EpisodeId(3), &mut buf).unwrap().is_none());
 }
 
 // Regression (t-121): a store of more than one bitmap page persists units
 // allocated on both sides of the page boundary.
 #[test]
 fn units_across_the_page_boundary_reload() {
-    block_on(async {
-        let image = Image::new();
-        let mut cat = image.create().await;
-        let mut t = UnitTable::new_in(40_000, Global).unwrap();
-        cat.load_units(&mut t).await.unwrap();
-        t.cursor = UNITS_PER_PAGE - 8;
-        let run = t.find_run(t.cursor(), 16).unwrap();
-        assert_eq!(
-            run,
-            Extent {
-                start: UNITS_PER_PAGE - 8,
-                count: 16
-            }
-        );
-        t.claim(run);
-        let mut rec = [0; 4096];
-        let n = encode_record(RecordState::Temp, 0, &[run], &mut rec).unwrap();
-        cat.commit_units(&t, &[0, 1], EpisodeId(4), Some(&rec[..n]))
-            .await
-            .unwrap();
-        drop(cat);
-        let mut cat = image.reopen().await;
-        let mut again = UnitTable::new_in(40_000, Global).unwrap();
-        cat.load_units(&mut again).await.unwrap();
-        assert_eq!(again.used(), 16);
-        let allocated: std::vec::Vec<u32> =
-            (0..40_000).filter(|&u| again.is_allocated(u)).collect();
-        assert_eq!(
-            allocated,
-            (UNITS_PER_PAGE - 8..UNITS_PER_PAGE + 8).collect::<std::vec::Vec<_>>()
-        );
-        assert_eq!(again.page_of(allocated[0]), 0);
-        assert_eq!(again.page_of(allocated[15]), 1);
-    });
+    let image = Image::new();
+    let mut cat = image.create();
+    let mut t = UnitTable::new_in(40_000, Global).unwrap();
+    cat.load_units(&mut t).unwrap();
+    t.cursor = UNITS_PER_PAGE - 8;
+    let run = t.find_run(t.cursor(), 16).unwrap();
+    assert_eq!(
+        run,
+        Extent {
+            start: UNITS_PER_PAGE - 8,
+            count: 16
+        }
+    );
+    t.claim(run);
+    let mut rec = [0; 4096];
+    let n = encode_record(RecordState::Temp, 0, &[run], &mut rec).unwrap();
+    cat.commit_units(&t, &[0, 1], EpisodeId(4), Some(&rec[..n]))
+        .unwrap();
+    drop(cat);
+    let mut cat = image.reopen();
+    let mut again = UnitTable::new_in(40_000, Global).unwrap();
+    cat.load_units(&mut again).unwrap();
+    assert_eq!(again.used(), 16);
+    let allocated: std::vec::Vec<u32> = (0..40_000).filter(|&u| again.is_allocated(u)).collect();
+    assert_eq!(
+        allocated,
+        (UNITS_PER_PAGE - 8..UNITS_PER_PAGE + 8).collect::<std::vec::Vec<_>>()
+    );
+    assert_eq!(again.page_of(allocated[0]), 0);
+    assert_eq!(again.page_of(allocated[15]), 1);
 }
 
 // Regression (t-121): `commit_units` refuses unordered or out-of-range dirty
 // pages before writing anything.
 #[test]
 fn unordered_dirty_pages_are_corrupt() {
-    block_on(async {
-        let image = Image::new();
-        let mut cat = image.create().await;
-        let t = UnitTable::new_in(40_000, Global).unwrap();
-        let writes = image.writes.get();
-        for dirty in [&[1u16, 0][..], &[0, 0], &[2]] {
-            assert!(matches!(
-                cat.commit_units(&t, dirty, EpisodeId(1), None).await,
-                Err(Error::Corrupt)
-            ));
-        }
-        assert_eq!(image.writes.get(), writes);
-        cat.commit_units(&t, &[0, 1], EpisodeId(1), None)
-            .await
-            .unwrap();
-    });
+    let image = Image::new();
+    let mut cat = image.create();
+    let t = UnitTable::new_in(40_000, Global).unwrap();
+    let writes = image.disk.state().writes;
+    for dirty in [&[1u16, 0][..], &[0, 0], &[2]] {
+        assert!(matches!(
+            cat.commit_units(&t, dirty, EpisodeId(1), None),
+            Err(Error::Corrupt)
+        ));
+    }
+    assert_eq!(image.disk.state().writes, writes);
+    cat.commit_units(&t, &[0, 1], EpisodeId(1), None).unwrap();
 }
 
-// Regression (t-121): a counter that disagrees with the bitmap is corruption, not a format.
 #[test]
 fn counter_mismatch_is_corrupt() {
-    block_on(async {
-        let image = Image::new();
-        let mut cat = image.create().await;
-        let mut t = UnitTable::new_in(100, Global).unwrap();
-        allocate(&mut t, 1).unwrap(); // bitmap in RAM says 1 ...
-        let page = t.page(0).to_vec();
-        let mut tx = cat.db.write_transaction().await;
-        tx.write(&[b'b', 0, 0], &page).await.unwrap(); // ... counter stays 0
-        tx.commit().await.unwrap();
-        let mut fresh = UnitTable::new_in(100, Global).unwrap();
-        assert!(matches!(
-            cat.load_units(&mut fresh).await,
-            Err(Error::Corrupt)
-        ));
+    let image = Image::new();
+    let mut cat = image.create();
+    let mut t = UnitTable::new_in(100, Global).unwrap();
+    allocate(&mut t, 1).unwrap(); // bitmap in RAM says 1 ...
+    write_raw(&cat, |tx| {
+        tx.open_table(UNIT_PAGES)
+            .unwrap()
+            .insert(0, t.page(0))
+            .unwrap(); // ... counter stays 0
     });
+    let mut fresh = UnitTable::new_in(100, Global).unwrap();
+    assert!(matches!(cat.load_units(&mut fresh), Err(Error::Corrupt)));
 }
 
-// Regression (t-121): a bit set past the last unit is corruption.
 #[test]
 fn bit_beyond_units_is_corrupt() {
-    block_on(async {
-        let image = Image::new();
-        let mut cat = image.create().await;
-        let mut page = [0u8; 4096];
-        page[25] = 1; // unit 200 >= 100
-        let mut tx = cat.db.write_transaction().await;
-        tx.write(&[b'b', 0, 0], &page).await.unwrap();
-        tx.write(UNITS_KEY, &1u32.to_le_bytes()).await.unwrap();
-        tx.commit().await.unwrap();
-        let mut fresh = UnitTable::new_in(100, Global).unwrap();
-        assert!(matches!(
-            cat.load_units(&mut fresh).await,
-            Err(Error::Corrupt)
-        ));
+    let image = Image::new();
+    let mut cat = image.create();
+    let mut page = [0u8; 4096];
+    page[25] = 1; // unit 200 >= 100
+    write_raw(&cat, |tx| {
+        tx.open_table(UNIT_PAGES)
+            .unwrap()
+            .insert(0, &page[..])
+            .unwrap();
+        tx.open_table(COUNTERS)
+            .unwrap()
+            .insert(UNITS_USED, 1)
+            .unwrap();
     });
+    let mut fresh = UnitTable::new_in(100, Global).unwrap();
+    assert!(matches!(cat.load_units(&mut fresh), Err(Error::Corrupt)));
 }
 
-// Regression (t-121): schema 1 catalogues (no unit accounting) are refused, never migrated.
 #[test]
 fn schema_one_is_rejected_on_open() {
-    block_on(async {
-        let image = Image::new();
-        let cat = image.create().await;
-        let mut tx = cat.db.write_transaction().await;
-        tx.write(SCHEMA_KEY, &1u32.to_le_bytes()).await.unwrap();
-        tx.commit().await.unwrap();
-        drop(cat);
-        let result = Catalogue::open(PageStore::open(image.file(), 32).await.unwrap()).await;
-        assert!(matches!(result, Err(Error::Schema)));
+    let image = Image::new();
+    let cat = image.create();
+    write_raw(&cat, |tx| {
+        tx.open_table(COUNTERS)
+            .unwrap()
+            .insert(SCHEMA_KEY, 1)
+            .unwrap();
     });
+    drop(cat);
+    assert!(matches!(
+        Catalogue::open(image.backend()),
+        Err(Error::Schema)
+    ));
+}
+
+// Regression (t-133): the ekv units scan also read the show index (`u` +
+// 36-byte show id) and returned Corrupt. Separate tables cannot collide.
+#[test]
+fn unit_ids_ignore_subscriptions() {
+    let image = Image::new();
+    let mut cat = image.create();
+    cat.follow("https://rss-rf.aerion.me/rss/00000000-0000-0000-0000-000000000002")
+        .unwrap();
+    let mut t = UnitTable::new_in(100, Global).unwrap();
+    cat.load_units(&mut t).unwrap();
+    let (unit, _) = allocate(&mut t, 1).unwrap();
+    let mut rec = [0; 4096];
+    let n = encode_record(
+        RecordState::Temp,
+        0,
+        &[Extent {
+            start: unit,
+            count: 1,
+        }],
+        &mut rec,
+    )
+    .unwrap();
+    cat.commit_units(&t, &[t.page_of(unit)], EpisodeId(3), Some(&rec[..n]))
+        .unwrap();
+    let mut out = [EpisodeId(0); crate::media::FILE_PAGE];
+    assert_eq!(cat.unit_ids(None, &mut out).unwrap(), 1);
+    assert_eq!(out[0], EpisodeId(3));
 }

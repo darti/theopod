@@ -30,11 +30,11 @@ impl fmt::Display for CardId {
 pub enum Request {
     /// `format`: format a blank card as a whole-card LittleFS (legacy).
     Format,
-    /// `v2:<sectors>:<card id>`: erase that one card and publish layout v2.
-    V2(Target),
+    /// `v3:<sectors>:<card id>`: erase that one card and publish layout v3.
+    V3(Target),
 }
 
-/// The one card a `v2` request may erase.
+/// The one card a `v3` request may erase.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Target {
     /// Exact capacity in 512-byte sectors (boot log "microSD capacity").
@@ -50,9 +50,9 @@ pub enum Refusal {
     Size(u64),
     /// The card has another identity, or none could be read.
     Card(Option<CardId>),
-    /// The card already has layout v2.
-    AlreadyV2,
-    /// A descriptor is unreadable as a v2 layout of this card.
+    /// The card already has layout v3.
+    AlreadyV3,
+    /// A descriptor is unreadable as a v3 layout of this card.
     Descriptor(LayoutError),
 }
 
@@ -62,14 +62,14 @@ impl fmt::Display for Refusal {
             Self::Size(sectors) => write!(f, "the card has {sectors} sectors"),
             Self::Card(Some(card)) => write!(f, "the card id is {card}"),
             Self::Card(None) => f.write_str("the card id could not be read"),
-            Self::AlreadyV2 => f.write_str("the card already has layout v2"),
+            Self::AlreadyV3 => f.write_str("the card already has layout v3"),
             Self::Descriptor(error) => write!(f, "invalid descriptor ({error:?})"),
         }
     }
 }
 
 impl Target {
-    /// Allows erasing only this exact card, and only before it has a v2 layout.
+    /// Allows erasing only this exact card, and only before it has a v3 layout.
     ///
     /// `first` and `second` are the card's descriptor sectors. A blank card
     /// or a legacy whole-card LittleFS passes.
@@ -88,13 +88,13 @@ impl Target {
         }
         match CardLayout::select(first, second, sectors) {
             Ok(None) => Ok(()),
-            Ok(Some(_)) => Err(Refusal::AlreadyV2),
+            Ok(Some(_)) => Err(Refusal::AlreadyV3),
             Err(error) => Err(Refusal::Descriptor(error)),
         }
     }
 }
 
-/// Parses `format` or `v2:<decimal sectors>:<10 hex digit card id>`.
+/// Parses `format` or `v3:<decimal sectors>:<10 hex digit card id>`.
 ///
 /// `const` so the firmware rejects a malformed value at compile time.
 pub const fn parse_request(spec: &str) -> Option<Request> {
@@ -102,7 +102,7 @@ pub const fn parse_request(spec: &str) -> Option<Request> {
     if matches!(bytes, b"format") {
         return Some(Request::Format);
     }
-    let [b'v', b'2', b':', rest @ ..] = bytes else {
+    let [b'v', b'3', b':', rest @ ..] = bytes else {
         return None;
     };
     let mut sectors: u64 = 0;
@@ -137,7 +137,7 @@ pub const fn parse_request(spec: &str) -> Option<Request> {
         card = (card << 4) | nibble as u64;
         index += 1;
     }
-    Some(Request::V2(Target {
+    Some(Request::V3(Target {
         sectors,
         card: CardId(card),
     }))

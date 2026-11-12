@@ -30,7 +30,7 @@ impl SectorIo for ImageIo {
             .map_err(|_| Error::Io)?;
         self.0.write_all(bytes).map_err(|_| Error::Io)
     }
-    /// `provision_v2` syncs only at its barriers, so this stays cheap.
+    /// `provision_v3` syncs only at its barriers, so this stays cheap.
     fn sync(&mut self) -> Result<(), Error> {
         self.0.sync_all().map_err(|_| Error::Io)
     }
@@ -41,7 +41,7 @@ impl SectorIo for ImageIo {
 fn create_image(path: &Path, sectors: u64) -> Result<(), String> {
     use theo_storage::card_layout::CardLayout;
     // Refuse a capacity the layout cannot hold before creating any file.
-    CardLayout::new(sectors, theo_podcasts::provision::PAGES).map_err(report)?;
+    CardLayout::new(sectors).map_err(report)?;
     // O_EXCL refuses an existing file, symlink or raw-device path. This tool
     // only creates a new regular image; copying it to hardware is separate.
     let file = OpenOptions::new()
@@ -52,13 +52,9 @@ fn create_image(path: &Path, sectors: u64) -> Result<(), String> {
         .map_err(report)?;
     file.set_len(sectors * 512).map_err(report)?;
     let mut image = ImageIo(file);
-    futures::executor::block_on(theo_podcasts::provision::provision_v2(
-        &mut image,
-        sectors,
-        allocator_api2::alloc::Global,
-    ))
-    .map(drop)
-    .map_err(report)
+    theo_podcasts::provision::provision_v3(&mut image, sectors, allocator_api2::alloc::Global)
+        .map(drop)
+        .map_err(report)
 }
 fn report(error: impl std::fmt::Debug) -> String {
     format!("{error:?}")

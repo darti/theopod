@@ -9,12 +9,16 @@ license.workspace = true
 embedded-tls = { git = "https://github.com/embassy-rs/embedded-tls", rev = "6487c62bb084c33361822022e21836ddfd48388f", default-features = false }
 embassy-futures.workspace = true
 heapless = { version = "0.9", default-features = false }
-ekv.workspace = true
+redb.workspace = true
 theo-storage.workspace = true
 allocator-api2.workspace = true
 sha2.workspace = true
 littlefs-rust.workspace = true
-embassy-sync-06 = { package = "embassy-sync", version = "0.6" }
+
+# Host builds (tests, clippy) use redb's std mode, as in theo-storage.
+[target.'cfg(not(target_os = "none"))'.dependencies]
+redb = { workspace = true, features = ["std"] }
 
 [dev-dependencies]
+theo-storage = { workspace = true, features = ["test-disk"] }
 futures = { version = "0.3", features = ["executor"] }

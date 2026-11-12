@@ -1,117 +1,103 @@
 //! Persisted Radio France follows, independent of completed sync checkpoints.
-use crate::{catalogue::*, radio_france::FeedUrl};
-use ekv::flash::Flash;
-const NEXT: &[u8] = b"m/subnext";
+use crate::{
+    catalogue::*,
+    radio_france::FeedUrl,
+    tables::{COUNTERS, NEXT_SUBSCRIPTION, SHOWS, SUBSCRIPTIONS},
+};
+use core::ops::Bound;
+use redb::{ReadableDatabase, ReadableTable};
 #[derive(Debug)]
 pub struct Subscription {
     pub id: SubscriptionId,
     pub feed: heapless::String<256>,
 }
-impl<F: Flash> Catalogue<F> {
+impl Catalogue {
     /// Following page zero and its query-free spelling addresses the same show.
     /// The ID and URL become durable in one transaction before any network work.
-    pub async fn follow(&mut self, feed: &str) -> Result<SubscriptionId, Error<F::Error>> {
+    pub fn follow(&mut self, feed: &str) -> Result<SubscriptionId, Error> {
         let parsed = FeedUrl::parse(feed).map_err(|_| Error::InvalidMetadata)?;
         if parsed.page != 0 {
             return Err(Error::InvalidMetadata);
         }
         let canonical = feed.split('?').next().ok_or(Error::InvalidMetadata)?;
-        let mut index = [b'u'; 37];
-        index[1..].copy_from_slice(parsed.show.as_bytes());
+        let show: [u8; 36] = parsed
+            .show
+            .as_bytes()
+            .try_into()
+            .map_err(|_| Error::InvalidMetadata)?;
+        self.end_batch();
         self.begin()?;
-        let result = async {
-            let tx = self.db.read_transaction().await;
-            let mut bytes = [0; 8];
-            match tx.read(&index, &mut bytes).await {
-                Ok(8) => {
-                    let id = SubscriptionId(u64::from_le_bytes(bytes));
-                    if id.0 == 0 {
-                        return Err(Error::Corrupt);
-                    }
-                    return Ok(id);
-                }
-                Err(ekv::ReadError::KeyNotFound) => (),
-                Ok(_) => return Err(Error::Corrupt),
-                Err(e) => return Err(read_error(e)),
-            }
-            let id = match tx.read(NEXT, &mut bytes).await {
-                Ok(8) => u64::from_le_bytes(bytes),
-                Err(ekv::ReadError::KeyNotFound) => 1,
-                Ok(_) => return Err(Error::Corrupt),
-                Err(e) => return Err(read_error(e)),
-            };
-            let next = id
-                .checked_add(1)
-                .filter(|_| id != 0)
-                .ok_or(Error::IdExhausted)?;
-            drop(tx);
-            let mut tx = self.db.write_transaction().await;
-            tx.write(&key(SubscriptionId(id)), canonical.as_bytes())
-                .await
-                .map_err(write_error)?;
-            tx.write(NEXT, &next.to_le_bytes())
-                .await
-                .map_err(write_error)?;
-            tx.write(&index, &id.to_le_bytes())
-                .await
-                .map_err(write_error)?;
-            tx.commit().await.map_err(commit_error)?;
-            Ok(SubscriptionId(id))
-        }
-        .await;
+        let result = self.follow_inner(canonical, show);
         self.finish(result)
+    }
+    fn follow_inner(&mut self, canonical: &str, show: [u8; 36]) -> Result<SubscriptionId, Error> {
+        // An existing follow is answered from a read transaction: no commit.
+        {
+            let tx = self.db.begin_read().map_err(db_error)?;
+            let shows = tx.open_table(SHOWS).map_err(db_error)?;
+            if let Some(id) = number(&shows, show)? {
+                return if id == 0 {
+                    Err(Error::Corrupt)
+                } else {
+                    Ok(SubscriptionId(id))
+                };
+            }
+        }
+        let tx = self.write()?;
+        let id = {
+            let mut counters = tx.open_table(COUNTERS).map_err(db_error)?;
+            let id = number(&counters, NEXT_SUBSCRIPTION)?
+                .filter(|&n| n != 0)
+                .ok_or(Error::Corrupt)?;
+            let next = id.checked_add(1).ok_or(Error::IdExhausted)?;
+            counters.insert(NEXT_SUBSCRIPTION, next).map_err(db_error)?;
+            id
+        };
+        tx.open_table(SUBSCRIPTIONS)
+            .map_err(db_error)?
+            .insert(id, canonical)
+            .map_err(db_error)?;
+        tx.open_table(SHOWS)
+            .map_err(db_error)?
+            .insert(show, id)
+            .map_err(db_error)?;
+        self.done()?;
+        Ok(SubscriptionId(id))
     }
     /// One subscription per request, with no retained database cursor.
-    pub async fn next_subscription(
+    pub fn next_subscription(
         &mut self,
         after: Option<SubscriptionId>,
-    ) -> Result<Option<Subscription>, Error<F::Error>> {
+    ) -> Result<Option<Subscription>, Error> {
+        self.end_batch();
         self.begin()?;
-        let result = async {
-            let tx = self.db.read_transaction().await;
-            let lower = key(after.unwrap_or(SubscriptionId(0)));
-            let mut cursor = tx
-                .read_range((
-                    core::ops::Bound::Excluded(lower.as_slice()),
-                    core::ops::Bound::Excluded(b"g".as_slice()),
-                ))
-                .await
-                .map_err(|e| match e {
-                    ekv::Error::Flash(e) => Error::Storage(e),
-                    _ => Error::Corrupt,
-                })?;
-            let mut k = [0; 9];
-            let mut value = [0; 256];
-            let Some((kn, n)) = cursor.next(&mut k, &mut value).await.map_err(|e| match e {
-                ekv::CursorError::Flash(e) => Error::Storage(e),
-                _ => Error::Corrupt,
-            })?
-            else {
-                return Ok(None);
-            };
-            if kn != 9 || k[0] != b'f' {
-                return Err(Error::Corrupt);
-            }
-            let id = SubscriptionId(u64::from_be_bytes(
-                k[1..].try_into().map_err(|_| Error::Corrupt)?,
-            ));
-            let feed = core::str::from_utf8(&value[..n]).map_err(|_| Error::Corrupt)?;
-            if id.0 == 0 || FeedUrl::parse(feed).map_err(|_| Error::Corrupt)?.page != 0 {
-                return Err(Error::Corrupt);
-            }
-            Ok(Some(Subscription {
-                id,
-                feed: heapless::String::try_from(feed).map_err(|_| Error::Corrupt)?,
-            }))
-        }
-        .await;
+        let result = self.next_subscription_inner(after);
         self.finish(result)
     }
-}
-fn key(id: SubscriptionId) -> [u8; 9] {
-    let mut key = [b'f'; 9];
-    key[1..].copy_from_slice(&id.0.to_be_bytes());
-    key
+    fn next_subscription_inner(
+        &self,
+        after: Option<SubscriptionId>,
+    ) -> Result<Option<Subscription>, Error> {
+        let tx = self.db.begin_read().map_err(db_error)?;
+        let table = tx.open_table(SUBSCRIPTIONS).map_err(db_error)?;
+        let lower = Bound::Excluded(after.unwrap_or(SubscriptionId(0)).0);
+        let Some(entry) = table
+            .range((lower, Bound::Unbounded))
+            .map_err(db_error)?
+            .next()
+        else {
+            return Ok(None);
+        };
+        let (id, feed) = entry.map_err(db_error)?;
+        let (id, feed) = (SubscriptionId(id.value()), feed.value());
+        if id.0 == 0 || FeedUrl::parse(feed).map_err(|_| Error::Corrupt)?.page != 0 {
+            return Err(Error::Corrupt);
+        }
+        Ok(Some(Subscription {
+            id,
+            feed: heapless::String::try_from(feed).map_err(|_| Error::Corrupt)?,
+        }))
+    }
 }
 #[cfg(test)]
 #[path = "subscriptions_tests.rs"]

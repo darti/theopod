@@ -1,16 +1,19 @@
 //! Raw media allocation units, persisted in the catalogue (t-121, ADR-0020).
 //!
-//! Bitmap pages (`b`), the used counter (`m/units`) and per-episode unit
-//! records (`u`) only ever change together in one EKV transaction, so the
-//! bitmap always equals the union of the records' extents.
-use crate::catalogue::{Catalogue, EpisodeId, Error, commit_error, read_error, write_error};
+//! Bitmap pages (`UNIT_PAGES`), the used counter (`units_used`) and
+//! per-episode unit records (`UNIT_EXTENTS`) only ever change together in
+//! one write transaction, so the bitmap always equals the union of the
+//! records' extents.
+use crate::catalogue::{Catalogue, EpisodeId, Error, copy, db_error, number};
 use crate::media::FILE_PAGE;
+use crate::tables::{COUNTERS, UNIT_EXTENTS, UNIT_PAGES, UNITS_USED};
 use allocator_api2::{
     alloc::{AllocError, Allocator},
     vec::Vec,
 };
 use core::fmt;
-use ekv::flash::Flash;
+use core::ops::Bound;
+use redb::{ReadableDatabase, ReadableTable};
 
 pub(crate) use theo_storage::card_layout::UNIT_SECTORS;
 /// Bytes in one raw sector of the media region.
@@ -29,7 +32,6 @@ const EXTENT_BYTES: usize = 8;
 pub(crate) const MAX_EXTENTS: usize = (PAGE_BYTES - RECORD_HEADER) / EXTENT_BYTES;
 /// Units addressable with `u32` media-region sectors (2 TiB).
 pub(crate) const MAX_UNITS: u32 = ((u32::MAX as u64 + 1) / UNIT_SECTORS as u64) as u32;
-pub(crate) const UNITS_KEY: &[u8] = b"m/units";
 
 const _: () = assert!(RECORD_HEADER + MAX_EXTENTS * EXTENT_BYTES <= PAGE_BYTES);
 const _: () = assert!(UNITS_PER_PAGE as usize == PAGE_BYTES * 8);
@@ -313,104 +315,99 @@ impl<'a> RecordView<'a> {
     }
 }
 
-fn page_key(p: u16) -> [u8; 3] {
-    let b = p.to_be_bytes();
-    [b'b', b[0], b[1]]
-}
-fn record_key(id: EpisodeId) -> [u8; 9] {
-    let mut k = [0; 9];
-    k[0] = b'u';
-    k[1..].copy_from_slice(&id.0.to_be_bytes());
-    k
-}
-
-impl<F: Flash> Catalogue<F> {
+impl Catalogue {
     /// Fill `table` from the catalogue, checking bitmap against the counter.
-    pub(crate) async fn load_units<A: Allocator>(
+    pub(crate) fn load_units<A: Allocator>(
         &mut self,
         table: &mut UnitTable<A>,
-    ) -> Result<(), Error<F::Error>> {
+    ) -> Result<(), Error> {
+        self.end_batch();
         self.begin()?;
-        let result = async {
-            let tx = self.db.read_transaction().await;
-            let mut counter = [0; 4];
-            match tx.read(UNITS_KEY, &mut counter).await {
-                Ok(4) => (),
-                Ok(_) | Err(ekv::ReadError::KeyNotFound) => return Err(Error::Corrupt),
-                Err(e) => return Err(read_error(e)),
-            }
-            let counter = u32::from_le_bytes(counter);
-            for p in 0..table.pages() {
-                let page = table.page_mut(p);
-                match tx.read(&page_key(p), page).await {
-                    Ok(PAGE_BYTES) => (),
-                    Ok(_) => return Err(Error::Corrupt),
-                    Err(ekv::ReadError::KeyNotFound) => page.fill(0),
-                    Err(e) => return Err(read_error(e)),
-                }
-            }
-            if table.recount() != Some(counter) {
-                return Err(Error::Corrupt);
-            }
-            table.used = counter;
-            table.cursor = 0;
-            Ok(())
-        }
-        .await;
+        let result = self.load_units_inner(table);
         self.finish(result)
+    }
+    fn load_units_inner<A: Allocator>(&self, table: &mut UnitTable<A>) -> Result<(), Error> {
+        let tx = self.db.begin_read().map_err(db_error)?;
+        let counter = number(&tx.open_table(COUNTERS).map_err(db_error)?, UNITS_USED)?
+            .and_then(|n| u32::try_from(n).ok())
+            .ok_or(Error::Corrupt)?;
+        let pages = tx.open_table(UNIT_PAGES).map_err(db_error)?;
+        for p in 0..table.pages() {
+            let page = table.page_mut(p);
+            match copy(&pages, p, page)? {
+                Some(PAGE_BYTES) => (),
+                Some(_) => return Err(Error::Corrupt),
+                None => page.fill(0),
+            }
+        }
+        if table.recount() != Some(counter) {
+            return Err(Error::Corrupt);
+        }
+        table.used = counter;
+        table.cursor = 0;
+        Ok(())
     }
 
     /// Persist dirty bitmap pages, the counter and one record atomically.
-    /// `dirty` must be strictly increasing (keys are written in lexical
-    /// order); anything else is `Corrupt` and writes nothing.
-    pub(crate) async fn commit_units<A: Allocator>(
+    /// `dirty` must be strictly increasing and within the table; anything
+    /// else is `Corrupt` and writes nothing.
+    pub(crate) fn commit_units<A: Allocator>(
         &mut self,
         table: &UnitTable<A>,
         dirty: &[u16],
         id: EpisodeId,
         record: Option<&[u8]>,
-    ) -> Result<(), Error<F::Error>> {
+    ) -> Result<(), Error> {
         if !dirty.windows(2).all(|w| w[0] < w[1]) || dirty.iter().any(|&p| p >= table.pages()) {
             return Err(Error::Corrupt);
         }
+        self.end_batch();
         self.begin()?;
-        let result = async {
-            let mut tx = self.db.write_transaction().await;
-            // `b` < `m/units` < `u`: lexical order holds.
-            for &p in dirty {
-                tx.write(&page_key(p), table.page(p))
-                    .await
-                    .map_err(write_error)?;
-            }
-            tx.write(UNITS_KEY, &table.used().to_le_bytes())
-                .await
-                .map_err(write_error)?;
-            match record {
-                Some(r) => tx.write(&record_key(id), r).await.map_err(write_error)?,
-                None => tx.delete(&record_key(id)).await.map_err(write_error)?,
-            }
-            tx.commit().await.map_err(commit_error)
-        }
-        .await;
+        let result = self.commit_units_inner(table, dirty, id, record);
         self.finish(result)
+    }
+    fn commit_units_inner<A: Allocator>(
+        &mut self,
+        table: &UnitTable<A>,
+        dirty: &[u16],
+        id: EpisodeId,
+        record: Option<&[u8]>,
+    ) -> Result<(), Error> {
+        let tx = self.write()?;
+        {
+            let mut pages = tx.open_table(UNIT_PAGES).map_err(db_error)?;
+            for &p in dirty {
+                pages.insert(p, table.page(p)).map_err(db_error)?;
+            }
+        }
+        tx.open_table(COUNTERS)
+            .map_err(db_error)?
+            .insert(UNITS_USED, u64::from(table.used()))
+            .map_err(db_error)?;
+        {
+            let mut records = tx.open_table(UNIT_EXTENTS).map_err(db_error)?;
+            match record {
+                Some(r) => records.insert(id.0, r).map(drop),
+                None => records.remove(id.0).map(drop),
+            }
+            .map_err(db_error)?;
+        }
+        self.done()
     }
 
     /// The validated unit record of `id`, read into `buf`.
-    pub(crate) async fn unit_record<'a>(
+    pub(crate) fn unit_record<'a>(
         &mut self,
         id: EpisodeId,
         buf: &'a mut [u8],
-    ) -> Result<Option<RecordView<'a>>, Error<F::Error>> {
+    ) -> Result<Option<RecordView<'a>>, Error> {
+        self.end_batch();
         self.begin()?;
-        let result = async {
-            let tx = self.db.read_transaction().await;
-            match tx.read(&record_key(id), buf).await {
-                Ok(n) => Ok(Some(n)),
-                Err(ekv::ReadError::KeyNotFound) => Ok(None),
-                Err(e) => Err(read_error(e)),
-            }
-        }
-        .await;
+        let result = self
+            .db
+            .begin_read()
+            .map_err(db_error)
+            .and_then(|tx| copy(&tx.open_table(UNIT_EXTENTS).map_err(db_error)?, id.0, buf));
         let read = self.finish(result)?;
         match read {
             None => Ok(None),
@@ -423,53 +420,38 @@ impl<F: Flash> Catalogue<F> {
     }
 
     /// Up to `FILE_PAGE` episode ids holding unit records, after `after`.
-    pub(crate) async fn unit_ids(
+    pub(crate) fn unit_ids(
         &mut self,
         after: Option<EpisodeId>,
         out: &mut [EpisodeId; FILE_PAGE],
-        buf: &mut [u8],
-    ) -> Result<usize, Error<F::Error>> {
-        use core::ops::Bound;
+    ) -> Result<usize, Error> {
+        self.end_batch();
         self.begin()?;
-        let result = async {
-            let lower = record_key(after.unwrap_or(EpisodeId(0)));
-            let start = if after.is_some() {
-                Bound::Excluded(lower.as_slice())
-            } else {
-                Bound::Included(b"u".as_slice())
-            };
-            let tx = self.db.read_transaction().await;
-            let mut cursor = tx
-                .read_range((start, Bound::Excluded(b"v".as_slice())))
-                .await
-                .map_err(|e| match e {
-                    ekv::Error::Flash(e) => Error::Storage(e),
-                    ekv::Error::Corrupted => Error::Corrupt,
-                })?;
-            let mut key = [0; 9];
-            let mut count = 0;
-            while count < FILE_PAGE {
-                let Some((k, _)) = cursor.next(&mut key, buf).await.map_err(|e| match e {
-                    ekv::CursorError::Flash(e) => Error::Storage(e),
-                    _ => Error::Corrupt,
-                })?
-                else {
-                    break;
-                };
-                let [b'u', id @ ..] = key else {
-                    return Err(Error::Corrupt);
-                };
-                let id = u64::from_be_bytes(id);
-                if k != key.len() || id == 0 {
-                    return Err(Error::Corrupt);
-                }
-                out[count] = EpisodeId(id);
-                count += 1;
-            }
-            Ok(count)
-        }
-        .await;
+        let result = self.unit_ids_inner(after, out);
         self.finish(result)
+    }
+    fn unit_ids_inner(
+        &self,
+        after: Option<EpisodeId>,
+        out: &mut [EpisodeId; FILE_PAGE],
+    ) -> Result<usize, Error> {
+        let tx = self.db.begin_read().map_err(db_error)?;
+        let records = tx.open_table(UNIT_EXTENTS).map_err(db_error)?;
+        let lower = after.map_or(Bound::Unbounded, |a| Bound::Excluded(a.0));
+        let mut count = 0;
+        for entry in records
+            .range((lower, Bound::Unbounded))
+            .map_err(db_error)?
+            .take(FILE_PAGE)
+        {
+            let id = entry.map_err(db_error)?.0.value();
+            if id == 0 {
+                return Err(Error::Corrupt);
+            }
+            out[count] = EpisodeId(id);
+            count += 1;
+        }
+        Ok(count)
     }
 }
 

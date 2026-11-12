@@ -1,6 +1,5 @@
 //! Restart-only streaming audio publication.
 use crate::{catalogue::*, media::*, reclaim::make_space};
-use ekv::flash::Flash;
 use heapless::String;
 #[derive(Clone, Debug)]
 pub struct DownloadJob {
@@ -66,32 +65,30 @@ pub struct DownloadSession {
 }
 /// An episode larger than the whole media region can never be stored: free
 /// what it owns and set it `Missing`, so it is not retried.
-async fn refuse_oversize<F: Flash, M: MediaStore<F>>(
-    cat: &mut Catalogue<F>,
+async fn refuse_oversize<M: MediaStore>(
+    cat: &mut Catalogue,
     media: &mut M,
     id: EpisodeId,
     scratch: &mut [u8],
-) -> Result<(), MediaError<F::Error, M::Error>> {
+) -> Result<(), MediaError<M::Error>> {
     media
         .unlink_temp(cat, id)
         .await
         .map_err(MediaError::Media)?;
     cat.transition_audio(id, AudioState::Missing, scratch)
-        .await
         .map_err(MediaError::Catalogue)
 }
 impl DownloadSession {
     /// Restart only: discard partials before issuing an unconditional GET. Never
     /// issue Range/If-Range;200 therefore always begins a fresh file at offset0.
-    pub async fn start<F: Flash, M: MediaStore<F>>(
-        cat: &mut Catalogue<F>,
+    pub async fn start<M: MediaStore>(
+        cat: &mut Catalogue,
         media: &mut M,
         job: DownloadJob,
         scratch: &mut [u8],
-    ) -> Result<Start, MediaError<F::Error, M::Error>> {
+    ) -> Result<Start, MediaError<M::Error>> {
         let episode = cat
             .get(job.id, scratch)
-            .await
             .map_err(MediaError::Catalogue)?
             .ok_or(MediaError::InvalidInput)?;
         if episode.state.read || episode.state.audio != AudioState::Queued || media.active(job.id) {
@@ -107,7 +104,6 @@ impl DownloadSession {
         let capacity = media.space(cat).await.map_err(MediaError::Media)?.capacity;
         if job.expected_bytes.is_some_and(|n| n > capacity) {
             cat.transition_audio(job.id, AudioState::Missing, scratch)
-                .await
                 .map_err(MediaError::Catalogue)?;
             return Err(MediaError::InvalidInput);
         }
@@ -126,7 +122,6 @@ impl DownloadSession {
             return Ok(Start::WaitingForSpace);
         }
         cat.transition_audio(job.id, AudioState::Downloading, scratch)
-            .await
             .map_err(MediaError::Catalogue)?;
         let expected = job.expected_bytes;
         media
@@ -170,13 +165,13 @@ impl DownloadSession {
     }
     /// Written consumes all input. WaitingForSpace consumes none: retain this
     /// exact chunk until a relevant space/state change or explicit retry.
-    pub async fn push<F: Flash, M: MediaStore<F>>(
+    pub async fn push<M: MediaStore>(
         &mut self,
-        cat: &mut Catalogue<F>,
+        cat: &mut Catalogue,
         media: &mut M,
         bytes: &[u8],
         scratch: &mut [u8],
-    ) -> Result<ChunkOutcome, MediaError<F::Error, M::Error>> {
+    ) -> Result<ChunkOutcome, MediaError<M::Error>> {
         let valid = matches!(self.phase, Phase::Body | Phase::Waiting);
         self.phase = Phase::Poisoned;
         if !valid || bytes.is_empty() || bytes.len() > AUDIO_CHUNK {
@@ -213,12 +208,12 @@ impl DownloadSession {
     }
     /// Ordinary HTTP/network failure can retry without reboot. A storage-failed
     /// or cancelled session is left to mount invalidation and startup recovery.
-    pub async fn abort<F: Flash, M: MediaStore<F>>(
+    pub async fn abort<M: MediaStore>(
         self,
-        cat: &mut Catalogue<F>,
+        cat: &mut Catalogue,
         media: &mut M,
         scratch: &mut [u8],
-    ) -> Result<DownloadOutcome, MediaError<F::Error, M::Error>> {
+    ) -> Result<DownloadOutcome, MediaError<M::Error>> {
         if matches!(self.phase, Phase::Poisoned | Phase::Refused) {
             return Ok(DownloadOutcome::RetryLater);
         }
@@ -234,13 +229,13 @@ impl DownloadSession {
     }
     /// `body_complete` must come from successful transport framing, never an
     /// arbitrary socket EOF. A failed/short/stalled body remains non-Available.
-    pub async fn finish<F: Flash, M: MediaStore<F>>(
+    pub async fn finish<M: MediaStore>(
         self,
-        cat: &mut Catalogue<F>,
+        cat: &mut Catalogue,
         media: &mut M,
         body_complete: bool,
         scratch: &mut [u8],
-    ) -> Result<DownloadOutcome, MediaError<F::Error, M::Error>> {
+    ) -> Result<DownloadOutcome, MediaError<M::Error>> {
         if self.phase != Phase::Body
             || !body_complete
             || self.bytes == 0
@@ -250,7 +245,6 @@ impl DownloadSession {
         }
         let episode = cat
             .get(self.job.id, scratch)
-            .await
             .map_err(MediaError::Catalogue)?
             .ok_or(MediaError::InvalidState)?;
         if episode.state.audio != AudioState::Downloading
@@ -272,7 +266,6 @@ impl DownloadSession {
             .await
             .map_err(MediaError::Media)?;
         cat.finish_download(self.job.id, bytes, scratch)
-            .await
             .map_err(MediaError::Catalogue)?;
         Ok(DownloadOutcome::Complete)
     }

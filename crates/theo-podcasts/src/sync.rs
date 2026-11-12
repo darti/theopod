@@ -3,7 +3,6 @@ use crate::{
     catalogue::{Catalogue, Error, MAX_URL_BYTES, SubscriptionId},
     radio_france::{FeedError, RadioFranceFeed},
 };
-use ekv::flash::Flash;
 use heapless::String;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Checkpoint {
@@ -19,9 +18,9 @@ pub struct Validators<'a> {
     pub last_modified: Option<&'a str>,
 }
 #[derive(Debug)]
-pub enum SyncError<E> {
+pub enum SyncError {
     Feed(FeedError),
-    Catalogue(Error<E>),
+    Catalogue(Error),
     Protocol,
     Incomplete,
 }
@@ -109,11 +108,7 @@ impl SyncSession {
         }
         Validators::default()
     }
-    pub fn response<E>(
-        &mut self,
-        status: u16,
-        validators: Validators<'_>,
-    ) -> Result<(), SyncError<E>> {
+    pub fn response(&mut self, status: u16, validators: Validators<'_>) -> Result<(), SyncError> {
         let valid = self.phase == Phase::Response;
         let conditional = self.conditional();
         let can_304 = conditional.etag.is_some() || conditional.last_modified.is_some();
@@ -139,22 +134,25 @@ impl SyncSession {
         self.phase = Phase::Body;
         Ok(())
     }
-    pub async fn push<F: Flash>(
+    /// Upserts join the catalogue's batch for the current page; the batch
+    /// commits when [`Self::end_page`] ends the page, so a page's episodes,
+    /// identities and counter become durable together (ADR-0022).
+    pub fn push(
         &mut self,
-        cat: &mut Catalogue<F>,
+        cat: &mut Catalogue,
         bytes: &[u8],
         scratch: &mut [u8],
-    ) -> Result<(), SyncError<F::Error>> {
+    ) -> Result<(), SyncError> {
         let valid = self.phase == Phase::Body;
         self.phase = Phase::Failed;
         if !valid || bytes.len() > MAX_CHUNK_BYTES {
             return Err(SyncError::Protocol);
         }
+        cat.begin_batch();
         for &byte in bytes {
             if let Some(item) = self.parser.push(byte).map_err(SyncError::Feed)? {
                 let outcome = cat
                     .upsert(self.id, item.metadata(), scratch)
-                    .await
                     .map_err(SyncError::Catalogue)?;
                 self.progress.entries += 1;
                 self.progress.created += u64::from(outcome.created);
@@ -166,7 +164,10 @@ impl SyncSession {
     }
     /// Returns true when `url()` names the next required page. False means the
     /// session can commit. End-of-document alone never publishes a checkpoint.
-    pub fn end_page<E>(&mut self) -> Result<bool, SyncError<E>> {
+    /// A complete page commits the episodes pushed for it in one transaction.
+    /// After a feed or protocol error the page's upserts stay pending: the
+    /// next catalogue operation commits them (upserts are idempotent).
+    pub fn end_page(&mut self, cat: &mut Catalogue) -> Result<bool, SyncError> {
         let old = core::mem::replace(&mut self.phase, Phase::Failed);
         if old == Phase::NotModified {
             self.phase = Phase::Ready;
@@ -185,28 +186,27 @@ impl SyncSession {
                     .map_err(SyncError::Feed)?;
                 self.url = String::try_from(next).map_err(|_| SyncError::Feed(FeedError::Limit))?;
                 self.page += 1;
+                cat.commit_batch().map_err(SyncError::Catalogue)?;
                 self.parser = RadioFranceFeed::new();
                 self.phase = Phase::Response;
                 Ok(true)
             }
             None => {
+                cat.commit_batch().map_err(SyncError::Catalogue)?;
                 self.checkpoint.pages = self.page + 1;
                 self.phase = Phase::Ready;
                 Ok(false)
             }
         }
     }
-    pub async fn complete<F: Flash>(
-        self,
-        cat: &mut Catalogue<F>,
-        scratch: &mut [u8],
-    ) -> Result<Progress, SyncError<F::Error>> {
+    /// Commits any pending batch, then the checkpoint.
+    pub fn complete(self, cat: &mut Catalogue, scratch: &mut [u8]) -> Result<Progress, SyncError> {
         if self.phase != Phase::Ready {
             return Err(SyncError::Incomplete);
         }
         if !self.unchanged {
+            cat.commit_batch().map_err(SyncError::Catalogue)?;
             cat.save_sync_checkpoint(self.id, &self.checkpoint, scratch)
-                .await
                 .map_err(SyncError::Catalogue)?;
         }
         Ok(self.progress)

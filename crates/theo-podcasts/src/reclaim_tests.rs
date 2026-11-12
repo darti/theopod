@@ -58,8 +58,7 @@ fn reclamation_stops_at_deficit_and_preserves_protected_files() {
     };
     futures::executor::block_on(async {
         let image = Image::new();
-        image.sync_to_disk.set(false);
-        let mut cat = image.create().await;
+        let mut cat = image.create();
         let mut media = HostMedia::new(root_for(&image));
         media.physical_sync = false;
         let mut scratch = [0; MAX_RECORD_BYTES];
@@ -71,8 +70,7 @@ fn reclamation_stops_at_deficit_and_preserves_protected_files() {
             true,
             &[1; 4096],
             &mut scratch,
-        )
-        .await;
+        );
         let new = available(
             &mut cat,
             &mut media,
@@ -81,8 +79,7 @@ fn reclamation_stops_at_deficit_and_preserves_protected_files() {
             true,
             &[2; 8192],
             &mut scratch,
-        )
-        .await;
+        );
         let unread = available(
             &mut cat,
             &mut media,
@@ -91,8 +88,7 @@ fn reclamation_stops_at_deficit_and_preserves_protected_files() {
             false,
             &[3; 4096],
             &mut scratch,
-        )
-        .await;
+        );
         let active = available(
             &mut cat,
             &mut media,
@@ -101,8 +97,7 @@ fn reclamation_stops_at_deficit_and_preserves_protected_files() {
             true,
             &[4; 4096],
             &mut scratch,
-        )
-        .await;
+        );
         media.active.insert(active.0);
         media.other_bytes = media.capacity - reserve(media.capacity) - 20480 - 4096;
         assert!(
@@ -112,12 +107,7 @@ fn reclamation_stops_at_deficit_and_preserves_protected_files() {
         );
         assert_eq!(std::fs::read(media.path(old, false)).unwrap().len(), 4096);
         assert_eq!(
-            cat.get(old, &mut scratch)
-                .await
-                .unwrap()
-                .unwrap()
-                .state
-                .audio,
+            cat.get(old, &mut scratch).unwrap().unwrap().state.audio,
             AudioState::Available
         );
         assert!(
@@ -127,7 +117,7 @@ fn reclamation_stops_at_deficit_and_preserves_protected_files() {
         );
         assert!(!media.path(old, false).exists());
         assert!(media.path(new, false).exists());
-        let e = cat.get(old, &mut scratch).await.unwrap().unwrap();
+        let e = cat.get(old, &mut scratch).unwrap().unwrap();
         assert!(e.state.read);
         assert_eq!(e.state.audio, AudioState::Reclaimed);
         assert!(

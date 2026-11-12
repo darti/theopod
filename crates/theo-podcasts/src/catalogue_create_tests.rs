@@ -1,41 +1,71 @@
 use super::*;
-use crate::test_support::Image;
-use futures::executor::block_on;
-use theo_storage::page_store::PageStore;
+use crate::test_support::{Image, SECTORS};
+use theo_storage::{
+    redb_backend::{BackendError, RegionBackend},
+    test_disk::TestDisk,
+};
 
 #[test]
-fn create_into_fills_the_slot_with_a_reopenable_catalogue() {
-    // Regression (t-133): on-device provisioning creates the catalogue in
-    // place; a by-value catalogue overflowed core1's stack.
-    block_on(async {
-        let image = Image::new();
-        let mut slot = None;
-        Catalogue::create_into(
-            &mut slot,
-            PageStore::create(image.file(), 32).await.unwrap(),
-        )
-        .await
-        .unwrap();
-        assert!(slot.is_some());
-        drop(slot);
-        let mut cat = image.reopen().await;
-        assert!(cat.next_subscription(None).await.unwrap().is_none());
-    });
+fn formatted_region_opens_as_an_empty_catalogue() {
+    // Regression (t-133): provisioning writes only the length record; the
+    // first open creates the tables and counters.
+    let image = Image::new();
+    let mut cat = image.create();
+    let mut scratch = [0; MAX_RECORD_BYTES];
+    let page = cat.scan(None, &mut scratch, |_| ()).unwrap();
+    assert_eq!(page.records, 0);
+    assert!(!page.has_more);
+    assert!(cat.next_subscription(None).unwrap().is_none());
 }
 
 #[test]
-fn create_into_failure_leaves_the_slot_empty() {
-    // Regression (t-133): a failed in-place create must not leave a
-    // catalogue that looks usable.
-    block_on(async {
-        let image = Image::new();
-        let store = PageStore::create(image.file(), 32).await.unwrap();
-        image.fail.set(true);
-        let mut slot = None;
-        assert!(matches!(
-            Catalogue::create_into(&mut slot, store).await,
-            Err(Error::Storage(_))
-        ));
-        assert!(slot.is_none());
-    });
+fn second_open_sees_the_same_counters() {
+    let image = Image::new();
+    let mut cat = image.create();
+    let mut scratch = [0; MAX_RECORD_BYTES];
+    let first = cat
+        .upsert(
+            SubscriptionId(1),
+            EpisodeMetadata {
+                guid: Some("g"),
+                title: "t",
+                enclosure: "https://x/a.mp3",
+                description: None,
+                published: None,
+                enclosure_bytes: None,
+                duration_seconds: None,
+            },
+            &mut scratch,
+        )
+        .unwrap();
+    assert_eq!(first.id, EpisodeId(1));
+    drop(cat);
+    let mut cat = image.reopen();
+    let second = cat
+        .upsert(
+            SubscriptionId(1),
+            EpisodeMetadata {
+                guid: Some("h"),
+                title: "t",
+                enclosure: "https://x/b.mp3",
+                description: None,
+                published: None,
+                enclosure_bytes: None,
+                duration_seconds: None,
+            },
+            &mut scratch,
+        )
+        .unwrap();
+    assert_eq!(second.id, EpisodeId(2));
+}
+
+#[test]
+fn unformatted_region_is_corrupt() {
+    // Regression (t-133): a region without a length record is never
+    // formatted at boot: the backend refuses it before redb sees it.
+    let disk = TestDisk::new(SECTORS);
+    // SAFETY: single-threaded test.
+    let backend = unsafe { RegionBackend::new(disk.clone(), SECTORS) };
+    assert!(matches!(backend, Err(BackendError::Corrupt)));
+    assert_eq!(disk.state().writes, 0);
 }

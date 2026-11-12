@@ -10,7 +10,7 @@ fn owner_imports_downloads_and_marks_read_through_bounded_commands() {
     // Regression (t-110): the real owner connects persisted follows, feed parsing, audio publication and read state.
     block_on(async {
         let image = Image::new();
-        let cat = image.create().await;
+        let cat = image.create();
         let media = HostMedia::new(root_for(&image));
         let mut owner = Runtime::new(cat, media);
         let mut scratch = [0; MAX_RECORD_BYTES];
@@ -96,21 +96,14 @@ fn owner_imports_downloads_and_marks_read_through_bounded_commands() {
             .handle(Command::MarkRead(episode), &mut scratch)
             .await
             .unwrap();
-        let e = owner
-            .catalogue
-            .get(episode, &mut scratch)
-            .await
-            .unwrap()
-            .unwrap();
+        let e = owner.catalogue.get(episode, &mut scratch).unwrap().unwrap();
         assert!(e.state.read);
         assert_eq!(e.state.audio, AudioState::Available);
         drop(owner);
         assert!(
             image
                 .reopen()
-                .await
                 .get(episode, &mut scratch)
-                .await
                 .unwrap()
                 .unwrap()
                 .state
@@ -123,7 +116,7 @@ fn malformed_feed_does_not_disable_owner_but_storage_failure_does() {
     // Regression (t-110): transport/parser rejection leaves logs usable; media errors invalidate queued domain work.
     block_on(async {
         let image = Image::new();
-        let mut owner = Runtime::new(image.create().await, HostMedia::new(root_for(&image)));
+        let mut owner = Runtime::new(image.create(), HostMedia::new(root_for(&image)));
         let mut scratch = [0; MAX_RECORD_BYTES];
         owner
             .handle(
@@ -173,7 +166,7 @@ fn job_continuations_visit_every_queued_episode_in_one_page() {
     // Regression (t-110): returning the scan page's last ID must not skip queued jobs.
     block_on(async {
         let image = Image::new();
-        let mut cat = image.create().await;
+        let mut cat = image.create();
         let mut scratch = [0; MAX_RECORD_BYTES];
         for guid in ["one", "two", "three"] {
             cat.upsert(
@@ -189,7 +182,6 @@ fn job_continuations_visit_every_queued_episode_in_one_page() {
                 },
                 &mut scratch,
             )
-            .await
             .unwrap();
         }
         let mut owner = Runtime::new(cat, HostMedia::new(root_for(&image)));
@@ -224,7 +216,7 @@ fn a_second_sync_start_cannot_replace_an_unfinished_import() {
     // Regression (t-110): concurrent sync triggers must preserve the active parser/session.
     block_on(async {
         let image = Image::new();
-        let mut owner = Runtime::new(image.create().await, HostMedia::new(root_for(&image)));
+        let mut owner = Runtime::new(image.create(), HostMedia::new(root_for(&image)));
         let mut scratch = [0; MAX_RECORD_BYTES];
         owner
             .handle(
@@ -274,7 +266,7 @@ fn owner_exposes_committed_validators_and_accepts_not_modified() {
     // Regression (t-110): the transport must use a completed single-page checkpoint for HTTP304.
     block_on(async {
         let image = Image::new();
-        let mut owner = Runtime::new(image.create().await, HostMedia::new(root_for(&image)));
+        let mut owner = Runtime::new(image.create(), HostMedia::new(root_for(&image)));
         let mut scratch = [0; MAX_RECORD_BYTES];
         owner
             .handle(
@@ -340,60 +332,13 @@ fn owner_exposes_committed_validators_and_accepts_not_modified() {
     });
 }
 #[test]
-fn cancellation_during_feed_commit_permanently_rejects_later_owner_commands() {
-    // Regression (t-110): sleep/cancellation at a catalogue await cannot reuse a partial writer.
-    use futures::FutureExt;
-    block_on(async {
-        let image = Image::new();
-        let mut owner = Runtime::new(image.create().await, HostMedia::new(root_for(&image)));
-        let mut scratch = [0; MAX_RECORD_BYTES];
-        owner
-            .handle(
-                Command::SyncStart(SubscriptionId(1), FEED.try_into().unwrap()),
-                &mut scratch,
-            )
-            .await
-            .unwrap();
-        owner
-            .handle(
-                Command::SyncHeaders {
-                    status: 200,
-                    etag: Default::default(),
-                    modified: Default::default(),
-                },
-                &mut scratch,
-            )
-            .await
-            .unwrap();
-        image.hang.set(true);
-        let xml = b"<rss><channel><item><guid>cancel</guid><title>Cancelled</title><enclosure url=\"https://media.radiofrance-podcast.net/audio.mp3\"/></item></channel></rss>";
-        assert!(
-            owner
-                .handle(
-                    Command::SyncChunk(heapless::Vec::from_slice(xml).unwrap()),
-                    &mut scratch
-                )
-                .now_or_never()
-                .is_none()
-        );
-        image.hang.set(false);
-        assert_eq!(
-            owner
-                .handle(Command::Follow(FEED.try_into().unwrap()), &mut scratch)
-                .await
-                .err(),
-            Some(Error::Storage)
-        );
-    });
-}
-#[test]
 fn cancelled_audio_append_stays_unpublished_and_recovery_requeues_after_reopen() {
     // Regression (t-110): a sleep during file I/O rejects queued writes; only a fresh boot may recover it.
     use crate::recovery::recover_one;
     use futures::FutureExt;
     block_on(async {
         let image = Image::new();
-        let mut cat = image.create().await;
+        let mut cat = image.create();
         let mut scratch = [0; MAX_RECORD_BYTES];
         let id = cat
             .upsert(
@@ -409,11 +354,9 @@ fn cancelled_audio_append_stays_unpublished_and_recovery_requeues_after_reopen()
                 },
                 &mut scratch,
             )
-            .await
             .unwrap()
             .id;
-        let job =
-            DownloadJob::from_episode(cat.get(id, &mut scratch).await.unwrap().unwrap()).unwrap();
+        let job = DownloadJob::from_episode(cat.get(id, &mut scratch).unwrap().unwrap()).unwrap();
         let mut owner = Runtime::new(cat, HostMedia::new(root_for(&image)));
         owner
             .handle(Command::DownloadStart(job), &mut scratch)
@@ -455,17 +398,12 @@ fn cancelled_audio_append_stays_unpublished_and_recovery_requeues_after_reopen()
         } = owner;
         drop(catalogue);
         media.reopen();
-        let mut cat = image.reopen().await;
+        let mut cat = image.reopen();
         recover_one(&mut cat, &mut media, id, &mut scratch)
             .await
             .unwrap();
         assert_eq!(
-            cat.get(id, &mut scratch)
-                .await
-                .unwrap()
-                .unwrap()
-                .state
-                .audio,
+            cat.get(id, &mut scratch).unwrap().unwrap().state.audio,
             AudioState::Queued
         );
     });
@@ -481,15 +419,15 @@ enum ClassifiedError {
     Io,
     Refused,
 }
-impl<F: Flash> MediaStore<F> for Classified {
+impl MediaStore for Classified {
     type Error = ClassifiedError;
     fn is_fatal(error: &ClassifiedError) -> bool {
         matches!(error, ClassifiedError::Io)
     }
     fn active(&self, id: EpisodeId) -> bool {
-        MediaStore::<F>::active(&self.inner, id)
+        MediaStore::active(&self.inner, id)
     }
-    async fn space(&mut self, cat: &mut Catalogue<F>) -> Result<Space, ClassifiedError> {
+    async fn space(&mut self, cat: &mut Catalogue) -> Result<Space, ClassifiedError> {
         match self.fail {
             Some(true) => Err(ClassifiedError::Io),
             Some(false) => Err(ClassifiedError::Refused),
@@ -498,7 +436,7 @@ impl<F: Flash> MediaStore<F> for Classified {
     }
     async fn reset_temp(
         &mut self,
-        cat: &mut Catalogue<F>,
+        cat: &mut Catalogue,
         id: EpisodeId,
         expected: Option<u64>,
     ) -> Result<(), ClassifiedError> {
@@ -507,7 +445,7 @@ impl<F: Flash> MediaStore<F> for Classified {
     }
     async fn append_temp(
         &mut self,
-        cat: &mut Catalogue<F>,
+        cat: &mut Catalogue,
         id: EpisodeId,
         bytes: &[u8],
     ) -> Result<(), ClassifiedError> {
@@ -516,7 +454,7 @@ impl<F: Flash> MediaStore<F> for Classified {
     }
     async fn sync_temp(
         &mut self,
-        cat: &mut Catalogue<F>,
+        cat: &mut Catalogue,
         id: EpisodeId,
     ) -> Result<u64, ClassifiedError> {
         let r = self.inner.sync_temp(cat, id).await;
@@ -524,7 +462,7 @@ impl<F: Flash> MediaStore<F> for Classified {
     }
     async fn publish_temp(
         &mut self,
-        cat: &mut Catalogue<F>,
+        cat: &mut Catalogue,
         id: EpisodeId,
     ) -> Result<(), ClassifiedError> {
         let r = self.inner.publish_temp(cat, id).await;
@@ -532,7 +470,7 @@ impl<F: Flash> MediaStore<F> for Classified {
     }
     async fn unlink_temp(
         &mut self,
-        cat: &mut Catalogue<F>,
+        cat: &mut Catalogue,
         id: EpisodeId,
     ) -> Result<(), ClassifiedError> {
         let r = self.inner.unlink_temp(cat, id).await;
@@ -540,7 +478,7 @@ impl<F: Flash> MediaStore<F> for Classified {
     }
     async fn unlink_audio(
         &mut self,
-        cat: &mut Catalogue<F>,
+        cat: &mut Catalogue,
         id: EpisodeId,
     ) -> Result<(), ClassifiedError> {
         let r = self.inner.unlink_audio(cat, id).await;
@@ -548,7 +486,7 @@ impl<F: Flash> MediaStore<F> for Classified {
     }
     async fn audio_len(
         &mut self,
-        cat: &mut Catalogue<F>,
+        cat: &mut Catalogue,
         id: EpisodeId,
     ) -> Result<Option<u64>, ClassifiedError> {
         let r = self.inner.audio_len(cat, id).await;
@@ -556,7 +494,7 @@ impl<F: Flash> MediaStore<F> for Classified {
     }
     async fn list_ids(
         &mut self,
-        cat: &mut Catalogue<F>,
+        cat: &mut Catalogue,
         after: Option<EpisodeId>,
         out: &mut [EpisodeId; FILE_PAGE],
     ) -> Result<usize, ClassifiedError> {
@@ -571,7 +509,7 @@ impl<F: Flash> MediaStore<F> for Classified {
 fn non_fatal_media_error_is_rejected_not_disabling() {
     block_on(async {
         let image = Image::new();
-        let mut cat = image.create().await;
+        let mut cat = image.create();
         let mut scratch = [0; MAX_RECORD_BYTES];
         let id = cat
             .upsert(
@@ -587,11 +525,9 @@ fn non_fatal_media_error_is_rejected_not_disabling() {
                 },
                 &mut scratch,
             )
-            .await
             .unwrap()
             .id;
-        let job =
-            DownloadJob::from_episode(cat.get(id, &mut scratch).await.unwrap().unwrap()).unwrap();
+        let job = DownloadJob::from_episode(cat.get(id, &mut scratch).unwrap().unwrap()).unwrap();
         let media = Classified {
             inner: HostMedia::new(root_for(&image)),
             fail: Some(false),

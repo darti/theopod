@@ -123,7 +123,11 @@ pub(crate) fn db_error(error: impl Into<redb::Error>) -> Error {
 /// redb's open-time refusal of a non-empty file without its magic number.
 /// std builds tag it `InvalidData`, no_std builds keep only this message,
 /// so the message is what both can match (redb is pinned, ADR-0022).
-const NOT_REDB: &str = "Not a redb database";
+///
+/// This text is redb `=4.4.0`'s (`page_manager.rs`, `io::invalid_data`). A
+/// redb upgrade must re-check it: `region_without_redb_magic_is_corrupt`
+/// and `redb_refusal_text_matches_not_redb` fail if the message changes.
+pub(crate) const NOT_REDB: &str = "Not a redb database";
 
 /// Map an open error: a region that is not a redb database is `Corrupt`
 /// (not a device failure); everything else as [`db_error`].

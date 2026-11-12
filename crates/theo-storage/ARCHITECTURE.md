@@ -1,9 +1,9 @@
 # theo-storage
 
 HAL-independent SD storage for Theo Pod: bounded log buffering, the
-LittleFS sector adapter, checked card regions and the EKV page store.
+LittleFS sector adapter, checked card regions and the redb storage backend.
 `no_std` + `alloc`, unit-tested on the host (`just test`). Dependencies:
-`littlefs-rust` (vendored, ADR-0012), `ekv`, `embassy-*`, `allocator-api2`.
+`littlefs-rust` (vendored, ADR-0012), `redb` (ADR-0022), `embassy-*`, `allocator-api2`.
 Used by the firmware (`src/device/sd_worker.rs`) and `theo-podcasts`.
 
 ## Contents
@@ -17,17 +17,23 @@ Used by the firmware (`src/device/sd_worker.rs`) and `theo-podcasts`.
 - `card_layout.rs`, `regions.rs`: versioned region descriptors (sectors 0
   and 8) and `RegionIo`, one device split into database, log and media
   ranges; `discover` is for host tooling. Layouts are created only by
-  `theo_podcasts::provision::provision_v2` (ADR-0021).
+  `theo_podcasts::provision::provision_v3` (ADR-0021/0022).
 - `scope.rs`: failure scopes, the owner's `after_failure`, `OWNER_MARGIN_MS`.
 - `sector_bus.rs`: owned-buffer mailbox from the synchronous filesystem core
   to the async SD service; late replies after cancellation are refused.
-- `page_store.rs`: copy-on-write EKV pages on raw sectors (ADR-0011/0015).
+- `redb_backend.rs`: `RegionBackend`, redb's `StorageBackend` over the
+  database region. Two alternating length-record sectors (generation, length,
+  CRC) precede the file; growth is not zero-filled; `format` writes an empty
+  record. `unsafe fn new` carries a single-execution-context contract (the
+  backend claims `Send + Sync` for redb without being thread-safe).
+- `test_disk.rs` (`test-disk` feature): sparse in-memory `SectorIo` with
+  crash injection, shared by the storage and catalogue tests.
 - `future.rs`: PSRAM placement of large futures; `run_in` polls one apart.
-- `fat_page_file.rs` (`legacy-fat` feature): the former FAT page transport.
 
-## Card layout v2
+## Card layout v3
 
-Only v2 descriptors are accepted: the EKV database from sector 16, a 16 MiB
+Only v3 descriptors are accepted: the redb database (a fixed 64 MiB,
+`DATABASE_SECTORS`) from sector 16, a 16 MiB
 log LittleFS (`LOG_SECTORS`), then raw 1 MiB media units (`UNIT_SECTORS`).
 `regions::split` yields three disjoint `RegionIo` halves over one sector
 client. Layout, unit store and failure scopes: ADR-0020.
@@ -45,8 +51,7 @@ client. Layout, unit store and failure scopes: ADR-0020.
 ## Invariants
 
 - Nothing in this crate formats except `provision_once` on a `Corrupt`
-  mount; v2 layouts come only from explicit provisioning (ADR-0021).
+  mount; v3 layouts come only from explicit provisioning (ADR-0021).
 - Any failed device call disables its adapter until reboot. `RegionIo`
   drops the shared device, disabling every region, only when
-  `device_failed()` or an in-flight `AsyncRegion` sector is cancelled;
-  other failures stay in their scope (`failure_scope`, `after_failure`).
+  `device_failed()`; other failures stay in their scope (`failure_scope`, `after_failure`).

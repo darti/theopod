@@ -86,3 +86,24 @@ fn region_without_redb_magic_is_corrupt() {
         Err(Error::Corrupt)
     ));
 }
+
+#[test]
+fn redb_refusal_text_matches_not_redb() {
+    // Regression (t-133): the no_std `Corrupt` mapping matches redb 4.4.0's
+    // message text; fail loudly if a redb upgrade changes it.
+    let image = Image::new();
+    {
+        let backend = image.backend();
+        redb::StorageBackend::set_len(&backend, 4096).unwrap();
+        redb::StorageBackend::write(&backend, 0, &[0x5a; 4096]).unwrap();
+        redb::StorageBackend::sync_data(&backend).unwrap();
+    }
+    let error = redb::Database::builder()
+        .create_with_backend(image.backend())
+        .err()
+        .unwrap();
+    assert!(
+        std::format!("{error}").contains(crate::catalogue::NOT_REDB),
+        "{error}"
+    );
+}

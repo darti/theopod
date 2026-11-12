@@ -1,11 +1,11 @@
-//! HAL-independent SD storage: log buffering, LittleFS sectors, regions, EKV.
+//! HAL-independent SD storage: log buffering, LittleFS sectors, regions, redb backend.
 //!
 //! - [`LogBuffer`], [`rotation_needed`]: bounded, recoverable log batches.
 //! - [`littlefs`]: `SectorStorage`, `mount_for_writes`, `append_log`, `log_tail`.
 //! - [`card_layout`], [`regions`]: checked database/media card regions.
 //! - [`scope`]: which storage scope a failed request disables.
 //! - [`sector_bus`]: cancellation-safe mailbox to the async SD service.
-//! - [`page_store`]: copy-on-write EKV pages on raw sectors.
+//! - [`redb_backend`]: redb storage backend over the database region.
 //!
 //! See `ARCHITECTURE.md` for extension points and invariants.
 
@@ -15,10 +15,7 @@ extern crate alloc;
 
 pub mod card_layout;
 pub mod crc;
-#[cfg(feature = "legacy-fat")]
-pub mod fat_page_file;
 pub mod littlefs;
-pub mod page_store;
 pub mod redb_backend;
 pub mod regions;
 pub mod scope;
@@ -219,9 +216,5 @@ pub fn sector_index(position: u64, blocks: u64, len: usize) -> Option<u32> {
     }
     u32::try_from(block).ok()
 }
-
-#[cfg(test)]
-#[path = "page_store_rollover_tests.rs"]
-mod page_store_rollover_tests;
 
 pub mod future;

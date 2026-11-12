@@ -1,5 +1,5 @@
 [workspace]
-exclude = ["vendor/ekv", "vendor/littlefs"]
+exclude = ["vendor/littlefs"]
 members = ["crates/theo-drivers", "crates/theo-frame-dump", "crates/theo-storage", "crates/theo-podcasts", "tools/frame-png"]
 
 [workspace.package]
@@ -18,13 +18,8 @@ embassy-executor = "0.10"
 embassy-futures = "0.1"
 embassy-sync = "0.8"
 embassy-time = "0.5"
-hadris-fat = { version = "3.0.0-rc.2", default-features = false, features = ["async", "write"] }
-hadris-io = { version = "3.0.0-rc.2", default-features = false }
-hadris-fs = { version = "3.0.0-rc.2", default-features = false }
-hadris-storage = { version = "3.0.0-rc.2", default-features = false, features = ["async"] }
 embedded-hal = "1.0"
 embedded-hal-async = "1.0"
-ekv = { version = "=1.0.0", features = ["crc", "max-page-count-4096", "max-value-size-4096"] }
 esp-alloc = { version = "0.11", features = ["esp32s3"] }
 esp-backtrace = { version = "0.20", features = ["esp32s3", "panic-handler", "println"] }
 esp-bootloader-esp-idf = { version = "0.6", features = ["esp32s3"] }
@@ -130,10 +125,6 @@ debug = 2
 [profile.dev]
 debug = 2
 opt-level = "s"
-
-# EKV 1.0.0 recovery correction; provenance and removal criteria in vendor/ekv/THEO-PATCH.md.
-[patch.crates-io]
-ekv = { path = "vendor/ekv" }
 
 # Temporary exact LittleFS correction explicitly authorized2026-10-31.
 # Provenance/removal criteria:vendor/littlefs/THEO-PATCH.md.

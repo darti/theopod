@@ -1,6 +1,6 @@
 # ADR-0021: Provision layout v2 on the device
 
-- Status: Implemented; provisioning validated on the board
+- Status: Implemented; provisioning validated on the board. Amended by ADR-0022: layout v3, `provision_v3` writes an empty redb length record
 - Date: 2026-11-11
 - Related: t-133, t-121; ADR-0015, ADR-0018, ADR-0020
 

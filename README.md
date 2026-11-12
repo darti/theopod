@@ -103,7 +103,7 @@ flush before deep sleep; a sudden reset can lose the current in-memory batch.
 Startup identification/mount waits are bounded at 3 s/2 s, and each write
 batch at 500 ms. Mount also runs LittleFS's deferred maintenance so the first
 append does not pay for it, and a 32-sector read cache (about 16.5 KiB of
-PSRAM) absorbs repeated metadata reads (ADR-0019). On a v2 card the
+PSRAM) absorbs repeated metadata reads (ADR-0019). On a v3 card the
 log volume is separate from media, so that maintenance no longer grows with
 stored podcasts (ADR-0020); a legacy whole-card volume is unchanged. A card/write/sync error or timeout disables SD logging until
 the next boot, preserves the unwritten batch in RAM, and leaves the UI and
@@ -158,16 +158,14 @@ See [ADR-0012](docs/adr/0012-use-the-safe-littlefs-rust-api.md).
 
 ## Podcast storage groundwork
 
-`theo-storage` provides an asynchronous EKV 1.0.0 backend for a preallocated
-FAT file (available with `theo-storage/legacy-fat`). Two CRC-protected copies of each logical page preserve the previous
-copy while a replacement is written. Incompatible format/configuration headers
-are rejected; failed or cancelled I/O disables the backend until reopening
-after reboot. See [ADR-0011](docs/adr/0011-adapt-ekv-to-sector-storage-with-copy-on-write-pages.md).
+`theo-storage` provides `RegionBackend`, a redb storage backend over the
+64 MiB database region of a v3 card. Two alternating CRC-protected length
+records make each commit durable; a failed or cancelled operation disables the
+backend until reboot. See
+[ADR-0022](docs/adr/0022-store-the-podcast-catalogue-in-redb.md).
 
-This backend is not initialized by the running firmware. Its FAT-file transport
-is retained for host tests, not used by the LittleFS runtime. EKV placement on
-a separate raw region remains to be designed; a large random-access database
-file would cause costly LittleFS tail rewrites. Radio France
+The firmware opens the catalogue at mount on a provisioned v3 card and never
+formats it. Radio France
 subscription commands, feed synchronization, downloads and space reclamation
 remain planned in [the implementation plan](docs/superpowers/plans/2026-10-29-radio-france.md).
 It does not establish physical power-loss safety for consumer SD cards or FAT
@@ -252,14 +250,12 @@ royalty-free license does not cover embedded systems, so a distributed
 firmware image must comply with the GPL-3.0 (this source is compatible with
 it) unless a Slint commercial license applies.
 
-### Extended database recovery checks
+### Database recovery checks
 
-`just test-storage-recovery` runs the long, release-mode EKV/PageStore fault
-sweeps on the host. Run it when changing the engine, page format or a sector
-backend. It includes repeated metadata rollover, deletes, read-state retention,
-sector errors/cancellation, and commits after recovery. The default host suite
-retains the short metadata-publication guard. Neither recipe accesses the board.
-The local EKV correction and future checked card layout are recorded in
+The redb backend's crash sweeps (a power cut at every sector write, with and
+without torn sectors) run in the default host suite; the sector-count bound
+tests run in release only. None accesses the board. The layout descriptor API
+is recorded in
 [ADR-0015](docs/adr/0015-correct-ekv-publication-and-describe-sd-regions.md);
 existing whole-card cards remain log-only; podcast activation requires a separately prepared image.
 
@@ -289,13 +285,13 @@ Normal `just build` and release automation do not read the local configuration.
 `just build-network /tmp/fixture.toml` can verify the enabled build with dummy
 credentials.
 
-Podcasts require a versioned card layout (v2), made only by `just
+Podcasts require a versioned card layout (v3), made only by `just
 prepare-image` or `just sd-provision-v3` below. Existing whole-card LittleFS
 cards keep their logs and stay podcast-offline until explicitly provisioned.
 Boot never formats, partitions or migrates them. `just prepare-image NEW_PATH EXACT_CARD_SECTORS`
-creates a **new regular host image**, prepares a 4096-page database (catalogue schema 2) and a 16 MiB log-only
-LittleFS, leaves the rest as raw 1 MiB media units, syncs the stores, then
-publishes immutable v2 descriptors (ADR-0020).
+creates a **new regular host image**, writes an empty redb length record for the 64 MiB database region and a
+16 MiB log-only LittleFS, leaves the rest as raw 1 MiB media units, syncs the
+stores, then publishes immutable v3 descriptors (ADR-0020, ADR-0022).
 It refuses every existing destination, including device paths and symlinks.
 This command does not install an image onto a card. Installing one is a separate
 destructive action requiring explicit authorization and an exact capacity match.

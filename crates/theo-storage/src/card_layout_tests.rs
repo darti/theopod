@@ -83,7 +83,7 @@ fn incompatible_or_conflicting_descriptors_are_rejected_without_guessing() {
 
 // Regression (t-121): logs get their own region so log allocation never scans media.
 #[test]
-fn v2_layout_places_log_then_unit_aligned_media() {
+fn layout_places_log_then_unit_aligned_media() {
     let card = 8 * 1024 * 1024 * 2; // 8 GiB in sectors
     let layout = CardLayout::new(card).unwrap();
     let db_end = layout.database().start() + layout.database().sectors();
@@ -118,7 +118,7 @@ fn v1_descriptor_is_rejected_as_obsolete() {
 }
 
 #[test]
-fn v2_round_trips_and_too_small_media_is_rejected() {
+fn layout_round_trips_and_too_small_media_is_rejected() {
     let card = 8 * 1024 * 1024 * 2;
     let layout = CardLayout::new(card).unwrap();
     let bytes = layout.encode();
@@ -186,6 +186,31 @@ fn obsolete_beside_a_current_or_unknown_copy_is_not_obsolete() {
     checksum(&mut v4);
     assert_eq!(
         CardLayout::select(&v2, &v4, 122_265_600),
+        Err(LayoutError::Version)
+    );
+}
+
+// Regression (t-133): an unknown `THEOSD??` magic must never read as "no descriptor",
+// or provisioning would erase it and boot would try a legacy whole-card mount.
+#[test]
+fn unknown_theosd_magic_is_a_version_error_not_absent() {
+    let card = 122_265_600;
+    let mut future = CardLayout::new(card).unwrap().encode();
+    future[..8].copy_from_slice(b"THEOSD04");
+    checksum(&mut future);
+    assert_eq!(
+        CardLayout::select(&future, &future, card),
+        Err(LayoutError::Version)
+    );
+    assert_eq!(
+        CardLayout::select(&[0; 512], &future, card),
+        Err(LayoutError::Version)
+    );
+    // A torn copy (bad CRC) is still unknown, not absent.
+    let mut torn = future;
+    torn[300] ^= 1;
+    assert_eq!(
+        CardLayout::select(&torn, &[0; 512], card),
         Err(LayoutError::Version)
     );
 }

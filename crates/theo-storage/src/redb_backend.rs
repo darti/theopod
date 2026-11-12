@@ -50,7 +50,7 @@ struct Inner<D> {
 
 // SAFETY: `RegionBackend::new` is unsafe and requires every use and the
 // drop of the backend, and of any `redb::Database` built on it, to happen
-// on the thread (core) that created it. Under that contract no `&self`
+// on the execution context (thread or task) that created it. Under that contract no `&self`
 // reaches another thread, so the `RefCell` is never borrowed concurrently
 // and `D` never moves between threads.
 unsafe impl<D> Send for RegionBackend<D> {}
@@ -80,7 +80,7 @@ impl<D: SectorIo> RegionBackend<D> {
     /// # Safety
     ///
     /// The backend and any `redb::Database` built on it must be used and
-    /// dropped only on the thread (core) that calls this: the backend claims
+    /// dropped only on the execution context (thread or task) that calls this: the backend claims
     /// `Send + Sync` for redb without being thread-safe.
     pub unsafe fn new(mut device: D, sectors: u32) -> Result<Self, BackendError> {
         if sectors <= LENGTH_SECTORS {

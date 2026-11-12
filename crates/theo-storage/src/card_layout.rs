@@ -9,7 +9,7 @@
 //! descriptors only permit trying the legacy whole-card LittleFS mount; they
 //! never authorize creation, migration, or formatting (ADR-0015).
 
-use crate::page_store::{crc32, file_len};
+use crate::{crc::crc32, page_store::file_len};
 
 pub const DESCRIPTOR_SECTORS: [u32; 2] = [0, 8];
 const DATABASE_START: u32 = 16;

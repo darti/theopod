@@ -11,12 +11,19 @@ littlefs-rust.workspace = true
 embassy-sync.workspace = true
 embassy-futures.workspace = true
 ekv.workspace = true
+redb.workspace = true
 hadris-fat = { workspace = true, optional = true }
 hadris-fs = { workspace = true, optional = true }
 hadris-io = { workspace = true, optional = true }
 hadris-storage = { workspace = true, optional = true }
 
+# Host builds (tests, clippy, miri) use redb's std mode: its no_std mode
+# requires panic = "abort", which host test harnesses cannot use.
+[target.'cfg(not(target_os = "none"))'.dependencies]
+redb = { workspace = true, features = ["std"] }
+
 [features]
+test-disk = []
 legacy-fat = ["dep:hadris-fat", "dep:hadris-io", "dep:hadris-fs", "dep:hadris-storage"]
 
 [dev-dependencies]

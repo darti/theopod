@@ -14,13 +14,17 @@
 extern crate alloc;
 
 pub mod card_layout;
+pub mod crc;
 #[cfg(feature = "legacy-fat")]
 pub mod fat_page_file;
 pub mod littlefs;
 pub mod page_store;
+pub mod redb_backend;
 pub mod regions;
 pub mod scope;
 pub mod sector_bus;
+#[cfg(any(test, feature = "test-disk"))]
+pub mod test_disk;
 
 use core::fmt;
 

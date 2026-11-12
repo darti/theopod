@@ -34,6 +34,7 @@ esp-hal = { version = "~1.2", features = ["esp32s3", "unstable"] }
 esp-println = { version = "0.18", features = ["esp32s3", "log-04"] }
 esp-rtos = { version = "0.4", features = ["embassy", "esp32s3", "esp-radio", "esp-alloc"] }
 log = "0.4"
+redb = { version = "=4.4.0", default-features = false, features = ["experimental-api-5"] }
 littlefs-rust = { git = "https://github.com/light-player/littlefs-rust", branch = "main", default-features = false, features = ["alloc"] }
 sdio = "0.5.1"
 png = "0.18"

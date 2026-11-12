@@ -3,6 +3,7 @@
 //! The backend must preserve sectors outside a failed write, and honour sync
 //! ordering. Ordinary SD cards do not guarantee this on physical power loss.
 
+use crate::crc::crc32;
 use allocator_api2::{
     alloc::{Allocator, Global},
     vec::Vec,
@@ -377,17 +378,6 @@ fn format_header(pages: usize) -> [u8; SECTOR] {
         bytes[8 + index * 8..16 + index * 8].copy_from_slice(&(value as u64).to_le_bytes());
     }
     bytes
-}
-
-pub(crate) fn crc32(bytes: &[u8]) -> u32 {
-    let mut crc = !0u32;
-    for byte in bytes {
-        crc ^= *byte as u32;
-        for _ in 0..8 {
-            crc = (crc >> 1) ^ (0xedb88320 & (0u32.wrapping_sub(crc & 1)));
-        }
-    }
-    !crc
 }
 
 #[cfg(test)]

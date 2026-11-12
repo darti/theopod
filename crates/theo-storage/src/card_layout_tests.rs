@@ -115,7 +115,7 @@ fn v1_descriptor_is_rejected_as_version() {
     let card = 8 * 1024 * 1024 * 2;
     let mut v1 = CardLayout::new(card, 4096).unwrap().encode();
     v1[..8].copy_from_slice(b"THEOSD01");
-    let crc = crate::page_store::crc32(&v1[..508]);
+    let crc = crate::crc::crc32(&v1[..508]);
     v1[508..].copy_from_slice(&crc.to_le_bytes());
     assert_eq!(
         CardLayout::select(&v1, &v1, card),

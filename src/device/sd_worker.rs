@@ -45,7 +45,7 @@ const IO_BUDGET: Duration = Duration::from_millis(500);
 /// (ADR-0022). User-approved 2026-11-12: cold-cache redb commits measured
 /// ~250 commands (2 ms each), at the 500 ms `IO_BUDGET`; 1 s leaves room.
 /// Log append, tail, rotation and mount keep their budgets.
-const PODCAST_BUDGET: Duration = Duration::from_secs(1);
+pub(in crate::device) const PODCAST_BUDGET: Duration = Duration::from_secs(1);
 /// Budget of the mount request: descriptors, log mount and catalogue open.
 const MOUNT_BUDGET: Duration = Duration::from_secs(2);
 // The owner's margin must leave it time to work within every request budget.

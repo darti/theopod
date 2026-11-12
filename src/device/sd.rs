@@ -490,6 +490,7 @@ async fn init_card(
 
 #[path = "sd_worker.rs"]
 mod worker;
+pub(super) use worker::PODCAST_BUDGET;
 #[cfg(feature = "sd-check")]
 pub use worker::test_rotation;
 pub use worker::{

@@ -23,10 +23,17 @@ Used by the firmware (`src/device/sd_worker.rs`) and `theo-podcasts`.
 - `sector_bus.rs`: owned-buffer mailbox from the synchronous filesystem core
   to the async SD service; late replies after cancellation are refused.
 - `redb_backend.rs`: `RegionBackend`, redb's `StorageBackend` over the
-  database region. Two alternating length-record sectors (generation, length,
-  CRC) precede the file; growth is not zero-filled; `format` writes an empty
-  record. `unsafe fn new` carries a single-execution-context contract (the
-  backend claims `Send + Sync` for redb without being thread-safe).
+  database region. Two alternating length-record sectors (magic, generation,
+  length, CRC) precede the file; growth is not zero-filled. `format` writes
+  an empty *fresh* record (magic `THEORDBF` instead of `THEORDB1`): while
+  fresh, `reset_unfinished_creation` may set a non-empty file without redb's
+  magic back to length 0, and `FreshFlag::clear` (a new generation) ends it
+  once the catalogue's tables are durable. Every other generation keeps the
+  current fresh-ness, so a torn record write reopens with the old or new
+  state. `region_is_corrupt` classifies a region from its raw head sectors
+  (provisioning guard). `unsafe fn new` carries a single-execution-context
+  contract (the backend claims `Send + Sync` for redb without being
+  thread-safe; `FreshFlag` shares its state and is `!Send`).
 - `test_disk.rs` (`test-disk` feature): sparse in-memory `SectorIo` with
   crash injection, shared by the storage and catalogue tests.
 - `future.rs`: PSRAM placement of large futures; `run_in` polls one apart.

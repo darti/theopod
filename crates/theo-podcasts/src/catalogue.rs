@@ -6,6 +6,7 @@ use redb::{
     TableDefinition, WriteTransaction,
 };
 use sha2::{Digest, Sha256};
+use theo_storage::{littlefs::SectorIo, redb_backend::RegionBackend};
 
 pub const MAX_RECORD_BYTES: usize = 4096;
 pub const MAX_SCAN_RECORDS: usize = 16;
@@ -210,7 +211,22 @@ impl Catalogue {
     /// tables (`RegionBackend` refuses a missing length record), so this
     /// never formats user data. A database with tables is only validated:
     /// a missing table or another schema is refused, never repaired.
-    pub fn open(backend: impl StorageBackend) -> Result<Self, Error> {
+    ///
+    /// A fresh region (provisioned, catalogue not yet created) whose redb
+    /// file lacks its magic is a creation cut short: it is reset to empty
+    /// and created again. The fresh flag is cleared once the tables are
+    /// durable, so a region that may hold data is never reset (ADR-0015).
+    pub fn open<D: SectorIo + 'static>(backend: RegionBackend<D>) -> Result<Self, Error> {
+        backend.reset_unfinished_creation().map_err(db_error)?;
+        let fresh_flag = backend.fresh_flag();
+        let catalogue = Self::open_database(backend)?;
+        if let Some(flag) = fresh_flag {
+            flag.clear().map_err(db_error)?;
+        }
+        Ok(catalogue)
+    }
+
+    fn open_database(backend: impl StorageBackend) -> Result<Self, Error> {
         let db = Database::builder()
             .set_cache_size(CACHE_BYTES)
             .create_with_backend(backend)

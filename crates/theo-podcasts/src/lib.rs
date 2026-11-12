@@ -24,6 +24,8 @@ pub mod provision;
 mod provision_guard;
 pub mod reclaim;
 pub mod recovery;
+#[cfg(test)]
+mod scale_tests;
 pub mod service;
 pub mod sync;
 mod tables;

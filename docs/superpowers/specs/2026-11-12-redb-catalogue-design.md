@@ -215,6 +215,18 @@ intact.
   reached the 37-byte show-index keys (`u` + show id) and returned `Corrupt`
   once fewer than 16 unit records remained after the cursor. Separate tables
   remove it; Task 4 adds a regression test.
+- **Fresh flag (final review).** Cutting the first open before redb wrote
+  its magic left "Not a redb database" (`Corrupt`) on a card the guard
+  refused. `format` now writes a fresh record (magic `THEORDBF`); while
+  fresh, `Catalogue::open` resets a non-empty file without redb's magic to
+  length 0 and creates it again, then clears the flag (new record
+  generation) once the tables are durable. A region that is not fresh is
+  never reset.
+- **Guard accepts a corrupt v3 catalogue (final review).** `sd-provision-v3`
+  also authorizes the exact target card when its v3 layout is valid but its
+  catalogue region is corrupt (no valid length record, or a non-empty file
+  without redb's magic, read from the raw sectors); a healthy v3 card stays
+  `AlreadyV3`.
 
 ## Risks
 

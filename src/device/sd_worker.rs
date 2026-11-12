@@ -41,12 +41,18 @@ use super::{SdInitError, io};
 use theo_storage::sector_bus::{Operation, Request as SectorRequest, SectorBus, SectorClient};
 
 const IO_BUDGET: Duration = Duration::from_millis(500);
+/// Budget of one podcast (`Domain`) request: at most one catalogue commit
+/// (ADR-0022). User-approved 2026-11-12: cold-cache redb commits measured
+/// ~250 commands (2 ms each), at the 500 ms `IO_BUDGET`; 1 s leaves room.
+/// Log append, tail, rotation and mount keep their budgets.
+const PODCAST_BUDGET: Duration = Duration::from_secs(1);
 /// Budget of the mount request: descriptors, log mount and catalogue open.
 const MOUNT_BUDGET: Duration = Duration::from_secs(2);
 // The owner's margin must leave it time to work within every request budget.
 const _: () = assert!(
     0 < OWNER_MARGIN_MS
         && OWNER_MARGIN_MS < IO_BUDGET.as_millis()
+        && OWNER_MARGIN_MS < PODCAST_BUDGET.as_millis()
         && OWNER_MARGIN_MS < MOUNT_BUDGET.as_millis()
 );
 pub(super) static SECTORS: SectorBus = SectorBus::new();
@@ -236,7 +242,10 @@ pub async fn domain(
     storage: &mut SdStorage,
     command: PodcastRequest,
 ) -> Result<runtime::Reply, Error> {
-    match storage.request(Command::Domain(command), IO_BUDGET).await? {
+    match storage
+        .request(Command::Domain(command), PODCAST_BUDGET)
+        .await?
+    {
         Reply::Domain(reply) => Ok(reply),
         _ => Err(Error::Io),
     }

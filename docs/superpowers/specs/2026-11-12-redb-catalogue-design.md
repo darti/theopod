@@ -85,7 +85,7 @@ atomicity); tachyon-db, btree-store (std or file-only); sanakirja, bptree
   are already complete on the card.
 
 `Send + Sync`: `StorageBackend` requires both and `RegionIo<CardIo>` holds
-`Rc`. A `CoreLocal<D>` wrapper (`RefCell` inside, no lock) carries an
+`Rc`. (Superseded by the Amendments: the implementation uses `RegionBackend`'s `unsafe fn new` single-context contract, no wrapper.) A `CoreLocal<D>` wrapper (`RefCell` inside, no lock) carries an
 `unsafe impl Send + Sync` whose SAFETY argument is that the `Database` is
 created, used and dropped only inside the storage owner on core1; the owner
 (`PodcastOwner`) is itself `!Send`, so the compiler keeps the database there.
@@ -122,9 +122,9 @@ header-first `PageStore::load()` change, and the `ekv` workspace dependency.
   `async` only where they await media unit IO or the network.
 - `sync` commits each episode on its own (episode, identity and counter
   together): a page commit would exceed a request's 500 ms IO budget. An
-  interrupted sync keeps the committed episodes and resumes from the last
-  persisted `SYNC` state; re-upserting is idempotent through the identity
-  table.
+  interrupted sync keeps the committed episodes; a resync restarts from page
+  0 and re-reads episodes without rewriting known ones (idempotent through
+  the identity table).
 - One commit per podcast request (`PODCAST_BUDGET`, 1 s: 500 sector
   commands at 2 ms). `Catalogue::begin_batch`/`end_batch` hold several operations'
   writes in one transaction (reads see them; a fatal error drops them and
@@ -148,8 +148,8 @@ Layout v3:
   LittleFS, then media units.
 - `provision_v2` becomes `provision_v3`, in ADR-0021's order: zero
   sectors 0 and 8; format the log; write an empty length sector and create
-  the database with every table and `COUNTERS["schema"] = 3` in one
-  transaction; sync; write both descriptors last. The blank-card guarantee
+  the database (superseded by the Amendments: provisioning creates no
+  tables; the first `Catalogue::open` creates them with `schema` = 3); sync; write both descriptors last. The blank-card guarantee
   of an interrupted run is unchanged.
 - The `just sd-provision-v2` recipe becomes `sd-provision-v3`, and the
   `provision_guard` token goes from `v2:` to `v3:`. The explicitly approved

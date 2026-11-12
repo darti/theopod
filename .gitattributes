@@ -2,5 +2,3 @@
 /docs/experiments/**/*.headers -text -whitespace
 /docs/experiments/**/*.patch -text -whitespace
 /docs/experiments/**/*.txt -text -whitespace
-# Keep published third-party source byte-identical except the documented patch.
-/vendor/ekv/** -whitespace

@@ -30,15 +30,15 @@ ranges or multi-key transactions; file-per-key designs lack atomicity.
 - `theo_storage::redb_backend::RegionBackend` implements redb's
   `StorageBackend` over a card region: a length sector, then the redb file
   in 4 KiB pages aligned to sectors. It is HAL-independent.
-- The database runs synchronously inside the core1 storage owner, wrapped in
-  a `CoreLocal` type whose `Send + Sync` rests on never leaving that `!Send`
-  owner. The redb cache is 256 KiB in PSRAM.
+- The database runs synchronously inside the core1 storage owner, through
+  `RegionBackend`'s `unsafe fn new`, whose single-context contract (use and
+  drop on the calling context only) is upheld by that `!Send` owner. The redb cache is 256 KiB in PSRAM.
 - Layout v3 replaces v2: a 64 MiB database region, then the log LittleFS and
   media units. Cards are re-provisioned with `just sd-provision-v3` after an
   explicitly approved erase; there is no migration, and a v2 card keeps
   podcasts offline.
-- The scale target is 50 subscriptions and 5,000 episodes. Feed sync commits
-  one feed page per transaction.
+- The scale target is 50 subscriptions and 5,000 episodes. Each podcast request
+  commits once, and feed sync commits per episode (see Amendments).
 - `PageStore`, `vendor/ekv` and the `ekv` dependency are removed.
 
 ## Consequences
@@ -70,3 +70,4 @@ ranges or multi-key transactions; file-per-key designs lack atomicity.
 - Fixed bug: the ekv `unit_ids` range scan returned `Corrupt` on show-index keys; separate tables remove it.
 - Fresh flag: `format` writes the length record with a distinct magic (`THEORDBF`, CRC-covered); while fresh, `Catalogue::open` resets a non-empty redb file without redb's magic (a cut first open) to length 0 and creates it again; the flag is cleared by a new record generation once the tables are durable, and a region that is not fresh is never reset (ADR-0015).
 - Provisioning guard: `sd-provision-v3` (exact card id and size) also accepts a valid v3 card whose catalogue region is corrupt (no valid length record, or a non-empty file without redb's magic, checked on the raw sectors); a healthy v3 card stays `AlreadyV3`.
+- Real capacity: redb doubles its file when it grows, so a 72 MiB growth request exceeds the 64 MiB region near ~8,600 episodes and the catalogue reports `Full` (podcasts disabled). Pruning is a follow-up task.

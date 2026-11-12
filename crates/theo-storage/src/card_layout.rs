@@ -141,6 +141,13 @@ impl CardLayout {
     fn decode(bytes: &[u8; 512], card_sectors: u64) -> Result<Option<Self>, LayoutError> {
         let old = OLD_MAGICS.iter().any(|m| &bytes[..8] == *m);
         if &bytes[..8] != MAGIC && !old {
+            // An unknown `THEOSD??` magic is a descriptor from a layout this
+            // firmware does not know (a newer one, or a torn one): never
+            // "absent", or provisioning would erase it and boot would try a
+            // legacy mount. Its CRC format is unknown, so it is not checked.
+            if bytes[..6] == *b"THEOSD" {
+                return Err(LayoutError::Version);
+            }
             return Ok(None);
         }
         let Some(&crc) = bytes.as_chunks::<4>().0.get(508 / 4) else {

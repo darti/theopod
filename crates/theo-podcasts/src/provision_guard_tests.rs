@@ -151,3 +151,16 @@ fn authorizes_refuses_an_unknown_version() {
         Err(Refusal::Descriptor(LayoutError::Conflict))
     );
 }
+
+#[test]
+fn authorizes_refuses_an_unknown_theosd_descriptor() {
+    // Regression (t-133): a `THEOSD04` descriptor used to read as "no
+    // descriptor", so provisioning would have erased a newer layout.
+    let future = versioned(b"THEOSD04", 4);
+    for (first, second) in [(&future, &future), (&future, &BLANK), (&BLANK, &future)] {
+        assert_eq!(
+            TARGET.authorizes(SECTORS, Some(CARD), first, second),
+            Err(Refusal::Descriptor(LayoutError::Version))
+        );
+    }
+}

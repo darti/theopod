@@ -224,7 +224,9 @@ impl Catalogue {
     /// Only an explicitly provisioned region holds a database without
     /// tables (`RegionBackend` refuses a missing length record), so this
     /// never formats user data. A database with tables is only validated:
-    /// a missing table or another schema is refused, never repaired.
+    /// a missing table or another schema is refused: no catalogue table is
+    /// created or rewritten (redb still writes its own header and allocator
+    /// state).
     ///
     /// A fresh region (provisioned, catalogue not yet created) whose redb
     /// file lacks its magic is a creation cut short: it is reset to empty

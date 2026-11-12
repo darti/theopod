@@ -62,7 +62,9 @@ atomicity); tachyon-db, btree-store (std or file-only); sanakirja, bptree
   range scan only tells apart by key length.
 - Value byte layouts and bounds (`MAX_RECORD_BYTES`, the `MAX_*_BYTES`
   limits) stay, so record parsers and their tests stay.
-- `COUNTERS["schema"]` is 3. Any other value: podcasts offline, re-provision.
+- `COUNTERS["schema"]` is 3. Any other value, or a missing table: podcasts
+  offline. `sd-provision-v3` refuses such a card (its catalogue is not
+  corrupt); erase it by hand before re-provisioning.
 - Each operation atomic today (follow; insert episode with identity and
   counter; publish audio; unit allocation) is one `WriteTransaction` with
   `set_quick_repair(true)`.
@@ -121,7 +123,8 @@ header-first `PageStore::load()` change, and the `ekv` workspace dependency.
   becomes `MediaStore`, `Runtime<F, M>` becomes `Runtime<M>`. Functions stay
   `async` only where they await media unit IO or the network.
 - `sync` commits each episode on its own (episode, identity and counter
-  together): a page commit would exceed a request's 500 ms IO budget. An
+  together): a page commit would exceed a podcast request budget (then 500 ms,
+  now `PODCAST_BUDGET` = 1 s). An
   interrupted sync keeps the committed episodes; a resync restarts from page
   0 and re-reads episodes without rewriting known ones (idempotent through
   the identity table).
@@ -196,8 +199,8 @@ Host tests:
 
 Target checks: `just check`, `just lint`, `just build` on xtensa with redb
 pinned `default-features = false`, `features = ["experimental-api-5"]`;
-`just audit` for the new dependency; `just miri` for the `CoreLocal`
-`unsafe`.
+`just audit` for the new dependency; host tests for `RegionBackend`.s single-context `unsafe` contract
+(`just miri` covers only `theo-drivers`).
 
 On the board, only on explicit request: `sd-provision-v3`, then flash and
 boot; "podcasts online" within a few seconds; core1 stack high-water mark;

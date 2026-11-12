@@ -181,6 +181,11 @@ impl<D: SectorIo, A: Allocator + Clone> UnitMedia<D, A> {
         &self.device
     }
 
+    #[cfg(test)]
+    pub(crate) fn device_mut(&mut self) -> &mut D {
+        &mut self.device
+    }
+
     fn check(&self) -> Result<(), UnitError> {
         if self.enabled {
             Ok(())

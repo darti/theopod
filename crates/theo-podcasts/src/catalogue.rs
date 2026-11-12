@@ -157,26 +157,40 @@ pub struct Catalogue {
     pub(crate) db: Database,
     next: u64,
     enabled: bool,
+    /// Inside [`Self::begin_batch`]: `done` keeps the transaction open, so
+    /// a podcast request makes at most one commit (ADR-0022).
+    batch: bool,
+    /// Commits made so far: a request checks whether a step committed.
+    commits: u64,
 }
 
-/// A read transaction: reads see the last committed state.
-struct View(ReadTransaction);
-impl View {
+/// Reads see the last committed state, or a batch's held writes.
+pub(crate) enum View<'a> {
+    Read(ReadTransaction),
+    Write(&'a WriteTransaction),
+}
+impl View<'_> {
     /// Copy a byte value into `scratch`; its length, or `None` if absent.
-    fn bytes<'k, K: Key + 'static>(
+    pub(crate) fn bytes<'k, K: Key + 'static>(
         &self,
         table: TableDefinition<K, &'static [u8]>,
         key: impl Borrow<K::SelfType<'k>>,
         scratch: &mut [u8],
     ) -> Result<Option<usize>, Error> {
-        copy(&self.0.open_table(table).map_err(db_error)?, key, scratch)
+        match self {
+            Self::Read(tx) => copy(&tx.open_table(table).map_err(db_error)?, key, scratch),
+            Self::Write(tx) => copy(&tx.open_table(table).map_err(db_error)?, key, scratch),
+        }
     }
     fn number<'k, K: Key + 'static>(
         &self,
         table: TableDefinition<K, u64>,
         key: impl Borrow<K::SelfType<'k>>,
     ) -> Result<Option<u64>, Error> {
-        number(&self.0.open_table(table).map_err(db_error)?, key)
+        match self {
+            Self::Read(tx) => number(&tx.open_table(table).map_err(db_error)?, key),
+            Self::Write(tx) => number(&tx.open_table(table).map_err(db_error)?, key),
+        }
     }
 }
 
@@ -236,6 +250,8 @@ impl Catalogue {
             db,
             next: 0,
             enabled: true,
+            batch: false,
+            commits: 0,
         };
         let fresh = {
             let tx = catalogue.db.begin_read().map_err(db_error)?;
@@ -311,16 +327,76 @@ impl Catalogue {
     /// Commit the open write transaction, if any.
     fn commit(&mut self) -> Result<(), Error> {
         match self.tx.take() {
-            Some(tx) => tx.commit().map_err(db_error),
+            Some(tx) => {
+                tx.commit().map_err(db_error)?;
+                self.commits += 1;
+                Ok(())
+            }
             None => Ok(()),
         }
     }
-    /// End an operation's writes: commit its transaction.
+    /// End an operation's writes: commit its transaction, unless a batch
+    /// holds it until [`Self::end_batch`].
     pub(crate) fn done(&mut self) -> Result<(), Error> {
+        if self.batch {
+            return Ok(());
+        }
         self.commit()
     }
-    fn view(&self) -> Result<View, Error> {
-        self.db.begin_read().map(View).map_err(db_error)
+    /// Commits made since open. A request compares it before and after a
+    /// step to keep to one commit per request (ADR-0022).
+    pub(crate) fn commits(&self) -> u64 {
+        self.commits
+    }
+    /// Hold the writes of the next operations in one write transaction,
+    /// committed by [`Self::end_batch`]: a podcast request makes at most one
+    /// commit. Reads inside the batch see its held writes. A fatal error
+    /// inside the batch drops the held writes and disables the owner (a
+    /// media store may already have applied them in RAM).
+    pub(crate) fn begin_batch(&mut self) -> Result<(), Error> {
+        if !self.enabled {
+            return Err(Error::Disabled);
+        }
+        if self.batch || self.tx.is_some() {
+            return Err(Error::InvalidState);
+        }
+        self.batch = true;
+        Ok(())
+    }
+    /// End a batch: commit its held writes if `commit`. Otherwise drop
+    /// them; held writes then disable the owner and fail as `Storage`, since
+    /// the media store may have applied them in RAM. A batch that wrote
+    /// nothing leaves the owner as the failed operation left it.
+    ///
+    /// Commit after success, and after an error detected before any change
+    /// (the held writes are then exactly the earlier operations').
+    pub(crate) fn end_batch(&mut self, commit: bool) -> Result<(), Error> {
+        if !self.batch {
+            return Err(Error::InvalidState);
+        }
+        self.batch = false;
+        if !self.enabled {
+            self.tx = None;
+            return Err(Error::Disabled);
+        }
+        if !commit {
+            return match self.tx.take() {
+                Some(_) => {
+                    self.enabled = false;
+                    Err(Error::Storage)
+                }
+                None => Ok(()),
+            };
+        }
+        self.begin()?;
+        let result = self.commit();
+        self.finish(result)
+    }
+    pub(crate) fn view(&self) -> Result<View<'_>, Error> {
+        match &self.tx {
+            Some(tx) => Ok(View::Write(tx)),
+            None => self.db.begin_read().map(View::Read).map_err(db_error),
+        }
     }
 
     /// Enter an operation: the owner is disabled until `finish` re-enables it.
@@ -336,18 +412,15 @@ impl Catalogue {
     /// write, so the owner stays usable.
     pub(crate) fn finish<T>(&mut self, result: Result<T, Error>) -> Result<T, Error> {
         match &result {
-            Err(
-                Error::Storage
-                | Error::Corrupt
-                | Error::Schema
-                | Error::IdentityCollision
-                | Error::Full
-                | Error::Disabled,
-            ) => {
+            Err(e) if is_fatal(*e) => {
                 self.tx = None;
             }
             Err(_) => {
-                self.tx = None;
+                // Detected before any write: a batch keeps the writes of
+                // its earlier operations.
+                if !self.batch {
+                    self.tx = None;
+                }
                 self.enabled = true;
             }
             Ok(_) => self.enabled = true,
@@ -684,6 +757,19 @@ impl Catalogue {
     }
 }
 
+/// Errors that may follow a write, or that leave the database suspect:
+/// they disable the owner until reopen.
+pub(crate) fn is_fatal(error: Error) -> bool {
+    matches!(
+        error,
+        Error::Storage
+            | Error::Corrupt
+            | Error::Schema
+            | Error::IdentityCollision
+            | Error::Full
+            | Error::Disabled
+    )
+}
 fn valid_transition(state: EpisodeState, next: AudioState) -> bool {
     use AudioState::*;
     if state.audio == next {

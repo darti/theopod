@@ -35,6 +35,9 @@ use crate::radio_france::FeedUrl;
 /// bounded record. Multi-page responses are always fetched unconditionally:
 /// an unchanged first page does not certify older pages are unchanged.
 pub const MAX_CHUNK_BYTES: usize = 4096;
+/// Most episodes one [`SyncSession::push`] upserts. Only the last may commit;
+/// the others are known and unchanged, so they only read (ADR-0022).
+pub const MAX_CHUNK_ITEMS: usize = 4;
 pub const MAX_HISTORY_PAGES: u32 = 4096;
 #[derive(PartialEq, Eq)]
 enum Phase {
@@ -134,34 +137,46 @@ impl SyncSession {
         self.phase = Phase::Body;
         Ok(())
     }
+    /// Feed body bytes; returns how many were consumed. The caller sends
+    /// the rest again (a non-empty input always consumes at least one byte).
+    ///
     /// Each upsert commits on its own (episode, identity and counter
-    /// together): a page commit would exceed a request's IO budget. A
-    /// failure mid-page keeps the earlier episodes; the checkpoint is only
-    /// saved by [`Self::complete`], so a resync re-upserts the page and the
-    /// identity table makes that idempotent (ADR-0022).
+    /// together), and one call makes at most one commit, so a request stays
+    /// within its IO budget: it stops after the first episode whose upsert
+    /// committed, or after [`MAX_CHUNK_ITEMS`] episodes. A failure mid-page
+    /// keeps the earlier episodes; the checkpoint is only saved by
+    /// [`Self::complete`], so a resync re-upserts the page and the identity
+    /// table makes that idempotent (ADR-0022).
     pub fn push(
         &mut self,
         cat: &mut Catalogue,
         bytes: &[u8],
         scratch: &mut [u8],
-    ) -> Result<(), SyncError> {
+    ) -> Result<usize, SyncError> {
         let valid = self.phase == Phase::Body;
         self.phase = Phase::Failed;
         if !valid || bytes.len() > MAX_CHUNK_BYTES {
             return Err(SyncError::Protocol);
         }
-        for &byte in bytes {
+        let mut items = 0;
+        for (at, &byte) in bytes.iter().enumerate() {
             if let Some(item) = self.parser.push(byte).map_err(SyncError::Feed)? {
+                let commits = cat.commits();
                 let outcome = cat
                     .upsert(self.id, item.metadata(), scratch)
                     .map_err(SyncError::Catalogue)?;
                 self.progress.entries += 1;
                 self.progress.created += u64::from(outcome.created);
                 self.progress.queued += u64::from(outcome.queued);
+                items += 1;
+                if cat.commits() != commits || items == MAX_CHUNK_ITEMS {
+                    self.phase = Phase::Body;
+                    return Ok(at + 1);
+                }
             }
         }
         self.phase = Phase::Body;
-        Ok(())
+        Ok(bytes.len())
     }
     /// Returns true when `url()` names the next required page. False means the
     /// session can commit. End-of-document alone never publishes a checkpoint.

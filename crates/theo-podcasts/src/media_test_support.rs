@@ -344,3 +344,38 @@ impl theo_storage::littlefs::SectorIo for &mut Disk {
         Ok(())
     }
 }
+
+/// Repeat one-step `make_space` until it settles: true when space is free.
+pub(crate) async fn make_space_all<M: MediaStore>(
+    cat: &mut Catalogue,
+    media: &mut M,
+    required: u64,
+    scratch: &mut [u8],
+) -> Result<bool, MediaError<M::Error>> {
+    use crate::reclaim::{Reclaim, SpaceStep, make_space};
+    let mut reclaim = Reclaim::new();
+    loop {
+        match make_space(cat, media, &mut reclaim, required, scratch).await? {
+            SpaceStep::Ready => return Ok(true),
+            SpaceStep::Unavailable => return Ok(false),
+            SpaceStep::Pending => (),
+        }
+    }
+}
+
+/// Repeat `DownloadSession::start` while it is pending, as the worker does.
+pub(crate) async fn start_all<M: MediaStore>(
+    cat: &mut Catalogue,
+    media: &mut M,
+    job: crate::download::DownloadJob,
+    scratch: &mut [u8],
+) -> Result<crate::download::Start, MediaError<M::Error>> {
+    use crate::download::{DownloadSession, Start};
+    let mut reclaim = crate::reclaim::Reclaim::new();
+    loop {
+        match DownloadSession::start(cat, media, &mut reclaim, job.clone(), scratch).await? {
+            Start::Pending => (),
+            start => return Ok(start),
+        }
+    }
+}

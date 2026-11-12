@@ -400,11 +400,10 @@ impl Catalogue {
         buf: &'a mut [u8],
     ) -> Result<Option<RecordView<'a>>, Error> {
         self.begin()?;
+        // Through the batch's held writes, if any (see `begin_batch`).
         let result = self
-            .db
-            .begin_read()
-            .map_err(db_error)
-            .and_then(|tx| copy(&tx.open_table(UNIT_EXTENTS).map_err(db_error)?, id.0, buf));
+            .view()
+            .and_then(|view| view.bytes(UNIT_EXTENTS, id.0, buf));
         let read = self.finish(result)?;
         match read {
             None => Ok(None),

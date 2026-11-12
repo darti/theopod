@@ -347,17 +347,29 @@ async fn transfer(
                 }
                 return Ok(());
             }
-            let bytes = theo_podcasts::runtime::Chunk::from_slice(&buffers.chunk[..n])
-                .map_err(|_| Error::Protocol)?;
-            let command = match purpose {
-                Purpose::Feed => Command::SyncChunk(bytes),
-                Purpose::Audio => Command::DownloadChunk(bytes),
-            };
-            if matches!(
-                domain(command).await?,
-                Reply::Downloaded(DownloadOutcome::WaitingForSpace)
-            ) {
-                return Err(Error::Waiting);
+            // One commit per podcast request (ADR-0022): the owner consumes
+            // a feed chunk in parts and makes space in steps, so resend
+            // what it did not take. Each request is bounded by the
+            // storage owner's IO budget.
+            let mut at = 0;
+            while at < n {
+                let bytes = theo_podcasts::runtime::Chunk::from_slice(&buffers.chunk[at..n])
+                    .map_err(|_| Error::Protocol)?;
+                let command = match purpose {
+                    Purpose::Feed => Command::SyncChunk(bytes),
+                    Purpose::Audio => Command::DownloadChunk(bytes),
+                };
+                match (purpose, domain(command).await?) {
+                    (Purpose::Feed, Reply::Consumed(used)) if used > 0 && used <= n - at => {
+                        at += used;
+                    }
+                    (Purpose::Audio, Reply::Done) => at = n,
+                    (Purpose::Audio, Reply::Pending) => (),
+                    (Purpose::Audio, Reply::Downloaded(DownloadOutcome::WaitingForSpace)) => {
+                        return Err(Error::Waiting);
+                    }
+                    _ => return Err(Error::Protocol),
+                }
             }
         }
     }

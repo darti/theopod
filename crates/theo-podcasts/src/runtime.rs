@@ -3,6 +3,7 @@ use crate::{
     catalogue::{self, *},
     download::*,
     media::*,
+    reclaim::Reclaim,
     recovery::Recovery,
     subscriptions::Subscription,
     sync::*,
@@ -54,6 +55,11 @@ pub enum Reply {
     },
     Ready,
     Downloaded(DownloadOutcome),
+    /// `SyncChunk`: bytes consumed; send the rest again.
+    Consumed(usize),
+    /// `DownloadStart` or `DownloadChunk` made one bounded step (a commit
+    /// or a reclaim scan): send the same command again.
+    Pending,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
@@ -64,6 +70,9 @@ pub struct Runtime<M: MediaStore> {
     catalogue: Catalogue,
     pub media: M,
     recovery: Recovery,
+    /// The eviction round, carried across `DownloadStart`/`DownloadChunk`
+    /// requests (each makes at most one commit, ADR-0022).
+    reclaim: Reclaim,
     sync: Option<SyncSession>,
     download: Option<DownloadSession>,
     enabled: bool,
@@ -74,6 +83,7 @@ impl<M: MediaStore> Runtime<M> {
             catalogue,
             media,
             recovery: Recovery::new(),
+            reclaim: Reclaim::new(),
             sync: None,
             download: None,
             enabled: true,
@@ -152,14 +162,13 @@ impl<M: MediaStore> Runtime<M> {
                     .map_err(sync_error)?;
                 Reply::Done
             }
-            Command::SyncChunk(bytes) => {
+            Command::SyncChunk(bytes) => Reply::Consumed(
                 self.sync
                     .as_mut()
                     .ok_or(Error::Invalid)?
                     .push(&mut self.catalogue, &bytes, scratch)
-                    .map_err(sync_error)?;
-                Reply::Done
-            }
+                    .map_err(sync_error)?,
+            ),
             Command::SyncEnd => {
                 let mut sync = self.sync.take().ok_or(Error::Invalid)?;
                 if sync.end_page().map_err(sync_error)? {
@@ -196,14 +205,21 @@ impl<M: MediaStore> Runtime<M> {
                 if self.download.is_some() || self.sync.is_some() {
                     return Err(Error::Invalid);
                 }
-                match DownloadSession::start(&mut self.catalogue, &mut self.media, job, scratch)
-                    .await
-                    .map_err(media_error::<M>)?
+                match DownloadSession::start(
+                    &mut self.catalogue,
+                    &mut self.media,
+                    &mut self.reclaim,
+                    job,
+                    scratch,
+                )
+                .await
+                .map_err(media_error::<M>)?
                 {
                     Start::Ready(session) => {
                         self.download = Some(session);
                         Reply::Ready
                     }
+                    Start::Pending => Reply::Pending,
                     Start::WaitingForSpace => Reply::Downloaded(DownloadOutcome::WaitingForSpace),
                     Start::Skip => Reply::Downloaded(DownloadOutcome::RetryLater),
                 }
@@ -225,11 +241,18 @@ impl<M: MediaStore> Runtime<M> {
                     .download
                     .as_mut()
                     .ok_or(Error::Invalid)?
-                    .push(&mut self.catalogue, &mut self.media, &bytes, scratch)
+                    .push(
+                        &mut self.catalogue,
+                        &mut self.media,
+                        &mut self.reclaim,
+                        &bytes,
+                        scratch,
+                    )
                     .await
                     .map_err(media_error::<M>)?
                 {
                     ChunkOutcome::Written => Reply::Done,
+                    ChunkOutcome::Pending => Reply::Pending,
                     ChunkOutcome::WaitingForSpace => {
                         Reply::Downloaded(DownloadOutcome::WaitingForSpace)
                     }

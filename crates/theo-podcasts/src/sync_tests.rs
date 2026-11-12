@@ -3,6 +3,34 @@ use crate::{catalogue::*, test_support::Image};
 use std::{string::String as StdString, vec::Vec};
 const ROOT: &str = "https://rss-rf.aerion.me/rss/4a41823f-f1f7-4725-8380-e428893eb93b";
 const ID: SubscriptionId = SubscriptionId(1);
+/// Feed a whole buffer, resending what each push did not consume, as the
+/// network task does.
+trait PushAll {
+    fn push_all(
+        &mut self,
+        cat: &mut Catalogue,
+        bytes: &[u8],
+        scratch: &mut [u8],
+    ) -> Result<(), SyncError>;
+}
+impl PushAll for SyncSession {
+    fn push_all(
+        &mut self,
+        cat: &mut Catalogue,
+        mut bytes: &[u8],
+        scratch: &mut [u8],
+    ) -> Result<(), SyncError> {
+        loop {
+            let used = self.push(cat, bytes, scratch)?;
+            assert!(used <= bytes.len());
+            bytes = &bytes[used..];
+            if bytes.is_empty() {
+                return Ok(());
+            }
+            assert!(used > 0, "no progress");
+        }
+    }
+}
 fn import(
     cat: &mut Catalogue,
     pages: &[&[u8]],
@@ -21,7 +49,7 @@ fn import(
             },
         )?;
         for chunk in body.chunks(257) {
-            session.push(cat, chunk, &mut scratch)?;
+            session.push_all(cat, chunk, &mut scratch)?;
         }
         assert_eq!(session.end_page()?, page + 1 < pages.len());
     }
@@ -153,7 +181,7 @@ fn validators_commit_only_after_all_pages_and_304_is_a_noop() {
         )
         .unwrap();
     interrupted
-        .push(&mut cat, b"<rss><channel>", &mut scratch)
+        .push_all(&mut cat, b"<rss><channel>", &mut scratch)
         .unwrap();
     assert!(interrupted.end_page().is_err());
     assert!(interrupted.complete(&mut cat, &mut scratch).is_err());
@@ -176,7 +204,7 @@ fn validators_commit_only_after_all_pages_and_304_is_a_noop() {
         )
         .unwrap();
     interrupted
-        .push(&mut cat, page.as_bytes(), &mut scratch)
+        .push_all(&mut cat, page.as_bytes(), &mut scratch)
         .unwrap();
     assert!(interrupted.end_page().unwrap());
     assert!(interrupted.complete(&mut cat, &mut scratch).is_err());
@@ -226,7 +254,7 @@ fn failed_final_commit_is_replayable_after_reopen() {
         )
         .unwrap();
     session
-        .push(&mut cat, new_body.as_bytes(), &mut scratch)
+        .push_all(&mut cat, new_body.as_bytes(), &mut scratch)
         .unwrap();
     assert!(!session.end_page().unwrap());
     image.disk.state().fail_writes = true;
@@ -270,7 +298,7 @@ fn failure_mid_page_resyncs_without_duplicates() {
     // Items "a" and "b" arrive and commit; the power is lost before "c".
     let cut = first.find("</channel>").unwrap();
     session
-        .push(&mut cat, &first.as_bytes()[..cut], &mut scratch)
+        .push_all(&mut cat, &first.as_bytes()[..cut], &mut scratch)
         .unwrap();
     image.crash();
     drop((session, cat));
@@ -302,7 +330,7 @@ fn malformed_response_poisoning_cannot_be_bypassed() {
     let bad = simple(&item("a", "a")).replace("</rss>", "</bad>");
     assert!(
         session
-            .push(&mut cat, bad.as_bytes(), &mut scratch)
+            .push_all(&mut cat, bad.as_bytes(), &mut scratch)
             .is_err()
     );
     assert!(session.end_page().is_err());
@@ -334,8 +362,56 @@ fn header_and_chunk_limits_fail_without_completing() {
     session.response(200, Validators::default()).unwrap();
     assert!(
         session
-            .push(&mut cat, &[b' '; MAX_CHUNK_BYTES + 1], &mut scratch)
+            .push_all(&mut cat, &[b' '; MAX_CHUNK_BYTES + 1], &mut scratch)
             .is_err()
     );
     assert!(session.complete(&mut cat, &mut scratch).is_err());
+}
+
+// Regression (t-133): one push makes at most one commit. It stops after the
+// first episode whose upsert committed, or after `MAX_CHUNK_ITEMS` known
+// episodes, and the caller resends the rest; the parser resumes mid-chunk.
+#[test]
+fn push_stops_after_one_commit_and_resumes_from_the_rest() {
+    let image = Image::new();
+    let mut cat = image.create();
+    let mut scratch = [0; MAX_RECORD_BYTES];
+    let items: StdString = (0..6).map(|i| item(&std::format!("g{i}"), "T")).collect();
+    let body = simple(&items);
+    let mut session = SyncSession::new(ID, ROOT, None).unwrap();
+    session.response(200, Validators::default()).unwrap();
+    let mut rest = body.as_bytes();
+    let mut pushes = 0;
+    while !rest.is_empty() {
+        let commits = cat.commits();
+        let used = session.push(&mut cat, rest, &mut scratch).unwrap();
+        assert!(cat.commits() - commits <= 1);
+        assert!(used > 0);
+        rest = &rest[used..];
+        pushes += 1;
+    }
+    // Six new episodes: six commits, then the closing tags.
+    assert_eq!(pushes, 7);
+    assert!(!session.end_page().unwrap());
+    assert_eq!(session.complete(&mut cat, &mut scratch).unwrap().created, 6);
+    // Replayed unchanged: no commit, `MAX_CHUNK_ITEMS` episodes per push.
+    let mut session = SyncSession::new(ID, ROOT, None).unwrap();
+    session.response(200, Validators::default()).unwrap();
+    let commits = cat.commits();
+    let first = session
+        .push(&mut cat, body.as_bytes(), &mut scratch)
+        .unwrap();
+    assert_eq!(cat.commits(), commits);
+    let fourth = body
+        .match_indices("</item>")
+        .nth(MAX_CHUNK_ITEMS - 1)
+        .unwrap()
+        .0;
+    assert_eq!(first, fourth + "</item>".len());
+    session
+        .push_all(&mut cat, &body.as_bytes()[first..], &mut scratch)
+        .unwrap();
+    assert!(!session.end_page().unwrap());
+    let progress = session.complete(&mut cat, &mut scratch).unwrap();
+    assert_eq!((progress.entries, progress.created), (6, 0));
 }

@@ -53,7 +53,7 @@ fn reclamation_stops_at_deficit_and_preserves_protected_files() {
     use crate::{
         catalogue::*,
         media::*,
-        media_test_support::{HostMedia, available, root_for},
+        media_test_support::{HostMedia, available, make_space_all, root_for},
         test_support::Image,
     };
     futures::executor::block_on(async {
@@ -101,7 +101,7 @@ fn reclamation_stops_at_deficit_and_preserves_protected_files() {
         media.active.insert(active.0);
         media.other_bytes = media.capacity - reserve(media.capacity) - 20480 - 4096;
         assert!(
-            make_space(&mut cat, &mut media, 4096, &mut scratch)
+            make_space_all(&mut cat, &mut media, 4096, &mut scratch)
                 .await
                 .unwrap()
         );
@@ -111,7 +111,7 @@ fn reclamation_stops_at_deficit_and_preserves_protected_files() {
             AudioState::Available
         );
         assert!(
-            make_space(&mut cat, &mut media, 8192, &mut scratch)
+            make_space_all(&mut cat, &mut media, 8192, &mut scratch)
                 .await
                 .unwrap()
         );
@@ -121,17 +121,79 @@ fn reclamation_stops_at_deficit_and_preserves_protected_files() {
         assert!(e.state.read);
         assert_eq!(e.state.audio, AudioState::Reclaimed);
         assert!(
-            make_space(&mut cat, &mut media, 16000, &mut scratch)
+            make_space_all(&mut cat, &mut media, 16000, &mut scratch)
                 .await
                 .unwrap()
         );
         assert!(!media.path(new, false).exists());
         assert!(
-            !make_space(&mut cat, &mut media, 32000, &mut scratch)
+            !make_space_all(&mut cat, &mut media, 32000, &mut scratch)
                 .await
                 .unwrap()
         );
         assert!(media.path(unread, false).exists());
         assert!(media.path(active, false).exists());
+    });
+}
+
+// Regression (t-133): the eviction round spans requests of at most one
+// commit each, and still evicts the policy's oldest choice when it lies
+// pages after the cursor's start.
+#[test]
+fn each_reclaim_step_commits_at_most_once_and_keeps_the_policy_order() {
+    use crate::{
+        catalogue::*,
+        media::*,
+        media_test_support::{HostMedia, available, root_for},
+        reclaim::{Reclaim, SpaceStep, make_space},
+        test_support::Image,
+    };
+    futures::executor::block_on(async {
+        let image = Image::new();
+        let mut cat = image.create();
+        let mut media = HostMedia::new(root_for(&image));
+        media.physical_sync = false;
+        let mut scratch = [0; MAX_RECORD_BYTES];
+        // More episodes than `RECLAIM_SCAN_PAGES` scan pages; the oldest
+        // was imported last.
+        let count = (RECLAIM_SCAN_PAGES * MAX_SCAN_RECORDS + 4) as i64;
+        let mut ids = std::vec::Vec::new();
+        for i in 0..count {
+            let guid = std::format!("e{i}");
+            ids.push(available(
+                &mut cat,
+                &mut media,
+                &guid,
+                Some(count - i),
+                true,
+                &[1; 16],
+                &mut scratch,
+            ));
+        }
+        let oldest = *ids.last().unwrap();
+        media.other_bytes = media.capacity - reserve(media.capacity) - 16 * count as u64;
+        let mut reclaim = Reclaim::new();
+        let mut steps = 0;
+        loop {
+            let commits = cat.commits();
+            let step = make_space(&mut cat, &mut media, &mut reclaim, 16, &mut scratch)
+                .await
+                .unwrap();
+            assert!(cat.commits() - commits <= 1);
+            steps += 1;
+            if step == SpaceStep::Ready {
+                break;
+            }
+            assert_eq!(step, SpaceStep::Pending);
+        }
+        // Two scan steps, the `Deleting` intent, then unlink and `Reclaimed`.
+        assert_eq!(steps, 5);
+        let state = cat.get(oldest, &mut scratch).unwrap().unwrap().state;
+        assert_eq!(state.audio, AudioState::Reclaimed);
+        assert!(!media.path(oldest, false).exists());
+        for &id in &ids[..ids.len() - 1] {
+            let state = cat.get(id, &mut scratch).unwrap().unwrap().state;
+            assert_eq!(state.audio, AudioState::Available);
+        }
     });
 }

@@ -41,13 +41,7 @@ fn owner_imports_downloads_and_marks_read_through_bounded_commands() {
             .await
             .unwrap();
         let xml = b"<rss><channel><item><guid>one</guid><title>Episode</title><enclosure url=\"https://media.radiofrance-podcast.net/audio.mp3\" length=\"4\"/></item></channel></rss>";
-        owner
-            .handle(
-                Command::SyncChunk(heapless::Vec::from_slice(xml).unwrap()),
-                &mut scratch,
-            )
-            .await
-            .unwrap();
+        sync_all(&mut owner, xml, &mut scratch).await;
         assert!(matches!(
             owner.handle(Command::SyncEnd, &mut scratch).await.unwrap(),
             Reply::Synced(_)
@@ -237,13 +231,7 @@ fn a_second_sync_start_cannot_replace_an_unfinished_import() {
             .await
             .unwrap();
         let xml = b"<rss><channel><item><guid>one</guid><title>Episode</title><enclosure url=\"https://media.radiofrance-podcast.net/audio.mp3\"/></item></channel></rss>";
-        owner
-            .handle(
-                Command::SyncChunk(heapless::Vec::from_slice(xml).unwrap()),
-                &mut scratch,
-            )
-            .await
-            .unwrap();
+        sync_all(&mut owner, xml, &mut scratch).await;
         assert_eq!(
             owner
                 .handle(
@@ -287,13 +275,7 @@ fn owner_exposes_committed_validators_and_accepts_not_modified() {
             .await
             .unwrap();
         let xml = b"<rss><channel></channel></rss>";
-        owner
-            .handle(
-                Command::SyncChunk(heapless::Vec::from_slice(xml).unwrap()),
-                &mut scratch,
-            )
-            .await
-            .unwrap();
+        sync_all(&mut owner, xml, &mut scratch).await;
         assert!(matches!(
             owner.handle(Command::SyncEnd, &mut scratch).await.unwrap(),
             Reply::Synced(_)
@@ -563,4 +545,22 @@ fn non_fatal_media_error_is_rejected_not_disabling() {
             Some(Error::Storage)
         );
     });
+}
+
+/// Send a feed body, resending what each `SyncChunk` did not consume.
+async fn sync_all<M: MediaStore>(owner: &mut Runtime<M>, mut xml: &[u8], scratch: &mut [u8]) {
+    while !xml.is_empty() {
+        let Reply::Consumed(used) = owner
+            .handle(
+                Command::SyncChunk(heapless::Vec::from_slice(xml).unwrap()),
+                scratch,
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("not consumed")
+        };
+        assert!(used > 0 && used <= xml.len());
+        xml = &xml[used..];
+    }
 }

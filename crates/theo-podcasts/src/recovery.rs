@@ -1,5 +1,8 @@
 //! Recovery by persisted local identity, never by remote URL or filename.
 use crate::{catalogue::*, media::*};
+/// Recover one identity in at most one catalogue commit: the unlinks and
+/// state transitions are one batch (ADR-0022), so a podcast request stays
+/// within its IO budget and a crash keeps all of it or none.
 pub async fn recover_one<M: MediaStore>(
     cat: &mut Catalogue,
     media: &mut M,
@@ -25,6 +28,18 @@ pub async fn recover_one<M: MediaStore>(
     if state.is_some_and(|s| s.audio == AudioState::Deleting && !s.read) {
         return Err(MediaError::InvalidState);
     }
+    cat.begin_batch().map_err(MediaError::Catalogue)?;
+    let result = reset_identity(cat, media, id, state, scratch).await;
+    end_batch::<M, _>(cat, result)
+}
+/// Unlink both files of `id` and settle its state; inside one batch.
+async fn reset_identity<M: MediaStore>(
+    cat: &mut Catalogue,
+    media: &mut M,
+    id: EpisodeId,
+    state: Option<EpisodeState>,
+    scratch: &mut [u8],
+) -> Result<(), MediaError<M::Error>> {
     media
         .unlink_temp(cat, id)
         .await

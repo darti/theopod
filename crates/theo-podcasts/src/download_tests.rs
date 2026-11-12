@@ -1,6 +1,7 @@
 use super::*;
 use crate::{
-    media_test_support::{HostMedia, root_for},
+    media_test_support::{HostMedia, root_for, start_all},
+    reclaim::Reclaim,
     test_support::Image,
 };
 use futures::executor::block_on;
@@ -38,17 +39,22 @@ fn durable_publication_is_required_before_available() {
         let mut scratch = [0; MAX_RECORD_BYTES];
         let job = queued(&mut cat, "a", Some(3), &mut scratch);
         let id = job.id;
-        let Start::Ready(mut session) =
-            DownloadSession::start(&mut cat, &mut media, job, &mut scratch)
-                .await
-                .unwrap()
+        let Start::Ready(mut session) = start_all(&mut cat, &mut media, job, &mut scratch)
+            .await
+            .unwrap()
         else {
             panic!("not started")
         };
         session.response(200, Some(3), None).unwrap();
         assert_eq!(
             session
-                .push(&mut cat, &mut media, b"abc", &mut scratch)
+                .push(
+                    &mut cat,
+                    &mut media,
+                    &mut Reclaim::new(),
+                    b"abc",
+                    &mut scratch
+                )
                 .await
                 .unwrap(),
             ChunkOutcome::Written
@@ -92,10 +98,9 @@ fn short_or_failed_bodies_and_partial_http_never_publish() {
         ] {
             let job = queued(&mut cat, &std::format!("bad{i}"), Some(3), &mut scratch);
             let id = job.id;
-            let Start::Ready(mut s) =
-                DownloadSession::start(&mut cat, &mut media, job, &mut scratch)
-                    .await
-                    .unwrap()
+            let Start::Ready(mut s) = start_all(&mut cat, &mut media, job, &mut scratch)
+                .await
+                .unwrap()
             else {
                 panic!()
             };
@@ -114,17 +119,22 @@ fn short_or_failed_bodies_and_partial_http_never_publish() {
         for (guid, complete) in [("short", true), ("connection-failed", false)] {
             let job = queued(&mut cat, guid, Some(4), &mut scratch);
             let id = job.id;
-            let Start::Ready(mut s) =
-                DownloadSession::start(&mut cat, &mut media, job, &mut scratch)
-                    .await
-                    .unwrap()
+            let Start::Ready(mut s) = start_all(&mut cat, &mut media, job, &mut scratch)
+                .await
+                .unwrap()
             else {
                 panic!()
             };
             s.response(200, Some(4), None).unwrap();
-            s.push(&mut cat, &mut media, b"abc", &mut scratch)
-                .await
-                .unwrap();
+            s.push(
+                &mut cat,
+                &mut media,
+                &mut Reclaim::new(),
+                b"abc",
+                &mut scratch,
+            )
+            .await
+            .unwrap();
             assert_eq!(
                 s.finish(&mut cat, &mut media, complete, &mut scratch)
                     .await
@@ -151,20 +161,32 @@ fn unknown_length_never_spends_reserve_or_publishes_while_waiting() {
         let job = queued(&mut cat, "unknown", None, &mut scratch);
         let id = job.id;
         media.other_bytes = media.capacity - reserve(media.capacity) - AUDIO_CHUNK as u64;
-        let Start::Ready(mut s) = DownloadSession::start(&mut cat, &mut media, job, &mut scratch)
+        let Start::Ready(mut s) = start_all(&mut cat, &mut media, job, &mut scratch)
             .await
             .unwrap()
         else {
             panic!()
         };
         s.response(200, None, None).unwrap();
-        s.push(&mut cat, &mut media, &[1; AUDIO_CHUNK], &mut scratch)
-            .await
-            .unwrap();
+        s.push(
+            &mut cat,
+            &mut media,
+            &mut Reclaim::new(),
+            &[1; AUDIO_CHUNK],
+            &mut scratch,
+        )
+        .await
+        .unwrap();
         assert_eq!(
-            s.push(&mut cat, &mut media, b"x", &mut scratch)
-                .await
-                .unwrap(),
+            s.push(
+                &mut cat,
+                &mut media,
+                &mut Reclaim::new(),
+                b"x",
+                &mut scratch
+            )
+            .await
+            .unwrap(),
             ChunkOutcome::WaitingForSpace
         );
         assert_eq!(
@@ -196,12 +218,19 @@ fn every_media_boundary_recovers_without_false_available() {
             media.fail_at = cut;
             let result = async {
                 let Start::Ready(mut s) =
-                    DownloadSession::start(&mut cat, &mut media, job, &mut scratch).await?
+                    start_all(&mut cat, &mut media, job, &mut scratch).await?
                 else {
                     panic!("must fit")
                 };
                 s.response(200, Some(3), None).unwrap();
-                s.push(&mut cat, &mut media, b"abc", &mut scratch).await?;
+                s.push(
+                    &mut cat,
+                    &mut media,
+                    &mut Reclaim::new(),
+                    b"abc",
+                    &mut scratch,
+                )
+                .await?;
                 s.finish(&mut cat, &mut media, true, &mut scratch).await
             }
             .await;
@@ -242,7 +271,7 @@ fn restart_discards_old_partial_and_capacity_wait_can_retry_same_chunk() {
         let job = queued(&mut cat, "a", None, &mut scratch);
         let id = job.id;
         std::fs::write(media.path(id, true), b"stale representation").unwrap();
-        let Start::Ready(mut s) = DownloadSession::start(&mut cat, &mut media, job, &mut scratch)
+        let Start::Ready(mut s) = start_all(&mut cat, &mut media, job, &mut scratch)
             .await
             .unwrap()
         else {
@@ -251,22 +280,40 @@ fn restart_discards_old_partial_and_capacity_wait_can_retry_same_chunk() {
         s.response(200, None, None).unwrap();
         media.other_bytes = media.capacity - reserve(media.capacity) - AUDIO_CHUNK as u64;
         assert_eq!(
-            s.push(&mut cat, &mut media, &[1; AUDIO_CHUNK], &mut scratch)
-                .await
-                .unwrap(),
+            s.push(
+                &mut cat,
+                &mut media,
+                &mut Reclaim::new(),
+                &[1; AUDIO_CHUNK],
+                &mut scratch
+            )
+            .await
+            .unwrap(),
             ChunkOutcome::Written
         );
         assert_eq!(
-            s.push(&mut cat, &mut media, b"x", &mut scratch)
-                .await
-                .unwrap(),
+            s.push(
+                &mut cat,
+                &mut media,
+                &mut Reclaim::new(),
+                b"x",
+                &mut scratch
+            )
+            .await
+            .unwrap(),
             ChunkOutcome::WaitingForSpace
         );
         media.other_bytes -= AUDIO_CHUNK as u64;
         assert_eq!(
-            s.push(&mut cat, &mut media, b"x", &mut scratch)
-                .await
-                .unwrap(),
+            s.push(
+                &mut cat,
+                &mut media,
+                &mut Reclaim::new(),
+                b"x",
+                &mut scratch
+            )
+            .await
+            .unwrap(),
             ChunkOutcome::Written
         );
         assert_eq!(
@@ -293,10 +340,9 @@ fn publication_database_failure_and_append_cancellation_recover_safely() {
             let mut scratch = [0; MAX_RECORD_BYTES];
             let job = queued(&mut cat, "a", Some(3), &mut scratch);
             let id = job.id;
-            let Start::Ready(mut session) =
-                DownloadSession::start(&mut cat, &mut media, job, &mut scratch)
-                    .await
-                    .unwrap()
+            let Start::Ready(mut session) = start_all(&mut cat, &mut media, job, &mut scratch)
+                .await
+                .unwrap()
             else {
                 panic!()
             };
@@ -304,7 +350,9 @@ fn publication_database_failure_and_append_cancellation_recover_safely() {
             if cancelled {
                 media.hang_append = true;
                 {
-                    let operation = session.push(&mut cat, &mut media, b"abc", &mut scratch);
+                    let mut reclaim = Reclaim::new();
+                    let operation =
+                        session.push(&mut cat, &mut media, &mut reclaim, b"abc", &mut scratch);
                     futures::pin_mut!(operation);
                     assert!(futures::poll!(operation.as_mut()).is_pending());
                 }
@@ -318,7 +366,13 @@ fn publication_database_failure_and_append_cancellation_recover_safely() {
                 );
             } else {
                 session
-                    .push(&mut cat, &mut media, b"abc", &mut scratch)
+                    .push(
+                        &mut cat,
+                        &mut media,
+                        &mut Reclaim::new(),
+                        b"abc",
+                        &mut scratch,
+                    )
                     .await
                     .unwrap();
                 media.after_publish = Some(image.disk.clone());
@@ -369,7 +423,7 @@ fn discarded_partial_frees_space_before_reclaiming_playable_audio() {
         let job = queued(&mut cat, "new", Some(3), &mut scratch);
         std::fs::write(media.path(job.id, true), [2; 4096]).unwrap();
         media.other_bytes = media.capacity - reserve(media.capacity) - 8192;
-        let start = DownloadSession::start(&mut cat, &mut media, job, &mut scratch)
+        let start = start_all(&mut cat, &mut media, job, &mut scratch)
             .await
             .unwrap();
         assert!(matches!(start, Start::Ready(_)));
@@ -393,10 +447,9 @@ fn known_final_chunk_uses_actual_pending_bytes_without_unneeded_reclaim() {
             let job = queued(&mut cat, "a", Some(length), &mut scratch);
             let id = job.id;
             media.other_bytes = media.capacity - reserve(media.capacity) - length;
-            let Start::Ready(mut s) =
-                DownloadSession::start(&mut cat, &mut media, job, &mut scratch)
-                    .await
-                    .unwrap()
+            let Start::Ready(mut s) = start_all(&mut cat, &mut media, job, &mut scratch)
+                .await
+                .unwrap()
             else {
                 panic!("known body fits")
             };
@@ -404,9 +457,15 @@ fn known_final_chunk_uses_actual_pending_bytes_without_unneeded_reclaim() {
             let bytes = std::vec![1;length as usize];
             for chunk in bytes.chunks(AUDIO_CHUNK) {
                 assert_eq!(
-                    s.push(&mut cat, &mut media, chunk, &mut scratch)
-                        .await
-                        .unwrap(),
+                    s.push(
+                        &mut cat,
+                        &mut media,
+                        &mut Reclaim::new(),
+                        chunk,
+                        &mut scratch
+                    )
+                    .await
+                    .unwrap(),
                     ChunkOutcome::Written
                 );
             }
@@ -434,17 +493,22 @@ fn ordinary_body_failure_cleans_up_and_can_retry_without_reboot() {
         let mut scratch = [0; MAX_RECORD_BYTES];
         let job = queued(&mut cat, "a", Some(3), &mut scratch);
         let id = job.id;
-        let Start::Ready(mut s) =
-            DownloadSession::start(&mut cat, &mut media, job.clone(), &mut scratch)
-                .await
-                .unwrap()
+        let Start::Ready(mut s) = start_all(&mut cat, &mut media, job.clone(), &mut scratch)
+            .await
+            .unwrap()
         else {
             panic!()
         };
         s.response(200, Some(3), None).unwrap();
-        s.push(&mut cat, &mut media, b"a", &mut scratch)
-            .await
-            .unwrap();
+        s.push(
+            &mut cat,
+            &mut media,
+            &mut Reclaim::new(),
+            b"a",
+            &mut scratch,
+        )
+        .await
+        .unwrap();
         assert_eq!(
             s.finish(&mut cat, &mut media, false, &mut scratch)
                 .await
@@ -457,7 +521,7 @@ fn ordinary_body_failure_cleans_up_and_can_retry_without_reboot() {
         );
         assert!(!media.path(id, true).exists());
         assert!(matches!(
-            DownloadSession::start(&mut cat, &mut media, job, &mut scratch)
+            start_all(&mut cat, &mut media, job, &mut scratch)
                 .await
                 .unwrap(),
             Start::Ready(_)
@@ -475,16 +539,22 @@ fn changed_expected_length_before_publication_restarts_current_representation() 
         let mut scratch = [0; MAX_RECORD_BYTES];
         let job = queued(&mut cat, "a", Some(3), &mut scratch);
         let id = job.id;
-        let Start::Ready(mut s) = DownloadSession::start(&mut cat, &mut media, job, &mut scratch)
+        let Start::Ready(mut s) = start_all(&mut cat, &mut media, job, &mut scratch)
             .await
             .unwrap()
         else {
             panic!()
         };
         s.response(200, Some(3), None).unwrap();
-        s.push(&mut cat, &mut media, b"abc", &mut scratch)
-            .await
-            .unwrap();
+        s.push(
+            &mut cat,
+            &mut media,
+            &mut Reclaim::new(),
+            b"abc",
+            &mut scratch,
+        )
+        .await
+        .unwrap();
         queued(&mut cat, "a", Some(4), &mut scratch);
         assert_eq!(
             s.finish(&mut cat, &mut media, true, &mut scratch)
@@ -560,7 +630,7 @@ mod capacity {
             let (_image, mut cat, mut media, job) = setup(Some(over), &mut scratch);
             let id = job.id;
             assert!(matches!(
-                DownloadSession::start(&mut cat, &mut media, job, &mut scratch).await,
+                start_all(&mut cat, &mut media, job, &mut scratch).await,
                 Err(MediaError::InvalidInput)
             ));
             assert_eq!(media.commits, 0);
@@ -577,10 +647,9 @@ mod capacity {
             let mut scratch = [0; MAX_RECORD_BYTES];
             let (_image, mut cat, mut media, job) = setup(None, &mut scratch);
             let id = job.id;
-            let Start::Ready(mut session) =
-                DownloadSession::start(&mut cat, &mut media, job, &mut scratch)
-                    .await
-                    .unwrap()
+            let Start::Ready(mut session) = start_all(&mut cat, &mut media, job, &mut scratch)
+                .await
+                .unwrap()
             else {
                 panic!("not started")
             };
@@ -611,16 +680,21 @@ mod capacity {
             let mut scratch = [0; MAX_RECORD_BYTES];
             let (_image, mut cat, mut media, job) = setup(None, &mut scratch);
             let id = job.id;
-            let Start::Ready(mut session) =
-                DownloadSession::start(&mut cat, &mut media, job, &mut scratch)
-                    .await
-                    .unwrap()
+            let Start::Ready(mut session) = start_all(&mut cat, &mut media, job, &mut scratch)
+                .await
+                .unwrap()
             else {
                 panic!("not started")
             };
             session.response(200, None, None).unwrap();
             session
-                .push(&mut cat, &mut media, &[1; AUDIO_CHUNK], &mut scratch)
+                .push(
+                    &mut cat,
+                    &mut media,
+                    &mut Reclaim::new(),
+                    &[1; AUDIO_CHUNK],
+                    &mut scratch,
+                )
                 .await
                 .unwrap();
             assert_eq!(media.table.used(), 1);
@@ -628,7 +702,13 @@ mod capacity {
             session.bytes = u64::from(UNITS) * UNIT_BYTES - 1;
             assert!(matches!(
                 session
-                    .push(&mut cat, &mut media, &[1; 2], &mut scratch)
+                    .push(
+                        &mut cat,
+                        &mut media,
+                        &mut Reclaim::new(),
+                        &[1; 2],
+                        &mut scratch
+                    )
                     .await,
                 Err(MediaError::InvalidInput)
             ));

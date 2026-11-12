@@ -873,3 +873,81 @@ fn full_region_maps_to_full_and_disables() {
         Err(Error::Disabled)
     ));
 }
+
+// Regression (t-133): a batch holds its operations' writes for one commit;
+// reads inside it see them, and a crash before the commit keeps none.
+#[test]
+fn batch_is_one_commit_and_reads_its_own_writes() {
+    let image = Image::new();
+    let mut cat = image.create();
+    let mut scratch = [0; MAX_RECORD_BYTES];
+    let id = cat
+        .upsert(
+            SubscriptionId(1),
+            metadata(Some("a"), "a", "https://x/a"),
+            &mut scratch,
+        )
+        .unwrap()
+        .id;
+    let commits = cat.commits();
+    cat.begin_batch().unwrap();
+    cat.transition_audio(id, AudioState::Downloading, &mut scratch)
+        .unwrap();
+    // Valid only from the held `Downloading`: the read sees the batch.
+    cat.transition_audio(id, AudioState::Missing, &mut scratch)
+        .unwrap();
+    cat.mark_read(id, &mut scratch).unwrap();
+    assert_eq!(cat.commits(), commits);
+    image.crash();
+    drop(cat);
+    let mut cat = image.reopen();
+    let state = cat.get(id, &mut scratch).unwrap().unwrap().state;
+    assert_eq!((state.read, state.audio), (false, AudioState::Queued));
+    cat.begin_batch().unwrap();
+    cat.transition_audio(id, AudioState::Downloading, &mut scratch)
+        .unwrap();
+    cat.mark_read(id, &mut scratch).unwrap();
+    let commits = cat.commits();
+    cat.end_batch(true).unwrap();
+    assert_eq!(cat.commits(), commits + 1);
+    image.crash();
+    drop(cat);
+    let mut cat = image.reopen();
+    let state = cat.get(id, &mut scratch).unwrap().unwrap().state;
+    assert_eq!((state.read, state.audio), (true, AudioState::Downloading));
+}
+
+// Regression (t-133): inside a batch, an error detected before any write
+// keeps the earlier operations' writes for the commit; dropping held
+// writes disables the owner.
+#[test]
+fn batch_errors_keep_or_drop_held_writes() {
+    let image = Image::new();
+    let mut cat = image.create();
+    let mut scratch = [0; MAX_RECORD_BYTES];
+    let id = cat
+        .upsert(
+            SubscriptionId(1),
+            metadata(Some("a"), "a", "https://x/a"),
+            &mut scratch,
+        )
+        .unwrap()
+        .id;
+    cat.begin_batch().unwrap();
+    cat.transition_audio(id, AudioState::Downloading, &mut scratch)
+        .unwrap();
+    assert_eq!(
+        cat.transition_audio(id, AudioState::Reclaimed, &mut scratch),
+        Err(Error::InvalidState)
+    );
+    cat.end_batch(true).unwrap();
+    let state = cat.get(id, &mut scratch).unwrap().unwrap().state;
+    assert_eq!(state.audio, AudioState::Downloading);
+    cat.begin_batch().unwrap();
+    cat.mark_read(id, &mut scratch).unwrap();
+    assert_eq!(cat.end_batch(false), Err(Error::Storage));
+    assert_eq!(cat.get(id, &mut scratch).err(), Some(Error::Disabled));
+    drop(cat);
+    let mut cat = image.reopen();
+    assert!(!cat.get(id, &mut scratch).unwrap().unwrap().state.read);
+}

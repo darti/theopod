@@ -96,3 +96,23 @@ pub enum MediaError<M> {
     InvalidState,
     InvalidInput,
 }
+
+/// Close a batch begun with `Catalogue::begin_batch` around `result`: one
+/// commit when it succeeded, or failed with an error detected before any
+/// change (the earlier operations' writes are kept, as without a batch). A
+/// failure to commit, or held writes dropped after a fatal error, is the
+/// error (it disabled the catalogue).
+pub(crate) fn end_batch<M: MediaStore, T>(
+    cat: &mut Catalogue,
+    result: Result<T, MediaError<M::Error>>,
+) -> Result<T, MediaError<M::Error>> {
+    let commit = match &result {
+        Ok(_) | Err(MediaError::InvalidState | MediaError::InvalidInput) => true,
+        Err(MediaError::Catalogue(e)) => !crate::catalogue::is_fatal(*e),
+        Err(MediaError::Media(e)) => !M::is_fatal(e),
+    };
+    match (cat.end_batch(commit), result) {
+        (Ok(()), result) => result,
+        (Err(error), _) => Err(MediaError::Catalogue(error)),
+    }
+}

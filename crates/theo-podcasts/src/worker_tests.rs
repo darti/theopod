@@ -232,3 +232,47 @@ fn shutdown_reports_success_only_after_both_acknowledgments() {
     )));
     assert!(flushed.get());
 }
+
+// Regression (t-133): each podcast request makes at most one commit, so the
+// worker repeats `DownloadStart` while the owner answers `Pending`.
+#[test]
+fn download_start_is_repeated_while_pending() {
+    struct Scripted {
+        replies: VecDeque<Reply>,
+        starts: usize,
+    }
+    impl DownloadIo for Scripted {
+        async fn command(&mut self, command: Command) -> Result<Reply, Error> {
+            if let Command::DownloadStart(_) = command {
+                self.starts += 1;
+            }
+            self.replies.pop_front().ok_or(Error::Protocol)
+        }
+        async fn transfer(&mut self, _: &str) -> Result<(), Error> {
+            Ok(())
+        }
+    }
+    let job = crate::download::DownloadJob {
+        id: EpisodeId(7),
+        enclosure: "https://cdn.example/a".try_into().unwrap(),
+        expected_bytes: None,
+    };
+    let mut io = Scripted {
+        replies: VecDeque::from([
+            Reply::Job {
+                job: Some(job),
+                after: None,
+                done: false,
+            },
+            Reply::Pending,
+            Reply::Pending,
+            Reply::Ready,
+            Reply::Downloaded(crate::download::DownloadOutcome::Complete),
+        ]),
+        starts: 0,
+    };
+    let mut after = None;
+    assert_eq!(block_on(download_one(&mut io, &mut after)), Ok(true));
+    assert_eq!(io.starts, 3);
+    assert!(io.replies.is_empty());
+}

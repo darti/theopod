@@ -1,8 +1,9 @@
 use super::*;
 use crate::{
     catalogue::*,
-    download::{DownloadJob, DownloadSession, Start},
+    download::{DownloadJob, Start},
     media_test_support::Disk,
+    media_test_support::start_all,
     test_support::Image,
     units::{MAX_EXTENTS, UNIT_BYTES},
 };
@@ -490,9 +491,7 @@ async fn cut_history<M: MediaStore>(
     scratch: &mut [u8],
 ) -> Result<(), ()> {
     let id = job.id;
-    let Start::Ready(mut session) = DownloadSession::start(cat, media, job, scratch)
-        .await
-        .map_err(|_| ())?
+    let Start::Ready(mut session) = start_all(cat, media, job, scratch).await.map_err(|_| ())?
     else {
         return Err(());
     };
@@ -501,7 +500,13 @@ async fn cut_history<M: MediaStore>(
     while left > 0 {
         let n = left.min(AUDIO_CHUNK as u64) as usize;
         session
-            .push(cat, media, &[5; AUDIO_CHUNK][..n], scratch)
+            .push(
+                cat,
+                media,
+                &mut crate::reclaim::Reclaim::new(),
+                &[5; AUDIO_CHUNK][..n],
+                scratch,
+            )
             .await
             .map_err(|_| ())?;
         left -= n as u64;
@@ -552,7 +557,8 @@ fn cut_after_each_step_leaks_no_unit() {
         .into_iter()
         .filter(|c| (base..total).contains(c))
         .collect();
-    assert!(cuts.len() > 20, "{cuts:?}");
+    // Batched requests (t-133) commit less often: fewer boundaries.
+    assert!(cuts.len() > 12, "{cuts:?}");
     let threads = std::thread::available_parallelism().map_or(4, |n| n.get().min(8));
     let kept: usize = std::thread::scope(|scope| {
         let workers: Vec<_> = (0..threads)
@@ -660,7 +666,7 @@ fn full_card_reports_full_and_download_waits() {
         let mut scratch = [0; MAX_RECORD_BYTES];
         let job = queued(&mut cat, "big", Some(3 * UNIT_BYTES), &mut scratch);
         assert!(matches!(
-            DownloadSession::start(&mut cat, &mut media, job, &mut scratch)
+            start_all(&mut cat, &mut media, job, &mut scratch)
                 .await
                 .unwrap(),
             Start::WaitingForSpace

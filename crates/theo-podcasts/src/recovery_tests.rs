@@ -48,7 +48,7 @@ fn unfinished_files_are_removed_by_local_id_and_read_state_survives() {
 #[test]
 fn deleting_intent_survives_each_unlink_boundary_without_unread_loss() {
     // Regression (t-109): unlink failures preserve tombstones and cannot select unread audio.
-    use crate::{media_test_support::available, reclaim::make_space};
+    use crate::media_test_support::{available, make_space_all};
     block_on(async {
         let mut cuts = std::collections::VecDeque::from([None]);
         while let Some(cut) = cuts.pop_front() {
@@ -77,7 +77,7 @@ fn deleting_intent_survives_each_unlink_boundary_without_unread_loss() {
             );
             media.other_bytes = media.capacity - reserve(media.capacity) - 4100 - 4096;
             media.fail_at = cut;
-            let result = make_space(&mut cat, &mut media, 8192, &mut scratch).await;
+            let result = make_space_all(&mut cat, &mut media, 8192, &mut scratch).await;
             if cut.is_none() {
                 assert!(result.unwrap());
                 cuts.extend((0..media.steps).map(Some));
@@ -160,7 +160,7 @@ fn missing_or_short_completed_file_is_not_available_and_active_files_are_protect
 #[test]
 fn failure_after_unlink_retains_read_deletion_intent_until_reopen() {
     // Regression (t-109): durable intent survives unlink-to-database commit failure.
-    use crate::{media_test_support::available, reclaim::make_space};
+    use crate::media_test_support::{available, make_space_all};
     block_on(async {
         let image = Image::new();
         let mut cat = image.create();
@@ -179,7 +179,7 @@ fn failure_after_unlink_retains_read_deletion_intent_until_reopen() {
         media.other_bytes = media.capacity - reserve(media.capacity) - 4096 - 4096;
         media.after_unlink = Some(image.disk.clone());
         assert!(
-            make_space(&mut cat, &mut media, 8192, &mut scratch)
+            make_space_all(&mut cat, &mut media, 8192, &mut scratch)
                 .await
                 .is_err()
         );

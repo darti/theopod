@@ -47,7 +47,7 @@ for the V2 pinout and hardware resources.
   over the serial log (firmware writer, host parser).
 - `crates/theo-storage/`: `no_std` bounded log buffering, filtering and
   rotation policy, LittleFS sector backing and owned-sector mailboxes, plus the
-  EKV copy-on-write store and optional legacy FAT transport; host-tested by `just test`.
+  redb storage backend over the database region; host-tested by `just test`.
 - `tools/frame-png/`: host tool turning a dump in a serial log into a PNG.
 - `tools/passive-monitor.py`: serial log recorder (macOS, `python3`) that
   does not reset the chip and follows it across deep-sleep wakes
@@ -269,9 +269,7 @@ episodes and persists validators only after every page succeeds. It also defines
 pressure-only reclamation of read, inactive files. The firmware now connects this catalogue to the shared storage owner and the selected verified HTTPS transport. See
 [ADR-0017](docs/adr/0017-store-bounded-podcast-identity-and-state.md).
 
-`just test-catalogue-recovery` runs the longer file-backed interruption model
-for atomic episode/index/ID-counter commits. Run it when changing catalogue
-persistence or its schema. Normal `just test` retains real-file sync/reopen
+Normal `just test` retains real-file sync/reopen
 coverage. `just check`/`just lint` also check the standalone crate for Xtensa.
 
 
@@ -354,5 +352,4 @@ these host/compile checks. See [ADR-0018](docs/adr/0018-integrate-podcast-backgr
 
 Verification: `just fmt`, `just check`, `just test`, `just lint`, `just audit`,
 `just build`, and `just build-network /tmp/fixture.toml` with synthetic credentials.
-`just test` also runs the new-image tool's tests. Existing long fault sweeps remain
-in `just test-storage-recovery` and `just test-catalogue-recovery`.
+`just test` also runs the new-image tool's tests. Database recovery checks are described above.

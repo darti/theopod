@@ -22,5 +22,4 @@ test-disk = []
 
 [dev-dependencies]
 critical-section = { workspace = true, features = ["std"] }
-embassy-sync-06 = { package = "embassy-sync", version = "0.6" }
 futures = { version = "0.3", features = ["executor"] }

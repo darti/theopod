@@ -1,6 +1,6 @@
 # ADR-0022: Store the podcast catalogue in redb
 
-- Status: Accepted; implementation pending
+- Status: Accepted
 - Date: 2026-11-12
 - Related: t-133; supersedes ADR-0011; amends ADR-0017, ADR-0021
 - Spec: `docs/superpowers/specs/2026-11-12-redb-catalogue-design.md`

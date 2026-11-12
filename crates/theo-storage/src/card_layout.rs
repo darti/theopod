@@ -174,6 +174,7 @@ impl CardLayout {
     /// None means descriptor absent: try legacy mount without formatting.
     /// A valid copy survives a torn copy. Unknown versions/geometries or two
     /// conflicting valid copies must stop region mounting rather than guess.
+    /// An unknown `THEOSD??` magic yields `Version`, whatever its CRC.
     /// `Obsolete` only when no copy is a v3 layout, an unknown version or an
     /// invalid geometry: only then may provisioning replace the card's layout.
     pub fn select(

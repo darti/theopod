@@ -3,7 +3,8 @@
 HAL-independent SD storage for Theo Pod: bounded log buffering, the
 LittleFS sector adapter, checked card regions and the redb storage backend.
 `no_std` + `alloc`, unit-tested on the host (`just test`). Dependencies:
-`littlefs-rust` (vendored, ADR-0012), `redb` (ADR-0022), `embassy-*`, `allocator-api2`.
+`littlefs-rust` (vendored, ADR-0012), `redb` (ADR-0022), `embassy-*`,
+`allocator-api2`.
 Used by the firmware (`src/device/sd_worker.rs`) and `theo-podcasts`.
 
 ## Contents
@@ -54,4 +55,5 @@ client. Layout, unit store and failure scopes: ADR-0020.
   mount; v3 layouts come only from explicit provisioning (ADR-0021).
 - Any failed device call disables its adapter until reboot. `RegionIo`
   drops the shared device, disabling every region, only when
-  `device_failed()`; other failures stay in their scope (`failure_scope`, `after_failure`).
+  `device_failed()`; other failures stay in their scope (`failure_scope`,
+  `after_failure`).

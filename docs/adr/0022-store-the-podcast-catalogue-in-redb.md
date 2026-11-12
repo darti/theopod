@@ -59,6 +59,7 @@ ranges or multi-key transactions; file-per-key designs lack atomicity.
 
 - Heap order: PSRAM is registered before internal RAM; esp-radio and esp-rtos request `Internal` explicitly.
 - Growth is not zero-filled: `set_len` rewrites only the length record (spike: 5,000 inserts with `0xA5` fill).
+- Two length sectors: `set_len` writes the next generation into the copy not holding the current one, so a torn record write reopens with the old or the new length instead of `Corrupt`; the redb file starts at region sector 2.
 - Provisioning creates no tables: the first `Catalogue::open` of an empty provisioned region creates them.
 - v2 cards are refused like any unknown version; one log line asks to re-provision.
 - Sync batching: one `WriteTransaction` per feed page (`begin_batch`, `commit_batch`).

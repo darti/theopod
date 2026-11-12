@@ -1,7 +1,11 @@
 //! redb storage over one card region (ADR-0022).
 //!
-//! Sector 0 of the region holds the length record (magic, logical length,
-//! CRC); the redb file is the rest, byte `n` in region sector `1 + n / 512`.
+//! Region sectors 0 and 1 hold two copies of the length record (magic,
+//! generation, logical length, CRC-32); the redb file is the rest, byte `n`
+//! in region sector `LENGTH_SECTORS + n / 512`. The valid copy with the
+//! higher generation is current; `set_len` writes the next generation into
+//! the other copy, so a write torn by power loss leaves the current one
+//! intact and the region reopens with the old or the new length.
 //! Growth is not zero-filled: redb tolerates arbitrary bytes past its last
 //! write (measured; the tests fill fresh sectors with `0xA5`).
 
@@ -14,8 +18,8 @@ use littlefs_rust::Error as DeviceError;
 use redb::{StorageBackend, io};
 
 const MAGIC: &[u8; 8] = b"THEORDB1";
-/// Sectors before the redb file: the length record.
-pub const LENGTH_SECTORS: u32 = 1;
+/// Sectors before the redb file: the two copies of the length record.
+pub const LENGTH_SECTORS: u32 = 2;
 /// Message of the error `set_len` returns past the region; the catalogue
 /// maps it to `Full`.
 pub const REGION_FULL: &str = "theo: database region full";
@@ -23,9 +27,9 @@ const SECTOR: u64 = SECTOR_SIZE as u64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackendError {
-    /// The region is smaller than the length record.
+    /// The region has no room past the length records.
     Geometry,
-    /// No valid length record: not provisioned, or damaged.
+    /// No valid length record copy: not provisioned, or damaged.
     Corrupt,
     Device(DeviceError),
 }
@@ -38,6 +42,10 @@ struct Inner<D> {
     device: D,
     capacity: u64,
     len: u64,
+    /// Generation of the current length record copy.
+    generation: u64,
+    /// Region sector (0 or 1) holding the current copy.
+    current: u32,
 }
 
 // SAFETY: `RegionBackend::new` is unsafe and requires every use and the
@@ -58,9 +66,12 @@ impl<D> fmt::Debug for RegionBackend<D> {
 impl<D: SectorIo> RegionBackend<D> {
     /// Write an empty length record: the region holds an empty database.
     ///
+    /// Copy 0 gets generation 1 and length 0; copy 1 is zeroed (invalid),
+    /// so a copy left by an earlier use cannot outrank the new record.
     /// Destructive; explicit provisioning only (ADR-0021).
     pub fn format(device: &mut D) -> Result<(), DeviceError> {
-        device.write_sector(0, &record(0))?;
+        device.write_sector(0, &record(1, 0))?;
+        device.write_sector(1, &[0; SECTOR_SIZE])?;
         device.sync()
     }
 
@@ -76,37 +87,59 @@ impl<D: SectorIo> RegionBackend<D> {
             return Err(BackendError::Geometry);
         }
         let capacity = u64::from(sectors - LENGTH_SECTORS) * SECTOR;
+        let mut best: Option<(u32, Record)> = None;
         let mut sector = [0; SECTOR_SIZE];
-        device
-            .read_sector(0, &mut sector)
-            .map_err(BackendError::Device)?;
-        let len = decode(&sector)
-            .filter(|&len| len <= capacity)
-            .ok_or(BackendError::Corrupt)?;
+        for index in 0..LENGTH_SECTORS {
+            device
+                .read_sector(index, &mut sector)
+                .map_err(BackendError::Device)?;
+            let Some(copy) = decode(&sector).filter(|copy| copy.len <= capacity) else {
+                continue;
+            };
+            if best.is_none_or(|(_, b)| copy.generation > b.generation) {
+                best = Some((index, copy));
+            }
+        }
+        let (current, copy) = best.ok_or(BackendError::Corrupt)?;
         Ok(Self {
             inner: RefCell::new(Inner {
                 device,
                 capacity,
-                len,
+                len: copy.len,
+                generation: copy.generation,
+                current,
             }),
         })
     }
 }
 
-fn record(len: u64) -> [u8; SECTOR_SIZE] {
+/// One decoded copy of the length record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Record {
+    generation: u64,
+    len: u64,
+}
+
+/// Layout: magic (8), generation (8, LE), length (8, LE), CRC-32 of the
+/// preceding 24 bytes (4, LE); the rest of the sector is zero.
+fn record(generation: u64, len: u64) -> [u8; SECTOR_SIZE] {
     let mut sector = [0; SECTOR_SIZE];
     sector[..8].copy_from_slice(MAGIC);
-    sector[8..16].copy_from_slice(&len.to_le_bytes());
-    let crc = crc32(&sector[..16]);
-    sector[16..20].copy_from_slice(&crc.to_le_bytes());
+    sector[8..16].copy_from_slice(&generation.to_le_bytes());
+    sector[16..24].copy_from_slice(&len.to_le_bytes());
+    let crc = crc32(&sector[..24]);
+    sector[24..28].copy_from_slice(&crc.to_le_bytes());
     sector
 }
-fn decode(sector: &[u8; SECTOR_SIZE]) -> Option<u64> {
-    let crc = u32::from_le_bytes(sector[16..20].try_into().ok()?);
-    if sector[..8] != *MAGIC || crc != crc32(&sector[..16]) {
+fn decode(sector: &[u8; SECTOR_SIZE]) -> Option<Record> {
+    let crc = u32::from_le_bytes(sector[24..28].try_into().ok()?);
+    if sector[..8] != *MAGIC || crc != crc32(&sector[..24]) {
         return None;
     }
-    Some(u64::from_le_bytes(sector[8..16].try_into().ok()?))
+    Some(Record {
+        generation: u64::from_le_bytes(sector[8..16].try_into().ok()?),
+        len: u64::from_le_bytes(sector[16..24].try_into().ok()?),
+    })
 }
 fn device(_: DeviceError) -> io::Error {
     io::Error::other("theo: sector device failed")
@@ -155,10 +188,18 @@ impl<D: SectorIo + 'static> StorageBackend for RegionBackend<D> {
         if len > inner.capacity {
             return Err(io::Error::other(REGION_FULL));
         }
+        // Into the other copy: a torn write leaves the current one intact.
+        let generation = inner.generation.checked_add(1).ok_or_else(bounds)?;
+        let target = 1 - inner.current;
+        inner
+            .device
+            .write_sector(target, &record(generation, len))
+            .map_err(device)?;
         // Durable before redb writes into the new space.
-        inner.device.write_sector(0, &record(len)).map_err(device)?;
         inner.device.sync().map_err(device)?;
         inner.len = len;
+        inner.generation = generation;
+        inner.current = target;
         Ok(())
     }
 

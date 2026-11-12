@@ -54,3 +54,12 @@ ranges or multi-key transactions; file-per-key designs lack atomicity.
   before the board run.
 - The ekv-specific ADRs (0011, the ekv parts of 0015 and 0017) describe
   history only.
+
+## Amendments
+
+- Heap order: PSRAM is registered before internal RAM; esp-radio and esp-rtos request `Internal` explicitly.
+- Growth is not zero-filled: `set_len` rewrites only the length record (spike: 5,000 inserts with `0xA5` fill).
+- Provisioning creates no tables: the first `Catalogue::open` of an empty provisioned region creates them.
+- v2 cards are refused like any unknown version; one log line asks to re-provision.
+- Sync batching: one `WriteTransaction` per feed page (`begin_batch`, `commit_batch`).
+- Fixed bug: the ekv `unit_ids` range scan returned `Corrupt` on show-index keys; separate tables remove it.

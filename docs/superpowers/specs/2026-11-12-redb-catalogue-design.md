@@ -184,6 +184,38 @@ boot; "podcasts online" within a few seconds; core1 stack high-water mark;
 follow a feed and sync a page; power off during a sync, then reopen fast and
 intact.
 
+## Amendments (2026-11-12, while planning)
+
+- **Heap order.** esp-radio forces esp-alloc's global allocator, so redb's
+  allocations cannot be routed by type. The firmware registers PSRAM before
+  internal RAM: global allocations land in PSRAM, while esp-radio and
+  esp-rtos keep requesting `Internal` explicitly. A smaller redb cache was
+  measured and rejected: 64 KiB costs ~163 writes (~346 ms) per commit,
+  32 KiB ~220 writes (~460 ms), against ~106 (~226 ms) at 256 KiB; a PSRAM
+  sector cache does not reduce writes.
+- **Growth is not zero-filled.** redb grows its file by doubling (1, 2, 4,
+  9, 18 MiB at 0.2k, 0.5k, 1k, 2.1k, 4.3k episodes). Zero-filling 9 MiB at
+  2 ms per sector would block one commit for ~36 s. The spike ran 5,000
+  inserts with growth filled with `0xA5`, reopened cleanly and after a
+  crash, and read every record back. `set_len` therefore only rewrites the
+  length record; a regression test keeps the fill non-zero.
+- **Provisioning creates no tables.** redb's backend must be `'static`, but
+  provisioning only borrows the card. `provision_v3` writes the length
+  record with length 0; the first `Catalogue::open` of an empty, provisioned
+  region creates the tables and counters in one transaction. A sector
+  without the record's magic and CRC is `Corrupt`, so a blank or damaged
+  region is never formatted at boot.
+- **v2 cards.** A v2 descriptor is refused like any unknown version (no
+  regions mount; one log line asks to re-provision). Keeping media mounted
+  would need v2 geometry code, which the no-migration decision excludes.
+- **Sync batching.** `Catalogue` holds an open `WriteTransaction` across one
+  feed page: `begin_batch`, `upsert` into it, `commit_batch` at the page end.
+  Any other operation commits a pending batch first.
+- **Fixed bug.** The ekv units range scan (`unit_ids`, prefix `u`) also
+  reached the 37-byte show-index keys (`u` + show id) and returned `Corrupt`
+  once fewer than 16 unit records remained after the cursor. Separate tables
+  remove it; Task 4 adds a regression test.
+
 ## Risks
 
 - redb's `no_std` mode is experimental (`experimental-api-5`); the version is

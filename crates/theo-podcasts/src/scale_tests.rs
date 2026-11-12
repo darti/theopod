@@ -70,18 +70,17 @@ fn scan_page_and_commit_stay_within_the_io_budget() {
     image.disk.reset_counters();
     cat.mark_read(EpisodeId(2_500), &mut scratch).unwrap();
     let s = image.disk.state();
-    // IO_BUDGET 500 ms at 2 ms per command.
     eprintln!("commit: {} reads + {} writes", s.reads, s.writes);
     assert!(
-        s.reads + s.writes <= 250,
+        s.reads + s.writes <= REQUEST_COMMANDS,
         "commit: {} reads + {} writes",
         s.reads,
         s.writes
     );
 }
 
-// One synced episode is one commit (episode, identity and counter); a podcast
-// request runs under a 500 ms IO budget, 250 commands at 2 ms each.
+// One synced episode is one commit (episode, identity and counter), within
+// a podcast request's budget.
 #[test]
 #[cfg_attr(debug_assertions, ignore = "sector bounds are release-only")]
 fn upsert_commit_stays_within_the_io_budget() {
@@ -92,16 +91,33 @@ fn upsert_commit_stays_within_the_io_budget() {
     let s = image.disk.state();
     eprintln!("upsert: {} reads + {} writes", s.reads, s.writes);
     assert!(
-        s.reads + s.writes <= 250,
+        s.reads + s.writes <= REQUEST_COMMANDS,
         "upsert: {} reads + {} writes",
         s.reads,
         s.writes
     );
 }
 
-/// A podcast request runs under `IO_BUDGET` (500 ms) on the board: 250
+/// A podcast request runs under `PODCAST_BUDGET` (1 s) on the board: 500
 /// sector commands at 2 ms each, catalogue and media sectors together.
-const REQUEST_COMMANDS: usize = 250;
+/// User-approved 2026-11-12 (was 500 ms / 250): cold-cache redb commits
+/// measured ~250 commands.
+const REQUEST_COMMANDS: usize = 500;
+
+/// Reopen the catalogue and scan every episode: redb's page cache then
+/// holds none of the pages a commit needs (the worst case measured).
+fn chill(image: &Image) -> Catalogue {
+    let mut cat = image.reopen();
+    let mut scratch = [0; MAX_RECORD_BYTES];
+    let mut after = None;
+    loop {
+        let page = cat.scan(after, &mut scratch, |_| ()).unwrap();
+        after = page.resume_after;
+        if !page.has_more {
+            return cat;
+        }
+    }
+}
 
 /// Catalogue and media sector commands since the last reset.
 fn commands(image: &Image, media: &Media) -> (usize, usize) {
@@ -243,77 +259,68 @@ fn recover_one_is_one_commit_within_the_io_budget() {
 }
 
 // Regression (t-133): with every episode read and `Available`, each
-// `make_space` step of a whole eviction round (bounded scan, `Deleting`
-// intent, unlink and `Reclaimed`) fits a request, makes at most one commit,
-// and evicts the policy's choice.
-//
-// KNOWN FAILURE (t-133, open): the scan steps fit (at most 128 reads), but
-// the eviction commits follow a scan that evicted redb's page cache: the
-// `Deleting` commit measured 114 reads + 114 writes, unlink and `Reclaimed`
-// 194 reads + 210 writes (unlink alone 146-170 + 138-154). Run with
-// `--ignored` in release.
-#[test]
-#[ignore = "eviction commits exceed the 250-command budget (t-133)"]
-fn make_space_steps_stay_within_the_io_budget() {
+// `make_space` step (`Deleting` intent of the index's first entry, then
+// unlink and `Reclaimed`) fits a request, makes at most one commit, and
+// evicts the policy's choice; `cold` reopens the catalogue and scans every
+// episode before each step.
+fn make_space_steps(cold: bool) {
     use crate::{
         media::AUDIO_CHUNK,
         reclaim::{Reclaim, SpaceStep, make_space},
     };
     let image = fill();
-    let mut cat = image.reopen();
+    let mut cat = Some(image.reopen());
     let mut scratch = [0; MAX_RECORD_BYTES];
     // Every episode read and `Available`, 50 per commit.
+    let c = cat.as_mut().unwrap();
     for first in (1..=EPISODES).step_by(50) {
-        cat.begin_batch().unwrap();
+        c.begin_batch().unwrap();
         for id in first..first + 50 {
             let id = EpisodeId(id);
-            cat.transition_audio(id, AudioState::Downloading, &mut scratch)
+            c.transition_audio(id, AudioState::Downloading, &mut scratch)
                 .unwrap();
-            cat.finish_download(id, 1, &mut scratch).unwrap();
-            cat.mark_read(id, &mut scratch).unwrap();
+            c.finish_download(id, 1, &mut scratch).unwrap();
+            c.mark_read(id, &mut scratch).unwrap();
         }
-        cat.end_batch(true).unwrap();
+        c.end_batch(true).unwrap();
     }
     // 20 units, 16 reserved: published audio of the oldest (episode 1,
     // one unit) and of episode 2 (three units) leaves a 4 KiB deficit.
-    let mut media = media(&mut cat, 20);
+    let mut media = media(c, 20);
     for (id, units) in [(1, 1), (2, 3)] {
         let id = EpisodeId(id);
         let len = units * crate::unit_media::UNIT_BYTES;
         futures::executor::block_on(async {
-            media.reset_temp(&mut cat, id, Some(len)).await.unwrap();
+            media.reset_temp(c, id, Some(len)).await.unwrap();
             for _ in 0..len / AUDIO_CHUNK as u64 {
-                media
-                    .append_temp(&mut cat, id, &[1; AUDIO_CHUNK])
-                    .await
-                    .unwrap();
+                media.append_temp(c, id, &[1; AUDIO_CHUNK]).await.unwrap();
             }
-            media.sync_temp(&mut cat, id).await.unwrap();
-            media.publish_temp(&mut cat, id).await.unwrap();
+            media.sync_temp(c, id).await.unwrap();
+            media.publish_temp(c, id).await.unwrap();
         });
     }
     let mut reclaim = Reclaim::new();
-    let (mut steps, mut worst) = (0, (0, 0));
+    let mut steps = 0;
     loop {
+        if cold {
+            drop(cat.take());
+            cat = Some(chill(&image));
+        }
+        let c = cat.as_mut().unwrap();
         reset(&image, &mut media);
-        let commits = cat.commits();
+        let commits = c.commits();
         let step = futures::executor::block_on(make_space(
-            &mut cat,
+            c,
             &mut media,
             &mut reclaim,
             AUDIO_CHUNK as u64,
             &mut scratch,
         ))
         .unwrap();
-        assert!(cat.commits() - commits <= 1);
-        let (reads, writes) = commands(&image, &media);
-        eprintln!("make_space step {steps} ({step:?}): {reads} reads + {writes} writes");
-        if reads + writes > worst.0 + worst.1 {
-            worst = (reads, writes);
-        }
-        assert!(
-            reads + writes <= REQUEST_COMMANDS,
-            "step {steps}: {reads} reads + {writes} writes"
+        assert!(c.commits() - commits <= 1);
+        within_budget(
+            &std::format!("make_space cold={cold} step {steps} ({step:?})"),
+            commands(&image, &media),
         );
         steps += 1;
         match step {
@@ -322,14 +329,22 @@ fn make_space_steps_stay_within_the_io_budget() {
             SpaceStep::Unavailable => panic!("unavailable"),
         }
     }
-    eprintln!(
-        "make_space: {steps} steps, worst {} reads + {} writes",
-        worst.0, worst.1
-    );
-    let state = cat.get(EpisodeId(1), &mut scratch).unwrap().unwrap().state;
+    assert_eq!(steps, 3);
+    let c = cat.as_mut().unwrap();
+    let state = c.get(EpisodeId(1), &mut scratch).unwrap().unwrap().state;
     assert_eq!(state.audio, AudioState::Reclaimed);
-    let state = cat.get(EpisodeId(2), &mut scratch).unwrap().unwrap().state;
+    let state = c.get(EpisodeId(2), &mut scratch).unwrap().unwrap().state;
     assert_eq!(state.audio, AudioState::Available);
+}
+#[test]
+#[cfg_attr(debug_assertions, ignore = "sector bounds are release-only")]
+fn make_space_steps_stay_within_the_io_budget() {
+    make_space_steps(false);
+}
+#[test]
+#[cfg_attr(debug_assertions, ignore = "sector bounds are release-only")]
+fn make_space_steps_stay_within_the_io_budget_cold() {
+    make_space_steps(true);
 }
 
 /// A feed of `count` short items with guids `prefix-0..`.
@@ -346,15 +361,21 @@ fn feed_items(prefix: &str, count: usize) -> std::string::String {
 /// returns the pushes and the worst push.
 fn push_body(
     image: &Image,
-    cat: &mut Catalogue,
+    cat: &mut Option<Catalogue>,
     session: &mut crate::sync::SyncSession,
     body: &[u8],
+    cold: bool,
 ) -> (usize, (usize, usize)) {
     let mut scratch = [0; MAX_RECORD_BYTES];
     let (mut pushes, mut worst) = (0, (0, 0));
     for chunk in body.chunks(crate::sync::MAX_CHUNK_BYTES) {
         let mut rest = chunk;
         while !rest.is_empty() {
+            if cold {
+                drop(cat.take());
+                *cat = Some(chill(image));
+            }
+            let cat = cat.as_mut().unwrap();
             image.disk.reset_counters();
             let commits = cat.commits();
             let used = session.push(cat, rest, &mut scratch).unwrap();
@@ -380,30 +401,27 @@ fn push_body(
 // Regression (t-133): a `SyncChunk` of many new episodes commits one per
 // request (the network task resends the rest), and a chunk of known
 // episodes reads at most `MAX_CHUNK_ITEMS` of them, each request within the
-// IO budget at scale.
-#[test]
-#[cfg_attr(debug_assertions, ignore = "sector bounds are release-only")]
-fn sync_chunk_requests_stay_within_the_io_budget() {
+// budget at scale; `cold` reopens the catalogue and scans every episode
+// before each push.
+fn sync_chunk_requests(cold: bool) {
     use crate::sync::{MAX_CHUNK_ITEMS, SyncSession, Validators};
     const ROOT: &str = "https://rss-rf.aerion.me/rss/4a41823f-f1f7-4725-8380-e428893eb93b";
     let image = fill();
-    let mut cat = image.reopen();
+    let mut cat = Some(image.reopen());
     let mut scratch = [0; MAX_RECORD_BYTES];
     let feed = SubscriptionId(1);
     let new = feed_items("new", 40);
     let body = std::format!("<rss><channel>{new}</channel></rss>");
     let mut session = SyncSession::new(feed, ROOT, None).unwrap();
     session.response(200, Validators::default()).unwrap();
-    let (pushes, worst) = push_body(&image, &mut cat, &mut session, body.as_bytes());
+    let (pushes, worst) = push_body(&image, &mut cat, &mut session, body.as_bytes(), cold);
     eprintln!(
-        "sync new: {pushes} pushes, worst {} reads + {} writes",
+        "sync new cold={cold}: {pushes} pushes, worst {} reads + {} writes",
         worst.0, worst.1
     );
     assert!(!session.end_page().unwrap());
-    assert_eq!(
-        session.complete(&mut cat, &mut scratch).unwrap().created,
-        40
-    );
+    let c = cat.as_mut().unwrap();
+    assert_eq!(session.complete(c, &mut scratch).unwrap().created, 40);
     // Known episodes, then new ones: `MAX_CHUNK_ITEMS - 1` reads-only
     // upserts before a committing one in the same request.
     let mixed = std::format!(
@@ -416,10 +434,32 @@ fn sync_chunk_requests_stay_within_the_io_budget() {
     // Align the first new item after `MAX_CHUNK_ITEMS - 1` known ones.
     let skip = feed_items("new", 40 - (MAX_CHUNK_ITEMS - 1));
     let head = "<rss><channel>".len() + skip.len();
-    push_body(&image, &mut cat, &mut session, &mixed.as_bytes()[..head]);
-    let (pushes, worst) = push_body(&image, &mut cat, &mut session, &mixed.as_bytes()[head..]);
+    push_body(
+        &image,
+        &mut cat,
+        &mut session,
+        &mixed.as_bytes()[..head],
+        cold,
+    );
+    let (pushes, worst) = push_body(
+        &image,
+        &mut cat,
+        &mut session,
+        &mixed.as_bytes()[head..],
+        cold,
+    );
     eprintln!(
-        "sync mixed: {pushes} pushes, worst {} reads + {} writes",
+        "sync mixed cold={cold}: {pushes} pushes, worst {} reads + {} writes",
         worst.0, worst.1
     );
+}
+#[test]
+#[cfg_attr(debug_assertions, ignore = "sector bounds are release-only")]
+fn sync_chunk_requests_stay_within_the_io_budget() {
+    sync_chunk_requests(false);
+}
+#[test]
+#[cfg_attr(debug_assertions, ignore = "sector bounds are release-only")]
+fn sync_chunk_requests_stay_within_the_io_budget_cold() {
+    sync_chunk_requests(true);
 }

@@ -62,5 +62,6 @@ ranges or multi-key transactions; file-per-key designs lack atomicity.
 - Two length sectors: `set_len` writes the next generation into the copy not holding the current one, so a torn record write reopens with the old or the new length instead of `Corrupt`; the redb file starts at region sector 2.
 - Provisioning creates no tables: the first `Catalogue::open` of an empty provisioned region creates them.
 - v2 cards are refused like any unknown version; one log line asks to re-provision.
-- Sync batching: one `WriteTransaction` per feed page (`begin_batch`, `commit_batch`).
+- Per-episode sync commits (2026-11-12): a 50-episode page commit measured ~2,500 sector commands (~5 s) at 5,000 episodes, over the 500 ms IO_BUDGET of a podcast request; each episode commits on its own (~0.2 s); a first 5,000-episode sync takes ~17–20 min.
+- Catalogue::open measured 80 reads at scale (table checks); bound 96, raw redb open ≤64.
 - Fixed bug: the ekv `unit_ids` range scan returned `Corrupt` on show-index keys; separate tables remove it.

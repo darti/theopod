@@ -321,7 +321,6 @@ impl Catalogue {
         &mut self,
         table: &mut UnitTable<A>,
     ) -> Result<(), Error> {
-        self.end_batch();
         self.begin()?;
         let result = self.load_units_inner(table);
         self.finish(result)
@@ -361,7 +360,6 @@ impl Catalogue {
         if !dirty.windows(2).all(|w| w[0] < w[1]) || dirty.iter().any(|&p| p >= table.pages()) {
             return Err(Error::Corrupt);
         }
-        self.end_batch();
         self.begin()?;
         let result = self.commit_units_inner(table, dirty, id, record);
         self.finish(result)
@@ -401,7 +399,6 @@ impl Catalogue {
         id: EpisodeId,
         buf: &'a mut [u8],
     ) -> Result<Option<RecordView<'a>>, Error> {
-        self.end_batch();
         self.begin()?;
         let result = self
             .db
@@ -425,7 +422,6 @@ impl Catalogue {
         after: Option<EpisodeId>,
         out: &mut [EpisodeId; FILE_PAGE],
     ) -> Result<usize, Error> {
-        self.end_batch();
         self.begin()?;
         let result = self.unit_ids_inner(after, out);
         self.finish(result)

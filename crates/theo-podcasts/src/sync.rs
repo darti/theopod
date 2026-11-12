@@ -134,9 +134,11 @@ impl SyncSession {
         self.phase = Phase::Body;
         Ok(())
     }
-    /// Upserts join the catalogue's batch for the current page; the batch
-    /// commits when [`Self::end_page`] ends the page, so a page's episodes,
-    /// identities and counter become durable together (ADR-0022).
+    /// Each upsert commits on its own (episode, identity and counter
+    /// together): a page commit would exceed a request's IO budget. A
+    /// failure mid-page keeps the earlier episodes; the checkpoint is only
+    /// saved by [`Self::complete`], so a resync re-upserts the page and the
+    /// identity table makes that idempotent (ADR-0022).
     pub fn push(
         &mut self,
         cat: &mut Catalogue,
@@ -148,7 +150,6 @@ impl SyncSession {
         if !valid || bytes.len() > MAX_CHUNK_BYTES {
             return Err(SyncError::Protocol);
         }
-        cat.begin_batch();
         for &byte in bytes {
             if let Some(item) = self.parser.push(byte).map_err(SyncError::Feed)? {
                 let outcome = cat
@@ -164,10 +165,7 @@ impl SyncSession {
     }
     /// Returns true when `url()` names the next required page. False means the
     /// session can commit. End-of-document alone never publishes a checkpoint.
-    /// A complete page commits the episodes pushed for it in one transaction.
-    /// After a feed or protocol error the page's upserts stay pending: the
-    /// next catalogue operation commits them (upserts are idempotent).
-    pub fn end_page(&mut self, cat: &mut Catalogue) -> Result<bool, SyncError> {
+    pub fn end_page(&mut self) -> Result<bool, SyncError> {
         let old = core::mem::replace(&mut self.phase, Phase::Failed);
         if old == Phase::NotModified {
             self.phase = Phase::Ready;
@@ -186,26 +184,23 @@ impl SyncSession {
                     .map_err(SyncError::Feed)?;
                 self.url = String::try_from(next).map_err(|_| SyncError::Feed(FeedError::Limit))?;
                 self.page += 1;
-                cat.commit_batch().map_err(SyncError::Catalogue)?;
                 self.parser = RadioFranceFeed::new();
                 self.phase = Phase::Response;
                 Ok(true)
             }
             None => {
-                cat.commit_batch().map_err(SyncError::Catalogue)?;
                 self.checkpoint.pages = self.page + 1;
                 self.phase = Phase::Ready;
                 Ok(false)
             }
         }
     }
-    /// Commits any pending batch, then the checkpoint.
+    /// Saves the checkpoint.
     pub fn complete(self, cat: &mut Catalogue, scratch: &mut [u8]) -> Result<Progress, SyncError> {
         if self.phase != Phase::Ready {
             return Err(SyncError::Incomplete);
         }
         if !self.unchanged {
-            cat.commit_batch().map_err(SyncError::Catalogue)?;
             cat.save_sync_checkpoint(self.id, &self.checkpoint, scratch)
                 .map_err(SyncError::Catalogue)?;
         }

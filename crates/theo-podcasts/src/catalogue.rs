@@ -149,22 +149,18 @@ fn open_error(error: redb::DatabaseError) -> Error {
 /// dropped and reopened. The service must also invalidate its shared
 /// filesystem session, as it does for every failed storage request.
 pub struct Catalogue {
-    /// Open write transaction: a sync batch, or the current operation.
-    /// Declared before `db`, so it is dropped (aborted) first.
+    /// The current operation's write transaction, committed by `done` or
+    /// aborted by `finish`; never held across operations. Declared before
+    /// `db`, so it is dropped (aborted) first.
     tx: Option<WriteTransaction>,
     pub(crate) db: Database,
     next: u64,
     enabled: bool,
-    batching: bool,
 }
 
-/// Reads through the open write transaction, so a batch sees its own
-/// upserts, or else through a fresh read transaction.
-enum View<'a> {
-    Write(&'a WriteTransaction),
-    Read(ReadTransaction),
-}
-impl View<'_> {
+/// A read transaction: reads see the last committed state.
+struct View(ReadTransaction);
+impl View {
     /// Copy a byte value into `scratch`; its length, or `None` if absent.
     fn bytes<'k, K: Key + 'static>(
         &self,
@@ -172,20 +168,14 @@ impl View<'_> {
         key: impl Borrow<K::SelfType<'k>>,
         scratch: &mut [u8],
     ) -> Result<Option<usize>, Error> {
-        match self {
-            Self::Write(tx) => copy(&tx.open_table(table).map_err(db_error)?, key, scratch),
-            Self::Read(tx) => copy(&tx.open_table(table).map_err(db_error)?, key, scratch),
-        }
+        copy(&self.0.open_table(table).map_err(db_error)?, key, scratch)
     }
     fn number<'k, K: Key + 'static>(
         &self,
         table: TableDefinition<K, u64>,
         key: impl Borrow<K::SelfType<'k>>,
     ) -> Result<Option<u64>, Error> {
-        match self {
-            Self::Write(tx) => number(&tx.open_table(table).map_err(db_error)?, key),
-            Self::Read(tx) => number(&tx.open_table(table).map_err(db_error)?, key),
-        }
+        number(&self.0.open_table(table).map_err(db_error)?, key)
     }
 }
 
@@ -230,7 +220,6 @@ impl Catalogue {
             db,
             next: 0,
             enabled: true,
-            batching: false,
         };
         let fresh = {
             let tx = catalogue.db.begin_read().map_err(db_error)?;
@@ -294,22 +283,6 @@ impl Catalogue {
         Ok(())
     }
 
-    /// Start a sync batch: upserts share one write transaction until
-    /// [`Self::commit_batch`]. Any other operation commits it first.
-    pub(crate) fn begin_batch(&mut self) {
-        self.batching = true;
-    }
-    /// Commit and end the current batch (nothing to do without one).
-    pub(crate) fn commit_batch(&mut self) -> Result<(), Error> {
-        self.end_batch();
-        self.begin()?;
-        self.finish(Ok(()))
-    }
-    /// Leave batch mode so `begin` commits the pending batch.
-    pub(crate) fn end_batch(&mut self) {
-        self.batching = false;
-    }
-
     /// Make sure a write transaction is open, begun with quick repair.
     pub(crate) fn write(&mut self) -> Result<&WriteTransaction, Error> {
         if self.tx.is_none() {
@@ -326,34 +299,25 @@ impl Catalogue {
             None => Ok(()),
         }
     }
-    /// End a single operation's writes: commit unless a batch is running.
+    /// End an operation's writes: commit its transaction.
     pub(crate) fn done(&mut self) -> Result<(), Error> {
-        if self.batching { Ok(()) } else { self.commit() }
+        self.commit()
     }
-    /// Reads see the open write transaction, if any.
-    fn view(&self) -> Result<View<'_>, Error> {
-        Ok(match &self.tx {
-            Some(tx) => View::Write(tx),
-            None => View::Read(self.db.begin_read().map_err(db_error)?),
-        })
+    fn view(&self) -> Result<View, Error> {
+        self.db.begin_read().map(View).map_err(db_error)
     }
 
-    /// Enter an operation. Outside a batch, commit a pending batch first so
-    /// the operation sees it; a failed commit disables the owner.
+    /// Enter an operation: the owner is disabled until `finish` re-enables it.
     pub(crate) fn begin(&mut self) -> Result<(), Error> {
         if !self.enabled {
             return Err(Error::Disabled);
         }
         self.enabled = false;
-        if !self.batching {
-            self.commit()?;
-        }
         Ok(())
     }
     /// Leave an operation. Fatal errors keep the owner disabled and drop
-    /// (abort) the open transaction, batch included. Other errors are
-    /// detected before any write: outside a batch they abort the empty
-    /// transaction, inside one they keep the batch's earlier upserts.
+    /// (abort) the open transaction. Other errors are detected before any
+    /// write, so the owner stays usable.
     pub(crate) fn finish<T>(&mut self, result: Result<T, Error>) -> Result<T, Error> {
         match &result {
             Err(
@@ -365,12 +329,9 @@ impl Catalogue {
                 | Error::Disabled,
             ) => {
                 self.tx = None;
-                self.batching = false;
             }
             Err(_) => {
-                if !self.batching {
-                    self.tx = None;
-                }
+                self.tx = None;
                 self.enabled = true;
             }
             Ok(_) => self.enabled = true,
@@ -388,7 +349,6 @@ impl Catalogue {
     }
 
     pub fn completed_audio_len(&mut self, id: EpisodeId) -> Result<Option<u64>, Error> {
-        self.end_batch();
         self.begin()?;
         let result = self
             .view()
@@ -409,7 +369,6 @@ impl Catalogue {
         if bytes == 0 {
             return Err(Error::InvalidMetadata);
         }
-        self.end_batch();
         self.begin()?;
         let result = self.finish_download_inner(id, bytes, scratch);
         self.finish(result)
@@ -446,7 +405,6 @@ impl Catalogue {
         if id.0 == 0 {
             return Err(Error::InvalidMetadata);
         }
-        self.end_batch();
         self.begin()?;
         let result = self.view().and_then(|view| {
             match view.bytes(SYNC, id.0, &mut scratch[..MAX_RECORD_BYTES])? {
@@ -469,7 +427,6 @@ impl Catalogue {
             return Err(Error::InvalidMetadata);
         }
         let n = checkpoint.encode(scratch).ok_or(Error::InvalidMetadata)?;
-        self.end_batch();
         self.begin()?;
         let result = self.write().and_then(|tx| {
             tx.open_table(SYNC)
@@ -487,7 +444,6 @@ impl Catalogue {
         scratch: &'a mut [u8],
     ) -> Result<Option<Episode<'a>>, Error> {
         self.check(scratch)?;
-        self.end_batch();
         self.begin()?;
         let result = self
             .load(id, scratch)
@@ -511,7 +467,6 @@ impl Catalogue {
         }
         Ok(Some((episode, n)))
     }
-    /// The only operation that joins a running batch.
     pub fn upsert(
         &mut self,
         subscription: SubscriptionId,
@@ -613,7 +568,6 @@ impl Catalogue {
         emit: impl for<'record> FnMut(Episode<'record>),
     ) -> Result<ScanPage, Error> {
         self.check(scratch)?;
-        self.end_batch();
         self.begin()?;
         let result = self.scan_inner(after, scratch, emit);
         self.finish(result)
@@ -660,7 +614,6 @@ impl Catalogue {
     }
     pub fn mark_read(&mut self, id: EpisodeId, scratch: &mut [u8]) -> Result<(), Error> {
         self.check(scratch)?;
-        self.end_batch();
         self.begin()?;
         let result = self.state_inner(id, None, scratch);
         self.finish(result)
@@ -672,7 +625,6 @@ impl Catalogue {
         scratch: &mut [u8],
     ) -> Result<(), Error> {
         self.check(scratch)?;
-        self.end_batch();
         self.begin()?;
         let result = self.state_inner(id, Some(next), scratch);
         self.finish(result)

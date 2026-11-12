@@ -23,7 +23,7 @@ fn import(
         for chunk in body.chunks(257) {
             session.push(cat, chunk, &mut scratch)?;
         }
-        assert_eq!(session.end_page(cat)?, page + 1 < pages.len());
+        assert_eq!(session.end_page()?, page + 1 < pages.len());
     }
     session.complete(cat, &mut scratch)
 }
@@ -136,7 +136,7 @@ fn validators_commit_only_after_all_pages_and_304_is_a_noop() {
     let mut unchanged = SyncSession::new(ID, ROOT, Some(old.clone())).unwrap();
     assert_eq!(unchanged.conditional().etag, Some("old"));
     unchanged.response(304, Validators::default()).unwrap();
-    assert!(!unchanged.end_page(&mut cat).unwrap());
+    assert!(!unchanged.end_page().unwrap());
     assert_eq!(
         unchanged.complete(&mut cat, &mut scratch).unwrap(),
         Progress::default()
@@ -155,7 +155,7 @@ fn validators_commit_only_after_all_pages_and_304_is_a_noop() {
     interrupted
         .push(&mut cat, b"<rss><channel>", &mut scratch)
         .unwrap();
-    assert!(interrupted.end_page(&mut cat).is_err());
+    assert!(interrupted.end_page().is_err());
     assert!(interrupted.complete(&mut cat, &mut scratch).is_err());
     assert_eq!(
         cat.sync_checkpoint(ID, &mut scratch).unwrap(),
@@ -178,7 +178,7 @@ fn validators_commit_only_after_all_pages_and_304_is_a_noop() {
     interrupted
         .push(&mut cat, page.as_bytes(), &mut scratch)
         .unwrap();
-    assert!(interrupted.end_page(&mut cat).unwrap());
+    assert!(interrupted.end_page().unwrap());
     assert!(interrupted.complete(&mut cat, &mut scratch).is_err());
     assert_eq!(cat.sync_checkpoint(ID, &mut scratch).unwrap(), Some(old));
     import(
@@ -228,7 +228,7 @@ fn failed_final_commit_is_replayable_after_reopen() {
     session
         .push(&mut cat, new_body.as_bytes(), &mut scratch)
         .unwrap();
-    assert!(!session.end_page(&mut cat).unwrap());
+    assert!(!session.end_page().unwrap());
     image.disk.state().fail_writes = true;
     assert!(session.complete(&mut cat, &mut scratch).is_err());
     assert!(matches!(
@@ -256,6 +256,36 @@ fn failed_final_commit_is_replayable_after_reopen() {
             .is_empty()
     );
 }
+// Regression (t-133): each episode commits on its own, so a failure or crash
+// mid-page keeps the earlier ones; resyncing the page creates no duplicates.
+#[test]
+fn failure_mid_page_resyncs_without_duplicates() {
+    let image = Image::new();
+    let mut cat = image.create();
+    let mut scratch = [0; MAX_RECORD_BYTES];
+    let body = simple(&(item("a", "A") + &item("b", "B") + &item("c", "C")));
+    let mut session = SyncSession::new(ID, ROOT, None).unwrap();
+    session.response(200, Validators::default()).unwrap();
+    let first = simple(&(item("a", "A") + &item("b", "B")));
+    // Items "a" and "b" arrive and commit; the power is lost before "c".
+    let cut = first.find("</channel>").unwrap();
+    session
+        .push(&mut cat, &first.as_bytes()[..cut], &mut scratch)
+        .unwrap();
+    image.crash();
+    drop((session, cat));
+    let mut cat = image.reopen();
+    assert!(cat.sync_checkpoint(ID, &mut scratch).unwrap().is_none());
+    let mut seen = 0;
+    cat.scan(None, &mut scratch, |_| seen += 1).unwrap();
+    assert_eq!(seen, 2);
+    let progress = import(&mut cat, &[body.as_bytes()], None, Validators::default()).unwrap();
+    assert_eq!(progress.entries, 3);
+    assert_eq!(progress.created, 1);
+    let mut ids = Vec::new();
+    cat.scan(None, &mut scratch, |e| ids.push(e.id.0)).unwrap();
+    assert_eq!(ids, [1, 2, 3]);
+}
 #[test]
 fn malformed_response_poisoning_cannot_be_bypassed() {
     // Regression (t-108): callers cannot turn malformed/oversized/unsolicited responses into success.
@@ -275,7 +305,7 @@ fn malformed_response_poisoning_cannot_be_bypassed() {
             .push(&mut cat, bad.as_bytes(), &mut scratch)
             .is_err()
     );
-    assert!(session.end_page(&mut cat).is_err());
+    assert!(session.end_page().is_err());
     assert!(session.complete(&mut cat, &mut scratch).is_err());
     assert!(cat.sync_checkpoint(ID, &mut scratch).unwrap().is_none());
 }
@@ -308,42 +338,4 @@ fn header_and_chunk_limits_fail_without_completing() {
             .is_err()
     );
     assert!(session.complete(&mut cat, &mut scratch).is_err());
-}
-
-// Regression (t-133): a sync commits one feed page per transaction, so a
-// power loss mid-page keeps every completed page and loses only the rest.
-#[test]
-fn crash_mid_page_keeps_completed_pages_only() {
-    let image = Image::new();
-    let mut cat = image.create();
-    let mut scratch = [0; MAX_RECORD_BYTES];
-    let next = std::format!("{ROOT}?page=1");
-    let first = std::format!(
-        "<rss xmlns:atom='http://www.w3.org/2005/Atom'><channel>\
-         <atom:link rel='next' href='{next}'/>{}{}</channel></rss>",
-        item("a", "a"),
-        item("b", "b")
-    );
-    let second = simple(&item("c", "c"));
-    let mut session = SyncSession::new(ID, ROOT, None).unwrap();
-    session.response(200, Validators::default()).unwrap();
-    session
-        .push(&mut cat, first.as_bytes(), &mut scratch)
-        .unwrap();
-    assert!(session.end_page(&mut cat).unwrap());
-    session.response(200, Validators::default()).unwrap();
-    session
-        .push(&mut cat, second.as_bytes(), &mut scratch)
-        .unwrap();
-    // Power loss before the second page ends.
-    image.crash();
-    drop(cat);
-    let mut cat = image.reopen();
-    let mut guids = Vec::new();
-    cat.scan(None, &mut scratch, |e| {
-        guids.push(StdString::from(e.metadata.guid.unwrap()))
-    })
-    .unwrap();
-    assert_eq!(guids, ["a", "b"]);
-    assert!(cat.sync_checkpoint(ID, &mut scratch).unwrap().is_none());
 }

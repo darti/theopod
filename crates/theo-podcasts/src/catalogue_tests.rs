@@ -779,96 +779,71 @@ fn missing_schema_counter_is_refused() {
     assert_eq!(stored_schema(&image), None);
 }
 
+// Regression (t-133): a table missing from an otherwise valid database is a
+// schema error, never recreated.
 #[test]
-fn batch_upserts_commit_together_and_survive_reopen() {
+fn missing_table_is_refused_without_recreating_it() {
+    let image = Image::new();
+    drop(image.create());
+    tamper(&image, |tx| {
+        tx.delete_table(crate::tables::SYNC).unwrap();
+    });
+    assert!(matches!(
+        Catalogue::open(image.backend()),
+        Err(Error::Schema)
+    ));
+    // Still refused: the first open did not recreate the table.
+    assert!(matches!(
+        Catalogue::open(image.backend()),
+        Err(Error::Schema)
+    ));
+}
+
+// Regression (t-133): an upsert is one atomic commit; when it fails, the
+// previous committed state survives a reopen and the episode is absent.
+#[test]
+fn failed_upsert_commit_leaves_the_previous_state_intact() {
     let image = Image::new();
     let mut cat = image.create();
     let mut scratch = [0; MAX_RECORD_BYTES];
-    cat.begin_batch();
-    for i in 0..10 {
-        let guid = std::format!("g{i}");
+    let kept = cat
+        .upsert(
+            SubscriptionId(1),
+            metadata(Some("kept"), "t", "https://x/a.mp3"),
+            &mut scratch,
+        )
+        .unwrap();
+    image.disk.state().fail_writes = true;
+    assert!(matches!(
         cat.upsert(
             SubscriptionId(1),
-            metadata(Some(&guid), "t", "https://x/a.mp3"),
+            metadata(Some("lost"), "t", "https://x/b.mp3"),
+            &mut scratch,
+        ),
+        Err(Error::Storage)
+    ));
+    image.disk.state().fail_writes = false;
+    drop(cat);
+    let mut cat = image.reopen();
+    let mut guids = std::vec::Vec::new();
+    let page = cat
+        .scan(None, &mut scratch, |e| {
+            guids.push((e.id, e.metadata.guid.map(std::string::String::from)));
+        })
+        .unwrap();
+    assert_eq!(page.records, 1);
+    assert_eq!(guids, [(kept.id, Some("kept".into()))]);
+    // The identity and counter moved with the episode: the same upsert now
+    // creates it with the next id.
+    let again = cat
+        .upsert(
+            SubscriptionId(1),
+            metadata(Some("lost"), "t", "https://x/b.mp3"),
             &mut scratch,
         )
         .unwrap();
-    }
-    cat.commit_batch().unwrap();
-    drop(cat);
-    let mut cat = image.reopen();
-    let page = cat.scan(None, &mut scratch, |_| ()).unwrap();
-    assert_eq!(page.records, 10);
-}
-
-#[test]
-fn crash_before_batch_commit_loses_only_the_batch() {
-    let image = Image::new();
-    let mut cat = image.create();
-    let mut scratch = [0; MAX_RECORD_BYTES];
-    cat.upsert(
-        SubscriptionId(1),
-        metadata(Some("kept"), "t", "https://x/a.mp3"),
-        &mut scratch,
-    )
-    .unwrap();
-    cat.begin_batch();
-    cat.upsert(
-        SubscriptionId(1),
-        metadata(Some("lost"), "t", "https://x/b.mp3"),
-        &mut scratch,
-    )
-    .unwrap();
-    image.crash();
-    drop(cat);
-    let mut cat = image.reopen();
-    assert_eq!(cat.scan(None, &mut scratch, |_| ()).unwrap().records, 1);
-}
-
-#[test]
-fn duplicate_guid_inside_a_batch_is_one_episode() {
-    let image = Image::new();
-    let mut cat = image.create();
-    let mut scratch = [0; MAX_RECORD_BYTES];
-    cat.begin_batch();
-    let a = cat
-        .upsert(
-            SubscriptionId(1),
-            metadata(Some("g"), "t", "https://x/a.mp3"),
-            &mut scratch,
-        )
-        .unwrap();
-    let b = cat
-        .upsert(
-            SubscriptionId(1),
-            metadata(Some("g"), "t2", "https://x/a.mp3"),
-            &mut scratch,
-        )
-        .unwrap();
-    cat.commit_batch().unwrap();
-    assert_eq!(a.id, b.id);
-    assert!(!b.created);
-}
-
-#[test]
-fn other_operations_commit_a_pending_batch_first() {
-    let image = Image::new();
-    let mut cat = image.create();
-    let mut scratch = [0; MAX_RECORD_BYTES];
-    cat.begin_batch();
-    let id = cat
-        .upsert(
-            SubscriptionId(1),
-            metadata(Some("g"), "t", "https://x/a.mp3"),
-            &mut scratch,
-        )
-        .unwrap()
-        .id;
-    cat.mark_read(id, &mut scratch).unwrap();
-    image.crash();
-    drop(cat);
-    let mut cat = image.reopen();
-    assert!(cat.get(id, &mut scratch).unwrap().unwrap().state.read);
+    assert!(again.created);
+    assert_eq!(again.id.0, kept.id.0 + 1);
 }
 
 #[test]

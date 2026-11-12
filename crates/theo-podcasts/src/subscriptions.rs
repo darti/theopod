@@ -25,7 +25,6 @@ impl Catalogue {
             .as_bytes()
             .try_into()
             .map_err(|_| Error::InvalidMetadata)?;
-        self.end_batch();
         self.begin()?;
         let result = self.follow_inner(canonical, show);
         self.finish(result)
@@ -69,7 +68,6 @@ impl Catalogue {
         &mut self,
         after: Option<SubscriptionId>,
     ) -> Result<Option<Subscription>, Error> {
-        self.end_batch();
         self.begin()?;
         let result = self.next_subscription_inner(after);
         self.finish(result)

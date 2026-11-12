@@ -120,10 +120,11 @@ header-first `PageStore::load()` change, and the `ekv` workspace dependency.
   `media`, `unit_media` and `runtime` lose `F: Flash`: `MediaStore<F>`
   becomes `MediaStore`, `Runtime<F, M>` becomes `Runtime<M>`. Functions stay
   `async` only where they await media unit IO or the network.
-- `sync` commits one feed page per transaction (its episodes, identities and
-  counter together). Per-episode commits would take ~19 minutes for a
-  5,000-episode first sync. An interrupted sync resumes after the last
-  committed page from `SYNC` state.
+- `sync` commits each episode on its own (episode, identity and counter
+  together): a page commit would exceed a request's 500 ms IO budget. An
+  interrupted sync keeps the committed episodes and resumes from the last
+  persisted `SYNC` state; re-upserting is idempotent through the identity
+  table.
 
 Layout v3:
 
@@ -208,9 +209,8 @@ intact.
 - **v2 cards.** A v2 descriptor is refused like any unknown version (no
   regions mount; one log line asks to re-provision). Keeping media mounted
   would need v2 geometry code, which the no-migration decision excludes.
-- **Sync batching.** `Catalogue` holds an open `WriteTransaction` across one
-  feed page: `begin_batch`, `upsert` into it, `commit_batch` at the page end.
-  Any other operation commits a pending batch first.
+- **Per-episode sync commits (2026-11-12).** a 50-episode page commit measured ~2,500 sector commands (~5 s) at 5,000 episodes, over the 500 ms IO_BUDGET of a podcast request; each episode commits on its own (~0.2 s); a first 5,000-episode sync takes ~17–20 min.
+- **Open cost.** Catalogue::open measured 80 reads at scale (table checks); bound 96, raw redb open ≤64.
 - **Fixed bug.** The ekv units range scan (`unit_ids`, prefix `u`) also
   reached the 37-byte show-index keys (`u` + show id) and returned `Corrupt`
   once fewer than 16 unit records remained after the cursor. Separate tables
@@ -222,5 +222,5 @@ intact.
   pinned exactly and upgrades are deliberate.
 - Torn-sector behaviour was not in the spike; the crash tests above decide
   it before any board run.
-- Commits block core1 for ~230 ms each; a sync of many pages holds the SD
+- Commits block core1 for ~230 ms each; a sync holds the SD
   log task back for the duration of each commit.

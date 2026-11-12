@@ -162,7 +162,7 @@ impl<M: MediaStore> Runtime<M> {
             }
             Command::SyncEnd => {
                 let mut sync = self.sync.take().ok_or(Error::Invalid)?;
-                if sync.end_page(&mut self.catalogue).map_err(sync_error)? {
+                if sync.end_page().map_err(sync_error)? {
                     let url = String::try_from(sync.url()).map_err(|_| Error::Invalid)?;
                     self.sync = Some(sync);
                     Reply::Url(url)

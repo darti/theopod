@@ -236,3 +236,7 @@ impl<D: SectorIo + 'static> StorageBackend for RegionBackend<D> {
 #[cfg(test)]
 #[path = "redb_backend_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "redb_backend_crash_tests.rs"]
+mod crash_tests;

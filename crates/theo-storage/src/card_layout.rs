@@ -27,7 +27,11 @@ pub const UNIT_SECTORS: u32 = 2_048;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LayoutError {
     Geometry,
+    /// An unknown (future) descriptor version.
     Version,
+    /// A valid v1 or v2 descriptor: an obsolete layout that explicit
+    /// provisioning may replace (ADR-0021).
+    Obsolete,
     Checksum,
     Conflict,
 }
@@ -145,7 +149,10 @@ impl CardLayout {
         if u32::from_le_bytes(crc) != crc32(&bytes[..508]) {
             return Err(LayoutError::Checksum);
         }
-        if old || bytes[8..12] != VERSION.to_le_bytes() {
+        if old {
+            return Err(LayoutError::Obsolete);
+        }
+        if bytes[8..12] != VERSION.to_le_bytes() {
             return Err(LayoutError::Version);
         }
         let layout = Self::new(card_sectors)?;
@@ -160,6 +167,8 @@ impl CardLayout {
     /// None means descriptor absent: try legacy mount without formatting.
     /// A valid copy survives a torn copy. Unknown versions/geometries or two
     /// conflicting valid copies must stop region mounting rather than guess.
+    /// `Obsolete` only when no copy is a v3 layout, an unknown version or an
+    /// invalid geometry: only then may provisioning replace the card's layout.
     pub fn select(
         first: &[u8; 512],
         second: &[u8; 512],
@@ -174,6 +183,16 @@ impl CardLayout {
             {
                 return Err(*error);
             }
+        }
+        if [&first, &second]
+            .iter()
+            .any(|result| matches!(result, Err(LayoutError::Obsolete)))
+        {
+            return match (first, second) {
+                // An obsolete copy beside a current one: never guess.
+                (Ok(Some(_)), _) | (_, Ok(Some(_))) => Err(LayoutError::Conflict),
+                _ => Err(LayoutError::Obsolete),
+            };
         }
         match (first, second) {
             (Ok(Some(a)), Ok(Some(b))) if a != b => Err(LayoutError::Conflict),

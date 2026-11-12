@@ -109,3 +109,45 @@ fn authorizes_refuses_a_card_with_any_descriptor() {
         Err(Refusal::Descriptor(LayoutError::Checksum))
     );
 }
+
+/// `v3()` re-encoded as an older or newer descriptor.
+fn versioned(magic: &[u8; 8], version: u32) -> [u8; 512] {
+    let mut bytes = v3();
+    bytes[..8].copy_from_slice(magic);
+    bytes[8..12].copy_from_slice(&version.to_le_bytes());
+    let crc = theo_storage::crc::crc32(&bytes[..508]);
+    bytes[508..].copy_from_slice(&crc.to_le_bytes());
+    bytes
+}
+
+#[test]
+fn authorizes_a_v2_card_only_when_it_is_the_target() {
+    // Regression (t-133): v2 cards must be re-provisionable to v3.
+    let v2 = versioned(b"THEOSD02", 2);
+    assert_eq!(TARGET.authorizes(SECTORS, Some(CARD), &v2, &v2), Ok(()));
+    assert_eq!(TARGET.authorizes(SECTORS, Some(CARD), &v2, &BLANK), Ok(()));
+    let other = CardId::new(0x1b, 0x1234_abce);
+    assert_eq!(
+        TARGET.authorizes(SECTORS, Some(other), &v2, &v2),
+        Err(Refusal::Card(Some(other)))
+    );
+    assert_eq!(
+        TARGET.authorizes(SECTORS - 1, Some(CARD), &v2, &v2),
+        Err(Refusal::Size(SECTORS - 1))
+    );
+}
+
+#[test]
+fn authorizes_refuses_an_unknown_version() {
+    // Regression guard (t-133): only obsolete layouts may be replaced.
+    let v4 = versioned(b"THEOSD03", 4);
+    assert_eq!(
+        TARGET.authorizes(SECTORS, Some(CARD), &v4, &v4),
+        Err(Refusal::Descriptor(LayoutError::Version))
+    );
+    let v2 = versioned(b"THEOSD02", 2);
+    assert_eq!(
+        TARGET.authorizes(SECTORS, Some(CARD), &v2, &v3()),
+        Err(Refusal::Descriptor(LayoutError::Conflict))
+    );
+}

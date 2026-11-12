@@ -71,8 +71,9 @@ impl fmt::Display for Refusal {
 impl Target {
     /// Allows erasing only this exact card, and only before it has a v3 layout.
     ///
-    /// `first` and `second` are the card's descriptor sectors. A blank card
-    /// or a legacy whole-card LittleFS passes.
+    /// `first` and `second` are the card's descriptor sectors. A blank card,
+    /// a legacy whole-card LittleFS or an obsolete (v1/v2) layout passes; an
+    /// unknown version or a damaged descriptor does not.
     pub fn authorizes(
         &self,
         sectors: u64,
@@ -87,7 +88,7 @@ impl Target {
             return Err(Refusal::Card(card));
         }
         match CardLayout::select(first, second, sectors) {
-            Ok(None) => Ok(()),
+            Ok(None) | Err(LayoutError::Obsolete) => Ok(()),
             Ok(Some(_)) => Err(Refusal::AlreadyV3),
             Err(error) => Err(Refusal::Descriptor(error)),
         }

@@ -103,8 +103,9 @@ fn v2_layout_places_log_then_unit_aligned_media() {
 }
 
 // Regression (t-121): v1 descriptors are no longer mountable (none exist).
+// Regression (t-133): they are obsolete, not unknown, so provisioning may replace them.
 #[test]
-fn v1_descriptor_is_rejected_as_version() {
+fn v1_descriptor_is_rejected_as_obsolete() {
     let card = 8 * 1024 * 1024 * 2;
     let mut v1 = CardLayout::new(card).unwrap().encode();
     v1[..8].copy_from_slice(b"THEOSD01");
@@ -112,7 +113,7 @@ fn v1_descriptor_is_rejected_as_version() {
     v1[508..].copy_from_slice(&crc.to_le_bytes());
     assert_eq!(
         CardLayout::select(&v1, &v1, card),
-        Err(LayoutError::Version)
+        Err(LayoutError::Obsolete)
     );
 }
 
@@ -136,8 +137,9 @@ fn v3_database_region_is_64_mib_from_sector_16() {
     assert_eq!(layout.media().start() % UNIT_SECTORS, 0);
 }
 
+// Regression (t-133): a v2 card must stay re-provisionable to v3.
 #[test]
-fn v2_descriptor_is_refused_as_unknown_version() {
+fn v2_descriptor_is_refused_as_obsolete() {
     let layout = CardLayout::new(122_265_600).unwrap();
     let mut v2 = layout.encode();
     v2[..8].copy_from_slice(b"THEOSD02");
@@ -146,6 +148,44 @@ fn v2_descriptor_is_refused_as_unknown_version() {
     v2[508..].copy_from_slice(&crc.to_le_bytes());
     assert_eq!(
         CardLayout::select(&v2, &v2, 122_265_600),
+        Err(LayoutError::Obsolete)
+    );
+    // A torn or blank second copy keeps it obsolete.
+    assert_eq!(
+        CardLayout::select(&v2, &[0; 512], 122_265_600),
+        Err(LayoutError::Obsolete)
+    );
+    let mut torn = v2;
+    torn[200] ^= 1;
+    assert_eq!(
+        CardLayout::select(&torn, &v2, 122_265_600),
+        Err(LayoutError::Obsolete)
+    );
+}
+
+#[test]
+fn obsolete_beside_a_current_or_unknown_copy_is_not_obsolete() {
+    // Regression guard (t-133): `Obsolete` authorizes erasing the card, so
+    // it must never hide a v3 layout or an unknown version.
+    let layout = CardLayout::new(122_265_600).unwrap();
+    let v3 = layout.encode();
+    let mut v2 = v3;
+    v2[..8].copy_from_slice(b"THEOSD02");
+    v2[8..12].copy_from_slice(&2u32.to_le_bytes());
+    checksum(&mut v2);
+    assert_eq!(
+        CardLayout::select(&v2, &v3, 122_265_600),
+        Err(LayoutError::Conflict)
+    );
+    assert_eq!(
+        CardLayout::select(&v3, &v2, 122_265_600),
+        Err(LayoutError::Conflict)
+    );
+    let mut v4 = v3;
+    v4[8..12].copy_from_slice(&4u32.to_le_bytes());
+    checksum(&mut v4);
+    assert_eq!(
+        CardLayout::select(&v2, &v4, 122_265_600),
         Err(LayoutError::Version)
     );
 }

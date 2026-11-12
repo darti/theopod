@@ -290,7 +290,7 @@ Normal `just build` and release automation do not read the local configuration.
 credentials.
 
 Podcasts require a versioned card layout (v2), made only by `just
-prepare-image` or `just sd-provision-v2` below. Existing whole-card LittleFS
+prepare-image` or `just sd-provision-v3` below. Existing whole-card LittleFS
 cards keep their logs and stay podcast-offline until explicitly provisioned.
 Boot never formats, partitions or migrates them. `just prepare-image NEW_PATH EXACT_CARD_SECTORS`
 creates a **new regular host image**, prepares a 4096-page database (catalogue schema 2) and a 16 MiB log-only
@@ -300,16 +300,16 @@ It refuses every existing destination, including device paths and symlinks.
 This command does not install an image onto a card. Installing one is a separate
 destructive action requiring explicit authorization and an exact capacity match.
 
-To give a card inside the board the v2 layout, use the explicit provisioning
+To give a card inside the board the v3 layout, use the explicit provisioning
 firmware with the card's exact sector count and identity, both printed at boot
 ("microSD capacity: N blocks", "microSD card id: ID"). It **erases the card**,
-including a whole-card LittleFS and its logs. It does nothing on any other
-card, on a card already on v2, or on a card with any other descriptor (a v1
-card is refused, not upgraded); a malformed value fails the build (ADR-0021):
+including a whole-card LittleFS and its logs, or an obsolete v1/v2 layout. It
+does nothing on any other card, on a card already on v3, or on a card with an
+unknown or damaged descriptor; a malformed value fails the build (ADR-0021):
 
 ```sh
-just sd-provision-v2 122265600 1b1234abcd target/sd-provision-v2.log /dev/cu.usbmodem101
-# After "SD v2 provisioning done", stop the monitor and restore normal firmware:
+just sd-provision-v3 122265600 1b1234abcd target/sd-provision-v3.log /dev/cu.usbmodem101
+# After "SD v3 provisioning done", stop the monitor and restore normal firmware:
 just flash-log target/serial.log /dev/cu.usbmodem101
 ```
 

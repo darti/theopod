@@ -69,3 +69,20 @@ fn unformatted_region_is_corrupt() {
     assert!(matches!(backend, Err(BackendError::Corrupt)));
     assert_eq!(disk.state().writes, 0);
 }
+
+#[test]
+fn region_without_redb_magic_is_corrupt() {
+    // Regression (t-133): a non-empty region that is not a redb database is
+    // a corrupt catalogue, not a device failure.
+    let image = Image::new();
+    {
+        let backend = image.backend();
+        redb::StorageBackend::set_len(&backend, 4096).unwrap();
+        redb::StorageBackend::write(&backend, 0, &[0x5a; 4096]).unwrap();
+        redb::StorageBackend::sync_data(&backend).unwrap();
+    }
+    assert!(matches!(
+        Catalogue::open(image.backend()),
+        Err(Error::Corrupt)
+    ));
+}

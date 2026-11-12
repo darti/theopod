@@ -162,11 +162,11 @@ fmt:
 clean:
     cargo clean
 
-# Explicitly ERASE the SD card inside the board and publish layout v2 (ADR-0021).
+# Explicitly ERASE the SD card inside the board and publish layout v3 (ADR-0021, ADR-0022).
 # `sectors` and `card` must match the boot log ("microSD capacity: N blocks",
-# "microSD card id: ID"); any other card, or one already on v2, is untouched.
-sd-provision-v2 sectors card log="target/sd-provision-v2.log" port="":
-    set -o pipefail; THEO_SD_PROVISION={{quote("v2:" + sectors + ":" + card)}} ESP_LOG=info LIBCLANG_PATH="{{libclang_path}}" PATH="{{gcc_path}}:${PATH}" RUSTUP_TOOLCHAIN=esp cargo espflash flash --release --features sd-provision --monitor --non-interactive --chip {{chip}} {{ if port != "" { "--port " + port } else { "" } }} | tee {{quote(log)}}
+# "microSD card id: ID"); any other card, or one already on v3, is untouched.
+sd-provision-v3 sectors card log="target/sd-provision-v3.log" port="":
+    set -o pipefail; THEO_SD_PROVISION={{quote("v3:" + sectors + ":" + card)}} ESP_LOG=info LIBCLANG_PATH="{{libclang_path}}" PATH="{{gcc_path}}:${PATH}" RUSTUP_TOOLCHAIN=esp cargo espflash flash --release --features sd-provision --monitor --non-interactive --chip {{chip}} {{ if port != "" { "--port " + port } else { "" } }} | tee {{quote(log)}}
 
 # Explicitly provision the SD card inside the board, preserving an existing LittleFS.
 sd-provision log="target/sd-provision.log" port="":

@@ -135,7 +135,7 @@ impl SdSpi {
 #[derive(Clone, Copy, Default)]
 struct Identity {
     blocks: u64,
-    /// `None` when CMD10 failed: only `sd-provision-v2` needs it.
+    /// `None` when CMD10 failed: only `sd-provision-v3` needs it.
     card: Option<CardId>,
 }
 
@@ -493,7 +493,7 @@ mod worker;
 #[cfg(feature = "sd-check")]
 pub use worker::test_rotation;
 pub use worker::{
-    PodcastRequest, SdStorage, append_log, disable, domain, guard, init, mount, provisions_v2,
+    PodcastRequest, SdStorage, append_log, disable, domain, guard, init, mount, provisions_v3,
     report_log_tail,
 };
 

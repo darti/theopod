@@ -231,19 +231,20 @@ impl Board {
     /// A touch controller or IMU that fails to start is only logged: the
     /// display and the BOOT button still work.
     pub async fn init(spawner: embassy_executor::Spawner) -> Self {
-        esp_alloc::heap_allocator!(size: HEAP_SIZE);
-        esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 64 * 1024);
         logging::init();
         log::info!("firmware init");
         let peripherals = esp_hal::init(esp_hal::Config::default());
-        // Registered after the internal heap, so general allocations only
-        // spill into PSRAM once internal RAM is full.
+        // PSRAM is registered first, so general allocations (redb's page
+        // cache above all, ADR-0022) land in PSRAM; esp-radio and esp-rtos
+        // request `Internal` memory explicitly and keep the internal heap.
         let psram_config = PsramConfig {
             mode: PSRAM_MODE,
             ram_frequency: PSRAM_FREQUENCY,
             ..PsramConfig::default()
         };
         esp_alloc::psram_allocator!(peripherals.PSRAM, esp_hal::psram, psram_config);
+        esp_alloc::heap_allocator!(size: HEAP_SIZE);
+        esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 64 * 1024);
         let timg0 = TimerGroup::new(peripherals.TIMG0);
         // Armed as soon as it exists: the display bring-up waits on DMA
         // with no timeout of its own, and a panic from here on reboots.
@@ -315,11 +316,11 @@ impl Board {
         )
         .await
         {
-            Ok(Ok(device)) if sd::provisions_v2() => {
+            Ok(Ok(device)) if sd::provisions_v3() => {
                 // Never dropped: dropping the token disables the bus, and
                 // any request would time out and poison it mid-run.
                 core::mem::forget(device);
-                log::info!("microSD left to the v2 provisioning run");
+                log::info!("microSD left to the v3 provisioning run");
                 (None, SdStatus::MountFailed)
             }
             Ok(Ok(device)) => {

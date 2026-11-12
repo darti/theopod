@@ -31,9 +31,9 @@ use theo_storage::{
     littlefs::{self, Geometry, LogTail, RequestGuard, SectorIo, SectorStorage},
 };
 use theo_storage::{
-    card_layout::CardLayout,
-    page_store::{PageError, PageStore},
-    regions::{self, AsyncRegion, RegionIo},
+    card_layout::{CardLayout, LayoutError},
+    redb_backend::RegionBackend,
+    regions::{self, RegionIo},
     scope::{OWNER_MARGIN_MS, ReplyKind, RequestKind, after_failure, failure_scope},
 };
 
@@ -218,13 +218,13 @@ pub fn disable() {
     SECTORS.disable();
 }
 
-/// Whether this build provisions layout v2 (ADR-0021).
+/// Whether this build provisions layout v3 (ADR-0021).
 ///
 /// Core0 must then send no request: the run holds the owner for minutes,
 /// and a timed-out request would poison the bus mid-run.
-pub const fn provisions_v2() -> bool {
+pub const fn provisions_v3() -> bool {
     #[cfg(feature = "sd-provision")]
-    return matches!(provision::REQUEST, provision::Request::V2(_));
+    return matches!(provision::REQUEST, provision::Request::V3(_));
     #[cfg(not(feature = "sd-provision"))]
     false
 }
@@ -571,7 +571,7 @@ async fn owner(geometry: Geometry, sectors: u64, card_id: Option<CardId>, _stack
                 // On a legacy whole-card mount the log volume holds the only
                 // `CardIo`: dropping it drops the `SectorClient`, which
                 // disables the bus, as losing the last live scope does on a
-                // v2 card.
+                // region card.
                 volume = None;
             }
             if effect.drop_podcasts {
@@ -659,11 +659,10 @@ pub async fn test_rotation(storage: &mut SdStorage) -> Result<(), Error> {
     Ok(())
 }
 
-type DbFlash = PageStore<AsyncRegion<CardIo>, &'static esp_alloc::ExternalMemory>;
 type MediaStorage = SectorStorage<MediaIo, &'static esp_alloc::ExternalMemory>;
 type MediaFs = Filesystem<MediaStorage>;
 type UnitStore = UnitMedia<RegionIo<CardIo>, &'static esp_alloc::ExternalMemory>;
-type PodcastOwner = Runtime<DbFlash, UnitStore>;
+type PodcastOwner = Runtime<UnitStore>;
 type Psram<T> = Box<T, &'static esp_alloc::ExternalMemory>;
 /// Largest one-shot future the owner places in PSRAM (`handle`'s is ~76 KB).
 const STEP_FUTURE_BYTES: usize = 96 * 1024;
@@ -708,8 +707,8 @@ impl SectorIo for MediaIo {
 /// mounted; the mount fails only on a descriptor error or a poisoned bus.
 ///
 /// Core1's 48 KiB stack cannot hold the podcast state (t-121): the runtime
-/// (33 KB) and the catalogue (10 KB) are built in PSRAM, never moved by
-/// value, and each large step runs through [`apart`].
+/// is built in PSRAM, never moved by value, and each large step runs
+/// through [`apart`].
 async fn mount_owner(
     mut card: CardIo,
     legacy: Geometry,
@@ -721,7 +720,21 @@ async fn mount_owner(
     card.read_sector(0, &mut first)?;
     card.read_sector(8, &mut second)?;
     // Actual capacity is retained, not rounded geometry, for descriptor checks.
-    let layout = CardLayout::select(&first, &second, card.sectors).map_err(|_| Error::Corrupt)?;
+    let layout = match CardLayout::select(&first, &second, card.sectors) {
+        Ok(layout) => layout,
+        Err(error) => {
+            match error {
+                LayoutError::Obsolete => log::warn!(
+                    "microSD layout is older than v3: re-provision with `just sd-provision-v3`"
+                ),
+                LayoutError::Version => {
+                    log::warn!("microSD layout version is unknown to this firmware")
+                }
+                _ => log::warn!("microSD layout refused: {error:?}"),
+            }
+            return Err(Error::Corrupt);
+        }
+    };
     let (io, geometry, database) = match layout {
         None => (MediaIo::Legacy(card), Ok(legacy), None),
         Some(layout) => {
@@ -778,47 +791,27 @@ fn mount_logs(
 }
 
 /// Open the catalogue and media units; a failure leaves podcasts offline.
+///
+/// The catalogue (redb, its page cache in PSRAM) and the unit table open
+/// synchronously, each through [`apart`] so their frames stay off the
+/// owner's; the runtime is then built in PSRAM by [`install`].
 async fn open_podcasts(
     db: RegionIo<CardIo>,
     media: RegionIo<CardIo>,
     layout: CardLayout,
     slot: &mut Option<Psram<PodcastOwner>>,
 ) {
-    let Ok(mut catalogue) = Box::try_new_in(None, &esp_alloc::ExternalMemory) else {
-        log::warn!("podcasts offline: PSRAM catalogue allocation failed");
+    let started = Instant::now();
+    let Ok(opened) = apart(|| async { open_catalogue(db, layout) }).await else {
+        log::warn!("podcasts offline: PSRAM open state allocation failed");
         return;
     };
-    let opened = apart(|| async {
-        let store = PageStore::open_in(
-            AsyncRegion::new(db),
-            layout.pages(),
-            &esp_alloc::ExternalMemory,
-        )
-        .await;
-        match store {
-            Ok(store) => Catalogue::open_into(&mut catalogue, store)
-                .await
-                .map_err(|error| log::warn!("podcasts offline: catalogue open failed: {error:?}")),
-            Err(PageError::Allocation) => {
-                log::warn!("podcasts offline: PSRAM page store allocation failed");
-                Err(())
-            }
-            Err(error) => {
-                log::warn!("podcasts offline: page store open failed: {error:?}");
-                Err(())
-            }
-        }
-    })
-    .await;
-    let Some(open) = catalogue.as_mut() else {
-        if opened.is_err() {
-            log::warn!("podcasts offline: PSRAM open state allocation failed");
-        }
+    let Some(mut catalogue) = opened else {
         return;
     };
-    let units = apart(|| {
+    let units = apart(|| async {
         UnitMedia::open_in(
-            open,
+            &mut catalogue,
             media,
             layout.media_units(),
             &esp_alloc::ExternalMemory,
@@ -826,7 +819,14 @@ async fn open_podcasts(
     })
     .await;
     match units {
-        Ok(Ok(units)) => install(slot, &mut catalogue, units),
+        Ok(Ok(units)) => {
+            if install(slot, catalogue, units) {
+                log::info!(
+                    "podcasts online: catalogue opened in {} ms",
+                    started.elapsed().as_millis()
+                );
+            }
+        }
         Ok(Err(UnitError::Alloc)) | Err(_) => {
             log::warn!("podcasts offline: PSRAM media unit allocation failed")
         }
@@ -834,20 +834,43 @@ async fn open_podcasts(
     }
 }
 
-/// Build the runtime in PSRAM; out of line so its temporaries stay off the
-/// owner's frame.
+/// Open the redb catalogue on the database region; `None` (logged) leaves
+/// podcasts offline.
 #[inline(never)]
-fn install(
-    slot: &mut Option<Psram<PodcastOwner>>,
-    catalogue: &mut Option<Catalogue<DbFlash>>,
-    units: UnitStore,
-) {
-    let Some(catalogue) = catalogue.take() else {
-        return;
+fn open_catalogue(db: RegionIo<CardIo>, layout: CardLayout) -> Option<Catalogue> {
+    let sectors = layout.database().sectors();
+    // SAFETY: the storage owner creates, uses and drops the catalogue and
+    // this backend on core1 only; `PodcastOwner` holds `Rc`s, so it is
+    // `!Send` and the compiler keeps the database on this core.
+    let backend = match unsafe { RegionBackend::new(db, sectors) } {
+        Ok(backend) => backend,
+        Err(error) => {
+            log::warn!("podcasts offline: database region unusable: {error:?}");
+            return None;
+        }
     };
+    match Catalogue::open(backend) {
+        Ok(catalogue) => Some(catalogue),
+        Err(error) => {
+            log::warn!("podcasts offline: catalogue open failed: {error:?}");
+            None
+        }
+    }
+}
+
+/// Build the runtime in PSRAM; out of line so its temporaries stay off the
+/// owner's frame. Whether the runtime was installed.
+#[inline(never)]
+fn install(slot: &mut Option<Psram<PodcastOwner>>, catalogue: Catalogue, units: UnitStore) -> bool {
     match Box::try_new_uninit_in(&esp_alloc::ExternalMemory) {
-        Ok(memory) => *slot = Some(Box::write(memory, Runtime::new(catalogue, units))),
-        Err(_) => log::warn!("podcasts offline: PSRAM runtime allocation failed"),
+        Ok(memory) => {
+            *slot = Some(Box::write(memory, Runtime::new(catalogue, units)));
+            true
+        }
+        Err(_) => {
+            log::warn!("podcasts offline: PSRAM runtime allocation failed");
+            false
+        }
     }
 }
 

@@ -120,6 +120,25 @@ pub(crate) fn db_error(error: impl Into<redb::Error>) -> Error {
     }
 }
 
+/// redb's open-time refusal of a non-empty file without its magic number.
+/// std builds tag it `InvalidData`, no_std builds keep only this message,
+/// so the message is what both can match (redb is pinned, ADR-0022).
+const NOT_REDB: &str = "Not a redb database";
+
+/// Map an open error: a region that is not a redb database is `Corrupt`
+/// (not a device failure); everything else as [`db_error`].
+fn open_error(error: redb::DatabaseError) -> Error {
+    use alloc::string::ToString;
+    match &error {
+        redb::DatabaseError::Storage(redb::StorageError::Io(e))
+            if e.to_string().contains(NOT_REDB) =>
+        {
+            Error::Corrupt
+        }
+        _ => db_error(error),
+    }
+}
+
 /// Unique database owner. Metadata views borrow the caller's scratch buffer,
 /// never the database; no record allocation or competing writer is hidden
 /// here. Storage, format and capacity errors disable this owner until it is
@@ -201,7 +220,7 @@ impl Catalogue {
         let db = Database::builder()
             .set_cache_size(CACHE_BYTES)
             .create_with_backend(backend)
-            .map_err(db_error)?;
+            .map_err(open_error)?;
         let mut catalogue = Self {
             tx: None,
             db,

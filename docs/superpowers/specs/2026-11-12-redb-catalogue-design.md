@@ -125,6 +125,22 @@ header-first `PageStore::load()` change, and the `ekv` workspace dependency.
   interrupted sync keeps the committed episodes and resumes from the last
   persisted `SYNC` state; re-upserting is idempotent through the identity
   table.
+- One commit per podcast request (`IO_BUDGET`, 250 sector commands at
+  2 ms). `Catalogue::begin_batch`/`end_batch` hold several operations'
+  writes in one transaction (reads see them; a fatal error drops them and
+  disables the owner). `SyncChunk` returns `Consumed(n)`: a push stops after
+  the first committing upsert, or after `MAX_CHUNK_ITEMS` (4) known
+  episodes, and the network task resends the rest. `DownloadEnd` publishes
+  and marks `Available` in one batch; `recover_one` unlinks both files and
+  settles the state in one batch. `DownloadStart` and `DownloadChunk`
+  answer `Pending` after one bounded step (this job's orphan unlinks, one
+  reclaim step, or the start batch) and are resent unchanged.
+- Reclaim is a cursor carried by the runtime (`Reclaim`): each step scans
+  at most `RECLAIM_SCAN_PAGES` (2) episode pages or makes one commit (the
+  `Deleting` intent, then unlink and `Reclaimed` in one batch). The
+  candidate is checked again before eviction; an episode that becomes
+  eligible behind the cursor waits for the next round, so it may be
+  evicted after a newer one.
 
 Layout v3:
 
@@ -173,7 +189,12 @@ Host tests:
 - The catalogue, subscriptions, units, sync and other suites move from the
   ekv mock to `RegionBackend` over an in-memory disk, assertions unchanged.
 - A scale test at 5,000 episodes and 50 subscriptions bounds open, a
-  16-record range and a commit in sector counts.
+  16-record range and a commit in sector counts, and each changed podcast
+  request (sync chunk, `DownloadEnd`, `recover_one`, every `make_space`
+  step) to 250 commands (`just test-catalogue-bounds`). The `make_space`
+  eviction commits exceed it (a commit after a scan that evicted redb's
+  cache: up to 194 reads + 210 writes); that test is ignored and t-133
+  stays open on it.
 
 Target checks: `just check`, `just lint`, `just build` on xtensa with redb
 pinned `default-features = false`, `features = ["experimental-api-5"]`;
@@ -210,6 +231,12 @@ intact.
   regions mount; one log line asks to re-provision). Keeping media mounted
   would need v2 geometry code, which the no-migration decision excludes.
 - **Per-episode sync commits (2026-11-12).** a 50-episode page commit measured ~2,500 sector commands (~5 s) at 5,000 episodes, over the 500 ms IO_BUDGET of a podcast request; each episode commits on its own (~0.2 s); a first 5,000-episode sync takes ~17–20 min.
+- **One commit per podcast request (final review).** One commit per
+  podcast request; sync chunk resend; bounded reclaim cursor (see §3).
+  Measured at 5,000 episodes: sync push 42 + 114, `DownloadEnd` 2 + 107,
+  `recover_one` 2 + 106, reclaim scan step at most 128 reads; the
+  eviction commits after a full scan 114 + 114 (`Deleting`) and
+  194 + 210 (unlink and `Reclaimed`), over the 250 bound.
 - **Open cost.** Catalogue::open measured 80 reads at scale (table checks); bound 96, raw redb open ≤64.
 - **Fixed bug.** The ekv units range scan (`unit_ids`, prefix `u`) also
   reached the 37-byte show-index keys (`u` + show id) and returned `Corrupt`

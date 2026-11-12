@@ -129,11 +129,12 @@ test:
     RUSTUP_TOOLCHAIN=stable cargo test -p theo-drivers -p theo-frame-dump -p theo-storage -p theo-podcasts -p frame-png --target {{host_target}}
     RUSTUP_TOOLCHAIN=stable cargo test -p theo-podcasts --example prepare_image --target {{host_target}}
 
-# Sector-count bounds of the redb catalogue (open, scan, commit at the scale
-# target; the first open of a fresh region). Release only: redb walks every
-# page on open under debug assertions.
+# Sector-count bounds of the redb catalogue (open, scan, commit and each
+# podcast request at the scale target, ADR-0022; the first open of a fresh
+# region). Release only: redb walks every page on open under debug
+# assertions.
 test-catalogue-bounds:
-    RUSTUP_TOOLCHAIN=stable cargo test --release -p theo-storage -p theo-podcasts --target {{host_target}} -- open_after_crash_reads open_at_scale scan_page_and_commit upsert_commit_stays first_open_on_a_fresh_region
+    RUSTUP_TOOLCHAIN=stable cargo test --release -p theo-storage -p theo-podcasts --target {{host_target}} -- open_after_crash_reads open_at_scale scan_page_and_commit upsert_commit_stays first_open_on_a_fresh_region download_end_is_one_commit recover_one_is_one_commit sync_chunk_requests make_space_steps
 
 # Run the driver tests under Miri, to catch undefined behaviour in their
 # unsafe code (`rustup +nightly component add miri rust-src` once). Cargo

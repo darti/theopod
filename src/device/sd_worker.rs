@@ -500,7 +500,7 @@ async fn owner(geometry: Geometry, sectors: u64, card_id: Option<CardId>, _stack
                 Command::Mount => match card.take() {
                     Some(card) => {
                         let allocated = !scratch.is_empty();
-                        match apart(|| mount_owner(card, geometry, &mut podcasts, allocated))
+                        match in_psram(|| mount_owner(card, geometry, &mut podcasts, allocated))
                             .await
                             .unwrap_or(Err(Error::Io))
                         {
@@ -515,7 +515,7 @@ async fn owner(geometry: Geometry, sectors: u64, card_id: Option<CardId>, _stack
                 },
                 Command::Domain(command) => match podcasts.as_mut() {
                     Some(owner) => {
-                        match apart(|| owner.handle(Box::into_inner(command), &mut scratch))
+                        match in_psram(|| owner.handle(Box::into_inner(command), &mut scratch))
                             .await
                             // No PSRAM for this request's state: refuse it, the runtime is intact.
                             .unwrap_or(Err(runtime::Error::Invalid))
@@ -717,7 +717,7 @@ impl SectorIo for MediaIo {
 ///
 /// Core1's 48 KiB stack cannot hold the podcast state (t-121): the runtime
 /// is built in PSRAM, never moved by value, and each large step runs
-/// through [`apart`].
+/// through [`in_psram`].
 async fn mount_owner(
     mut card: CardIo,
     legacy: Geometry,
@@ -802,7 +802,7 @@ fn mount_logs(
 /// Open the catalogue and media units; a failure leaves podcasts offline.
 ///
 /// The catalogue (redb, its page cache in PSRAM) and the unit table open
-/// synchronously, each through [`apart`] so their frames stay off the
+/// synchronously, each through [`in_psram`] so their frames stay off the
 /// owner's; the runtime is then built in PSRAM by [`install`].
 async fn open_podcasts(
     db: RegionIo<CardIo>,
@@ -811,14 +811,14 @@ async fn open_podcasts(
     slot: &mut Option<Psram<PodcastOwner>>,
 ) {
     let started = Instant::now();
-    let Ok(opened) = apart(|| async { open_catalogue(db, layout) }).await else {
+    let Ok(opened) = in_psram(|| async { open_catalogue(db, layout) }).await else {
         log::warn!("podcasts offline: PSRAM open state allocation failed");
         return;
     };
     let Some(mut catalogue) = opened else {
         return;
     };
-    let units = apart(|| async {
+    let units = in_psram(|| async {
         UnitMedia::open_in(
             &mut catalogue,
             media,
@@ -898,7 +898,9 @@ fn install(slot: &mut Option<Psram<PodcastOwner>>, catalogue: Catalogue, units: 
 /// Await `make()`'s future from PSRAM, polled in a frame of its own: built
 /// in place it is neither moved through core1's stack nor inlined into the
 /// owner's frame. `Err` when PSRAM cannot hold it.
-async fn apart<F: core::future::Future>(make: impl FnOnce() -> F) -> Result<F::Output, AllocError> {
+async fn in_psram<F: core::future::Future>(
+    make: impl FnOnce() -> F,
+) -> Result<F::Output, AllocError> {
     theo_storage::future::run_in(make, &esp_alloc::ExternalMemory, STEP_FUTURE_BYTES).await
 }
 

@@ -373,7 +373,7 @@ pub(crate) async fn start_all<M: MediaStore>(
     use crate::download::{DownloadSession, Start};
     let mut reclaim = crate::reclaim::Reclaim::new();
     loop {
-        match DownloadSession::start(cat, media, &mut reclaim, job.clone(), scratch).await? {
+        match DownloadSession::start(cat, media, &mut reclaim, &job, scratch).await? {
             Start::Pending => (),
             start => return Ok(start),
         }

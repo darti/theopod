@@ -39,6 +39,16 @@ pub async fn run_in<F: Future, A: Allocator + 'static>(
     let mut future = try_pin_in(make, allocator, max_bytes)?;
     Ok(core::future::poll_fn(|cx| poll_apart(future.as_mut(), cx)).await)
 }
+/// Await `future` in place, polled in a frame of its own.
+///
+/// The future's state stays where the caller's state is (no allocation);
+/// only its poll temporaries move out of the caller's frame. Use it for each
+/// arm of a large request dispatcher: inlined together, the arms' temporaries
+/// share one frame of their combined size (53 KB on core1, t-133).
+pub async fn apart<F: Future>(future: F) -> F::Output {
+    let mut future = core::pin::pin!(future);
+    core::future::poll_fn(|cx| poll_apart(future.as_mut(), cx)).await
+}
 #[inline(never)]
 fn poll_apart<F: Future>(future: Pin<&mut F>, cx: &mut Context<'_>) -> Poll<F::Output> {
     future.poll(cx)

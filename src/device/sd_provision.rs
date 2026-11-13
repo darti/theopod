@@ -18,7 +18,7 @@ use theo_storage::{
 
 pub(super) use theo_podcasts::provision::Request;
 
-use super::{CardIo, IO_BUDGET, apart};
+use super::{CardIo, IO_BUDGET, in_psram};
 
 /// What this build was asked to do, checked at compile time.
 pub(super) const REQUEST: Request = match option_env!("THEO_SD_PROVISION") {
@@ -36,7 +36,7 @@ pub(super) async fn run(card: &mut CardIo, card_id: Option<CardId>) -> bool {
     let Request::V3(target) = REQUEST else {
         return false;
     };
-    match apart(|| provision(card, card_id, target)).await {
+    match in_psram(|| provision(card, card_id, target)).await {
         Ok(wrote) => wrote,
         Err(AllocError) => {
             log::warn!("SD v3 provisioning not started: PSRAM allocation failed; card unchanged");

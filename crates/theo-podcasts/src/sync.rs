@@ -64,6 +64,39 @@ impl SyncSession {
         url: &str,
         prior: Option<Checkpoint>,
     ) -> Result<Self, FeedError> {
+        let mut session = Self::idle();
+        session.restart(id, url, prior)?;
+        Ok(session)
+    }
+    /// A session holding no sync; [`Self::restart`] starts one.
+    pub fn idle() -> Self {
+        Self {
+            id: SubscriptionId(0),
+            url: String::new(),
+            checkpoint: Checkpoint {
+                feed: String::new(),
+                etag: String::new(),
+                last_modified: String::new(),
+                pages: 0,
+                generation: 0,
+            },
+            prior: None,
+            parser: RadioFranceFeed::new(),
+            phase: Phase::Failed,
+            page: 0,
+            progress: Progress::default(),
+            unchanged: false,
+        }
+    }
+    /// Starts a sync in place, as [`Self::new`] would; on error `self` is
+    /// unchanged. Building a new session is a 20 KB stack temporary, which
+    /// core1's SD owner cannot afford (t-133).
+    pub fn restart(
+        &mut self,
+        id: SubscriptionId,
+        url: &str,
+        prior: Option<Checkpoint>,
+    ) -> Result<(), FeedError> {
         if id.0 == 0
             || FeedUrl::parse(url)?.page != 0
             || prior
@@ -72,27 +105,44 @@ impl SyncSession {
         {
             return Err(FeedError::Source);
         }
-        let checkpoint = Checkpoint {
-            feed: String::try_from(url).map_err(|_| FeedError::Limit)?,
-            etag: String::new(),
-            last_modified: String::new(),
-            pages: 0,
-            generation: prior
-                .as_ref()
-                .map_or(Some(1), |p| p.generation.checked_add(1))
-                .ok_or(FeedError::Limit)?,
-        };
-        Ok(Self {
-            id,
-            url: String::try_from(url).map_err(|_| FeedError::Limit)?,
+        let feed = String::try_from(url).map_err(|_| FeedError::Limit)?;
+        let url = String::try_from(url).map_err(|_| FeedError::Limit)?;
+        let generation = prior
+            .as_ref()
+            .map_or(Some(1), |p| p.generation.checked_add(1))
+            .ok_or(FeedError::Limit)?;
+        let Self {
+            id: session_id,
+            url: session_url,
             checkpoint,
-            prior,
-            parser: RadioFranceFeed::new(),
-            phase: Phase::Response,
-            page: 0,
-            progress: Progress::default(),
-            unchanged: false,
-        })
+            prior: session_prior,
+            parser,
+            phase,
+            page,
+            progress,
+            unchanged,
+        } = self;
+        *session_id = id;
+        *session_url = url;
+        let Checkpoint {
+            feed: checkpoint_feed,
+            etag,
+            last_modified,
+            pages,
+            generation: checkpoint_generation,
+        } = checkpoint;
+        *checkpoint_feed = feed;
+        etag.clear();
+        last_modified.clear();
+        *pages = 0;
+        *checkpoint_generation = generation;
+        *session_prior = prior;
+        parser.reset();
+        *phase = Phase::Response;
+        *page = 0;
+        *progress = Progress::default();
+        *unchanged = false;
+        Ok(())
     }
     pub fn url(&self) -> &str {
         &self.url
@@ -199,7 +249,7 @@ impl SyncSession {
                     .map_err(SyncError::Feed)?;
                 self.url = String::try_from(next).map_err(|_| SyncError::Feed(FeedError::Limit))?;
                 self.page += 1;
-                self.parser = RadioFranceFeed::new();
+                self.parser.reset();
                 self.phase = Phase::Response;
                 Ok(true)
             }
@@ -211,7 +261,12 @@ impl SyncSession {
         }
     }
     /// Saves the checkpoint.
-    pub fn complete(self, cat: &mut Catalogue, scratch: &mut [u8]) -> Result<Progress, SyncError> {
+    /// Saves the checkpoint once: the session is then spent until `restart`.
+    pub fn complete(
+        &mut self,
+        cat: &mut Catalogue,
+        scratch: &mut [u8],
+    ) -> Result<Progress, SyncError> {
         if self.phase != Phase::Ready {
             return Err(SyncError::Incomplete);
         }
@@ -219,6 +274,7 @@ impl SyncSession {
             cat.save_sync_checkpoint(self.id, &self.checkpoint, scratch)
                 .map_err(SyncError::Catalogue)?;
         }
+        self.phase = Phase::Failed;
         Ok(self.progress)
     }
 }

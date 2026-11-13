@@ -235,3 +235,30 @@ fn pagination_resolves_scoped_atom_namespace_aliases() {
     );
     assert_eq!(parse(body.as_bytes()).unwrap().1.as_deref(), Some(url));
 }
+fn parse_with(parser: &mut RadioFranceFeed, body: &[u8]) -> Result<Parsed, FeedError> {
+    let mut items = Vec::new();
+    for &byte in body {
+        if let Some(item) = parser.push(byte)? {
+            items.push((item.guid.as_str().into(), item.title.as_str().into()));
+        }
+    }
+    Ok((items, parser.finish()?.map(Into::into)))
+}
+#[test]
+fn reset_parser_parses_like_a_new_one() {
+    // Regression (t-133): sync reuses one parser in place (a new one is a
+    // 16 KB stack temporary on core1); a reset must forget every page state.
+    let page0 = include_bytes!("../fixtures/radio-france-page0.xml");
+    let page1 = include_bytes!("../fixtures/radio-france-page1.xml");
+    let mut parser = RadioFranceFeed::new();
+    parse_with(&mut parser, page0).unwrap();
+    parser.reset();
+    assert_eq!(parse_with(&mut parser, page1), parse(page1));
+    // Mid-item, mid-token, failed: reset still starts from scratch.
+    let mut parser = RadioFranceFeed::new();
+    let cut = page0.len() / 2;
+    let _ = parse_with(&mut parser, &page0[..cut]);
+    assert!(parser.push(0).is_err());
+    parser.reset();
+    assert_eq!(parse_with(&mut parser, page0), parse(page0));
+}

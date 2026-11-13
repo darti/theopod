@@ -415,3 +415,71 @@ fn push_stops_after_one_commit_and_resumes_from_the_rest() {
     let progress = session.complete(&mut cat, &mut scratch).unwrap();
     assert_eq!((progress.entries, progress.created), (6, 0));
 }
+#[test]
+fn restarted_session_syncs_like_a_new_one() {
+    // Regression (t-133): the runtime restarts one session in place (a new
+    // one is a 20 KB stack temporary on core1); no sync state may survive.
+    let image = Image::new();
+    let mut cat = image.create();
+    let mut scratch = [0; MAX_RECORD_BYTES];
+    let page = simple(&(item("a", "A") + &item("b", "B")));
+    let mut session = SyncSession::new(ID, ROOT, None).unwrap();
+    session
+        .response(
+            200,
+            Validators {
+                etag: Some("first"),
+                last_modified: Some("date"),
+            },
+        )
+        .unwrap();
+    session
+        .push_all(&mut cat, page.as_bytes(), &mut scratch)
+        .unwrap();
+    assert!(!session.end_page().unwrap());
+    let first = session.complete(&mut cat, &mut scratch).unwrap();
+    assert_eq!((first.entries, first.created), (2, 2));
+    // A completed session is spent: its checkpoint is saved once.
+    assert!(matches!(
+        session.complete(&mut cat, &mut scratch),
+        Err(SyncError::Incomplete)
+    ));
+    let prior = cat.sync_checkpoint(ID, &mut scratch).unwrap().unwrap();
+    // A refused restart leaves the session as it was.
+    assert!(matches!(
+        session.restart(SubscriptionId(0), ROOT, Some(prior.clone())),
+        Err(FeedError::Source)
+    ));
+    assert!(matches!(
+        session.complete(&mut cat, &mut scratch),
+        Err(SyncError::Incomplete)
+    ));
+    session.restart(ID, ROOT, Some(prior.clone())).unwrap();
+    let fresh = SyncSession::new(ID, ROOT, Some(prior.clone())).unwrap();
+    assert_eq!(session.conditional().etag, fresh.conditional().etag);
+    assert_eq!(session.conditional().etag, Some("first"));
+    assert_eq!(
+        session.conditional().last_modified,
+        fresh.conditional().last_modified
+    );
+    session
+        .response(
+            200,
+            Validators {
+                etag: Some("second"),
+                last_modified: None,
+            },
+        )
+        .unwrap();
+    session
+        .push_all(&mut cat, page.as_bytes(), &mut scratch)
+        .unwrap();
+    assert!(!session.end_page().unwrap());
+    let second = session.complete(&mut cat, &mut scratch).unwrap();
+    assert_eq!((second.entries, second.created), (2, 0));
+    let saved = cat.sync_checkpoint(ID, &mut scratch).unwrap().unwrap();
+    assert_eq!(saved.etag, "second");
+    assert_eq!(saved.last_modified, "");
+    assert_eq!(saved.pages, 1);
+    assert_eq!(saved.generation, prior.generation + 1);
+}

@@ -178,7 +178,7 @@ fn started(
             cat,
             media,
             &mut reclaim,
-            job.clone(),
+            &job,
             &mut scratch,
         ))
         .unwrap();

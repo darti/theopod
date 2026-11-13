@@ -5,6 +5,7 @@ use crate::{
     reclaim::{Reclaim, SpaceStep, make_space},
 };
 use heapless::String;
+use theo_storage::future::apart;
 #[derive(Clone, Debug)]
 pub struct DownloadJob {
     pub id: EpisodeId,
@@ -103,7 +104,7 @@ impl DownloadSession {
         cat: &mut Catalogue,
         media: &mut M,
         reclaim: &mut Reclaim,
-        job: DownloadJob,
+        job: &DownloadJob,
         scratch: &mut [u8],
     ) -> Result<Start, MediaError<M::Error>> {
         let episode = cat
@@ -120,7 +121,11 @@ impl DownloadSession {
             return Err(MediaError::InvalidInput);
         }
         // Refuse before any unlink, eviction or allocation (t-121).
-        let capacity = media.space(cat).await.map_err(MediaError::Media)?.capacity;
+        // Each step below is polled in a frame of its own (core1, t-133).
+        let capacity = apart(media.space(cat))
+            .await
+            .map_err(MediaError::Media)?
+            .capacity;
         if job.expected_bytes.is_some_and(|n| n > capacity) {
             cat.transition_audio(job.id, AudioState::Missing, scratch)
                 .map_err(MediaError::Catalogue)?;
@@ -130,7 +135,7 @@ impl DownloadSession {
         // capacity must be recovered before considering playable read audio.
         let commits = cat.commits();
         cat.begin_batch().map_err(MediaError::Catalogue)?;
-        let result = async {
+        let result = apart(async {
             media
                 .unlink_temp(cat, job.id)
                 .await
@@ -139,14 +144,14 @@ impl DownloadSession {
                 .unlink_audio(cat, job.id)
                 .await
                 .map_err(MediaError::Media)
-        }
+        })
         .await;
         end_batch::<M, _>(cat, result)?;
         if cat.commits() != commits {
             return Ok(Start::Pending);
         }
         let required = job.expected_bytes.unwrap_or(AUDIO_CHUNK as u64);
-        match make_space(cat, media, reclaim, required, scratch).await? {
+        match apart(make_space(cat, media, reclaim, required, scratch)).await? {
             SpaceStep::Ready => (),
             SpaceStep::Pending => return Ok(Start::Pending),
             SpaceStep::Unavailable => return Ok(Start::WaitingForSpace),
@@ -155,18 +160,18 @@ impl DownloadSession {
         // Reserve first: its `Full` and `Invalid` refusals change nothing,
         // so they leave the batch empty and the owner enabled.
         cat.begin_batch().map_err(MediaError::Catalogue)?;
-        let result = async {
+        let result = apart(async {
             media
                 .reset_temp(cat, job.id, expected)
                 .await
                 .map_err(MediaError::Media)?;
             cat.transition_audio(job.id, AudioState::Downloading, scratch)
                 .map_err(MediaError::Catalogue)
-        }
+        })
         .await;
         end_batch::<M, _>(cat, result)?;
         Ok(Start::Ready(Self {
-            job,
+            job: job.clone(),
             phase: Phase::Headers,
             bytes: 0,
             expected,
@@ -234,7 +239,7 @@ impl DownloadSession {
         } else {
             AUDIO_CHUNK as u64
         };
-        match make_space(cat, media, reclaim, required, scratch).await? {
+        match apart(make_space(cat, media, reclaim, required, scratch)).await? {
             SpaceStep::Ready => (),
             SpaceStep::Pending => {
                 self.phase = Phase::Body;

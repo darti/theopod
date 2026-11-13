@@ -67,6 +67,17 @@ impl<D: SectorIo> SectorIo for RegionIo<D> {
             .map_err(|_| Error::Invalid)?;
         self.access(|device| device.write_sector(sector, data))
     }
+    fn write_sectors(&mut self, relative: u32, data: &[u8]) -> Result<(), Error> {
+        let count = crate::littlefs::whole_sectors(data)?;
+        // The region is contiguous: bound its last sector, translate its first.
+        let last = u64::from(relative) + u64::from(count) - 1;
+        self.region.translate(last).map_err(|_| Error::Invalid)?;
+        let sector = self
+            .region
+            .translate(relative as u64)
+            .map_err(|_| Error::Invalid)?;
+        self.access(|device| device.write_sectors(sector, data))
+    }
     fn sync(&mut self) -> Result<(), Error> {
         self.access(|device| device.sync())
     }

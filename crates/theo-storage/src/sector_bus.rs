@@ -13,8 +13,16 @@ use littlefs_rust::Error;
 pub enum Operation {
     Read(u32),
     Write(u32, [u8; 512]),
+    /// Copy one sector into the service's staging slot `index`
+    /// (below [`STAGED_SECTORS`]); nothing reaches the card yet.
+    Stage(u8, [u8; 512]),
+    /// Write staged slots `0..count` to consecutive sectors from `first` in
+    /// one multi-block command (t-153).
+    Flush(u32, u8),
     Sync,
 }
+/// Sectors one [`Operation::Flush`] can write: one 4 KB audio chunk.
+pub const STAGED_SECTORS: usize = 8;
 pub struct Request {
     pub operation: Operation,
     pub deadline_ticks: u64,

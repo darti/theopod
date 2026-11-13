@@ -494,6 +494,27 @@ impl<D: SectorIo, A: Allocator + Clone> UnitMedia<D, A> {
         self.temp.synced = None;
         while !bytes.is_empty() {
             let at = (self.temp.len % SECTOR as u64) as usize;
+            if at == 0 && bytes.len() >= SECTOR {
+                // Whole sectors go out as one batch (one CMD25 on the card,
+                // t-153), up to the end of the unit holding `len`: units
+                // are contiguous on the device, consecutive ones need not be.
+                let in_unit = UNIT_BYTES - self.temp.len % UNIT_BYTES;
+                let whole = (bytes.len() / SECTOR * SECTOR).min(in_unit as usize);
+                let first = self
+                    .temp
+                    .sector(self.temp.len)
+                    .ok_or(UnitError::Catalogue(Error::Corrupt))?;
+                self.device
+                    .write_sectors(first, &bytes[..whole])
+                    .map_err(UnitError::Device)?;
+                bytes = &bytes[whole..];
+                self.temp.len = self
+                    .temp
+                    .len
+                    .checked_add(whole as u64)
+                    .ok_or(UnitError::Catalogue(Error::Corrupt))?;
+                continue;
+            }
             let n = bytes.len().min(SECTOR - at);
             self.temp.tail[at..at + n].copy_from_slice(&bytes[..n]);
             bytes = &bytes[n..];

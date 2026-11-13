@@ -311,8 +311,9 @@ impl SdMmcBus {
         Err(MmcError::Timeout)
     }
 
-    async fn write_block(&mut self, block: &[u8]) -> Result<(), MmcError> {
-        self.spi.write(&[0xFE]).await.map_err(|_| MmcError::Io)?;
+    /// One data block: `token` is 0xFE for CMD24, 0xFC within CMD25.
+    async fn write_block(&mut self, token: u8, block: &[u8]) -> Result<(), MmcError> {
+        self.spi.write(&[token]).await.map_err(|_| MmcError::Io)?;
         self.spi.write(block).await.map_err(|_| MmcError::Io)?;
         self.spi
             .write(&[0xFF, 0xFF])
@@ -384,17 +385,30 @@ impl MmcBus for SdMmcBus {
     where
         C: BlockWriteCommand + 'a,
     {
-        if auto_stop {
-            return Err(MmcError::Unsupported);
-        }
+        // Auto-stop is only requested for CMD25, whose Stop Tran token is
+        // always sent below.
+        let _ = auto_stop;
         self.send_header(&cmd).await?;
         let r1 = self.read_r1().await?;
         if r1 & 0x7E != 0 {
             return Err(MmcError::Other);
         }
         let size = cmd.block_size().len();
+        // SPI-mode CMD25 (t-153): each block carries the 0xFC token and the
+        // Stop Tran token 0xFD ends the transfer, not CMD12; that is why
+        // this bus reports auto-stop. sdio sends CMD23 only when the SCR
+        // allows it, and SPI acquisition never reads the SCR.
+        let multiple = cmd.buf().len() > size;
+        let token = if multiple { 0xFC } else { 0xFE };
         for block in cmd.buf().chunks_exact(size) {
-            self.write_block(block).await?;
+            self.write_block(token, block).await?;
+        }
+        if multiple {
+            self.spi
+                .write(&[0xFD, 0xFF])
+                .await
+                .map_err(|_| MmcError::Io)?;
+            self.wait_not_busy().await?;
         }
         self.deselect().await?;
         Ok(C::Resp::from_words(&[r1 as u32, 0, 0, 0]))
@@ -417,7 +431,7 @@ impl MmcBus for SdMmcBus {
     {
         self.send_header(&cmd).await?;
         let r1 = self.read_r1().await?;
-        self.write_block(cmd.buf()).await?;
+        self.write_block(0xFE, cmd.buf()).await?;
         self.deselect().await?;
         Ok(C::Resp::from_words(&[r1 as u32, 0, 0, 0]))
     }
@@ -440,6 +454,11 @@ impl MmcBus for SdMmcBus {
 
     fn supports_frequency(&self) -> u32 {
         25_000_000
+    }
+
+    /// Multi-block writes end with the SPI Stop Tran token (`write_blocks`).
+    fn supports_auto_stop(&self) -> bool {
+        true
     }
 }
 

@@ -275,6 +275,8 @@ pub(crate) struct Disk {
     /// Highest sector written, if any.
     pub highest: Option<u32>,
     pub limit: u32,
+    /// `(first sector, sectors)` of each `write_sectors` call.
+    pub batches: std::vec::Vec<(u32, usize)>,
 }
 impl Disk {
     pub fn counting(limit: u32) -> Self {
@@ -285,6 +287,7 @@ impl Disk {
             writes: 0,
             highest: None,
             limit,
+            batches: std::vec::Vec::new(),
         }
     }
     pub fn storing(limit: u32) -> Self {
@@ -318,6 +321,13 @@ impl theo_storage::littlefs::SectorIo for Disk {
         }
         Ok(())
     }
+    fn write_sectors(&mut self, first: u32, data: &[u8]) -> Result<(), littlefs_rust::Error> {
+        self.batches.push((first, data.len() / 512));
+        for (i, sector) in data.as_chunks::<512>().0.iter().enumerate() {
+            self.write_sector(first + i as u32, sector)?;
+        }
+        Ok(())
+    }
     fn sync(&mut self) -> Result<(), littlefs_rust::Error> {
         Ok(())
     }
@@ -336,6 +346,9 @@ impl theo_storage::littlefs::SectorIo for &mut Disk {
     }
     fn write_sector(&mut self, sector: u32, data: &[u8; 512]) -> Result<(), littlefs_rust::Error> {
         (**self).write_sector(sector, data)
+    }
+    fn write_sectors(&mut self, first: u32, data: &[u8]) -> Result<(), littlefs_rust::Error> {
+        (**self).write_sectors(first, data)
     }
     fn sync(&mut self) -> Result<(), littlefs_rust::Error> {
         Ok(())

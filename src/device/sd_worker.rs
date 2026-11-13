@@ -38,7 +38,9 @@ use theo_storage::{
 };
 
 use super::{SdInitError, io};
-use theo_storage::sector_bus::{Operation, Request as SectorRequest, SectorBus, SectorClient};
+use theo_storage::sector_bus::{
+    Operation, Request as SectorRequest, STAGED_SECTORS, SectorBus, SectorClient,
+};
 
 const IO_BUDGET: Duration = Duration::from_millis(500);
 /// Budget of one podcast (`Domain`) request: at most one catalogue commit
@@ -335,7 +337,10 @@ impl CardIo {
         let started = {
             let count = match &operation {
                 Operation::Read(_) => &self.measurements.reads,
-                Operation::Write(..) => &self.measurements.writes,
+                // Write requests: a batch counts its stages and its flush.
+                Operation::Write(..) | Operation::Stage(..) | Operation::Flush(..) => {
+                    &self.measurements.writes
+                }
                 Operation::Sync => &self.measurements.syncs,
             };
             count.set(count.get() + 1);
@@ -384,6 +389,24 @@ impl SectorIo for CardIo {
     }
     fn write_sector(&mut self, sector: u32, data: &[u8; 512]) -> Result<(), Error> {
         self.request(Operation::Write(sector, *data)).map(|_| ())
+    }
+    /// Stages up to [`STAGED_SECTORS`] sectors on core 0, then writes them
+    /// with one CMD25: the card is selected once and programs them together.
+    fn write_sectors(&mut self, first: u32, data: &[u8]) -> Result<(), Error> {
+        theo_storage::littlefs::whole_sectors(data)?;
+        for (group, bytes) in data.chunks(STAGED_SECTORS * 512).enumerate() {
+            let mut count = 0u8;
+            for sector in bytes.as_chunks::<512>().0 {
+                self.request(Operation::Stage(count, *sector))?;
+                count += 1;
+            }
+            let at = (group * STAGED_SECTORS) as u32;
+            self.request(Operation::Flush(
+                first.checked_add(at).ok_or(Error::Invalid)?,
+                count,
+            ))?;
+        }
+        Ok(())
     }
     fn sync(&mut self) -> Result<(), Error> {
         self.request(Operation::Sync).map(|_| ())

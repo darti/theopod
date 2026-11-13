@@ -346,6 +346,39 @@ fn bytes_round_trip_across_unit_and_sector_boundaries() {
     });
 }
 
+// Regression (t-153): a sector-aligned chunk reaches the device as one batch
+// (one CMD25 on the card) instead of eight single-sector writes; an
+// unaligned chunk batches the whole sectors after its first partial one.
+#[test]
+fn appended_whole_sectors_are_written_as_one_batch() {
+    block_on(async {
+        let image = Image::new();
+        let mut cat = image.create();
+        let mut media = open(&mut cat, Disk::counting(4 * SECTORS), 4);
+        let id = EpisodeId(3);
+        media.reset_temp(&mut cat, id, None).await.unwrap();
+        media
+            .append_temp(&mut cat, id, &[1; AUDIO_CHUNK])
+            .await
+            .unwrap();
+        let first = media.device().batches.clone();
+        assert_eq!(first.len(), 1, "{first:?}");
+        assert_eq!(first[0].1, AUDIO_CHUNK / 512);
+        assert_eq!(media.device().writes, AUDIO_CHUNK / 512);
+        media.append_temp(&mut cat, id, &[2; 1000]).await.unwrap();
+        media
+            .append_temp(&mut cat, id, &[3; AUDIO_CHUNK])
+            .await
+            .unwrap();
+        let batches = &media.device().batches;
+        // 1000 bytes: one whole sector; then 24 bytes complete the next
+        // sector and the remaining 4072 hold 7 whole sectors.
+        assert_eq!(batches.len(), 3, "{batches:?}");
+        assert_eq!(batches[1], (first[0].0 + 8, 1));
+        assert_eq!(batches[2], (first[0].0 + 10, 7));
+    });
+}
+
 // Regression (t-121): the bitmap equals the union of records after any history.
 #[test]
 fn invariant_holds_after_mixed_history() {

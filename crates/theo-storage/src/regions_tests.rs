@@ -286,3 +286,31 @@ fn log_mount_and_append_cost_is_independent_of_media() {
     assert!(without.0 > 0 && without.1 > 0, "{without:?}");
     assert_eq!(without, with);
 }
+// Regression (t-153): a batch is translated into its region and written in
+// order, one sector after the other, by the default `write_sectors`.
+#[test]
+fn batch_write_translates_into_the_region_in_order() {
+    let (_db, _log, mut media, image, layout) = setup3();
+    let mut data = vec![0u8; 3 * 512];
+    for (i, sector) in data.as_chunks_mut::<512>().0.iter_mut().enumerate() {
+        sector.fill(i as u8 + 1);
+    }
+    media.write_sectors(5, &data).unwrap();
+    let start = layout.media().start();
+    let image = image.borrow();
+    assert_eq!(image.calls, vec![start + 5, start + 6, start + 7]);
+    for i in 0..3u32 {
+        assert_eq!(image.sectors[&(start + 5 + i)], [i as u8 + 1; 512]);
+    }
+}
+// Regression (t-153): a batch whose last sector is past the region, or that
+// is not whole sectors, fails before any device I/O.
+#[test]
+fn batch_write_out_of_bounds_or_partial_fails_before_io() {
+    let (mut db, _log, image, layout) = setup();
+    let last = layout.database().sectors() - 1;
+    assert_eq!(db.write_sectors(last, &[0; 1024]), Err(Error::Invalid));
+    assert_eq!(db.write_sectors(0, &[0; 100]), Err(Error::Invalid));
+    assert_eq!(db.write_sectors(0, &[]), Err(Error::Invalid));
+    assert!(image.borrow().calls.is_empty());
+}

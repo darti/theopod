@@ -104,6 +104,7 @@ fn filesystem_and_async_device_run_on_separate_threads() {
                         Operation::Read(sector) => bytes.copy_from_slice(&image[sector as usize * 512..][..512]),
                         Operation::Write(sector, data) => image[sector as usize * 512..][..512].copy_from_slice(&data),
                         Operation::Sync => {},
+                        Operation::Stage(..) | Operation::Flush(..) => unreachable!("no batches here"),
                     }
                     bus.respond(Ok(bytes));
                 }

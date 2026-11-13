@@ -6,10 +6,19 @@ use embassy_time::{Instant, with_deadline};
 use littlefs_rust::Error;
 
 use super::{HalDevice, worker::SECTORS};
-use theo_storage::sector_bus::Operation;
+use theo_storage::sector_bus::{Operation, STAGED_SECTORS};
 
 #[embassy_executor::task]
 pub(super) async fn serve(mut device: HalDevice) {
+    // Sectors staged for one multi-block write (t-153). In PSRAM: the SD SPI
+    // has no DMA, and internal RAM is core 0's main stack.
+    let Ok(mut staged) = allocator_api2::boxed::Box::try_new_in(
+        [Aligned::<A4, _>([0u8; 512]); STAGED_SECTORS],
+        &esp_alloc::ExternalMemory,
+    ) else {
+        SECTORS.disable();
+        return;
+    };
     loop {
         let request = SECTORS.receive().await;
         let result = if SECTORS.is_disabled()
@@ -45,6 +54,26 @@ pub(super) async fn serve(mut device: HalDevice) {
                         )
                         .await
                         .map_err(|_| Error::Io)?;
+                    }
+                    Operation::Stage(index, bytes) => {
+                        let slot = staged.get_mut(usize::from(index)).ok_or(Error::Invalid)?;
+                        slot.copy_from_slice(&bytes);
+                    }
+                    Operation::Flush(first, count) => {
+                        let blocks = staged.get(..usize::from(count)).ok_or(Error::Invalid)?;
+                        if blocks.is_empty() {
+                            return Err(Error::Invalid);
+                        }
+                        #[cfg(feature = "sd-check")]
+                        match option_env!("THEO_SD_FAULT") {
+                            Some("full") => return Err(Error::NoSpace),
+                            Some("readonly" | "removed") => return Err(Error::Io),
+                            Some("timeout") => core::future::pending::<()>().await,
+                            _ => {}
+                        }
+                        block_device_driver::BlockDevice::write(&mut device, first, blocks)
+                            .await
+                            .map_err(|_| Error::Io)?;
                     }
                     // Each SPI write already waits until the card releases
                     // busy, deselects it and sends idle clocks. No writes are

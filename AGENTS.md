@@ -54,10 +54,17 @@ the ESP toolchain and target are defined in `rust-toolchain.toml`.
   checks the idle wait and `FLUSH_TIMEOUT`.
 - The SD storage owner runs on core1's 48 KiB stack (`sd_worker.rs`).
   Awaiting a large future there builds it on that stack and inlines its
-  poll into the owner's frame: await big one-shot work through `apart`
+  poll into the owner's frame: await big one-shot work through `in_psram`
   (`theo_storage::future::run_in`) and build large values in PSRAM
-  (t-121). Check the owner's frame in the disassembly (`l32r` literal
-  after `entry` in `__worker_task…::poll`) after changing its futures.
+  (t-121). Each request arm of `Runtime` runs through
+  `theo_storage::future::apart` (its own frame), and large state is
+  reset in place, never rebuilt as a stack temporary (`SyncSession::restart`,
+  `RadioFranceFeed::reset`): a 53 KB request frame overflowed core1 on the
+  first podcast write (t-133). Core0's main stack is the internal RAM the
+  linker leaves after `.bss`: keep large task futures out of it (the
+  network task's 64 KB state runs in PSRAM through `run_in`; as a static
+  it left 47 KB for a 99 KB TLS/storage chain, t-133). Run
+  `just frame-check` after changing either.
 - The display DMA reads the PSRAM framebuffer in place only through
   `PsramTxBuf` (64-byte bursts, aligned descriptors) with PSRAM at 80 MHz
   and transfers starting 64-byte aligned; dropping any of these brings back
@@ -113,6 +120,11 @@ the ESP toolchain and target are defined in `rust-toolchain.toml`.
 - Run `just miri` after changing `unsafe` code in `crates/theo-drivers`
   (slow, about 5 minutes), and `just audit` after changing dependencies.
 - Run `just build` to produce a release firmware image.
+- Run `just frame-check` after changing the SD owner, the podcast runtime,
+  the network task or what they call (release network build with the
+  placeholder credentials, then each task's deepest call chain against its
+  stack; `tools/frame-check.py`). Rebuild before flashing: it leaves a
+  placeholder-credential image in `target/`.
 
 Flashing and the serial monitor (`just flash`, `just monitor`, `just run`,
 `just flash-monitor`, `just flash-dump`, `just monitor-log`,

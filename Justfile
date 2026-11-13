@@ -35,6 +35,13 @@ lint:
 build:
     ESP_LOG=info LIBCLANG_PATH="{{libclang_path}}" PATH="{{gcc_path}}:${PATH}" RUSTUP_TOOLCHAIN=esp cargo build --release
 
+# Bound each task's deepest call chain (release network build, placeholder
+# credentials): core1's 48 KiB SD owner stack, and core0's main stack (the
+# linker's remainder) less 8 KiB for interrupts and unresolved calls (t-133).
+frame-check: (build-network "config/wifi.example.toml")
+    PATH="{{gcc_path}}:${PATH}" xtensa-esp32s3-elf-objdump -d --no-show-raw-insn -C target/xtensa-esp32s3-none-elf/release/theo-pod > target/theo-pod.dis
+    main=$(PATH="{{gcc_path}}:${PATH}" xtensa-esp32s3-elf-size -A target/xtensa-esp32s3-none-elf/release/theo-pod | awk '$1 == ".stack" { print $2 }'); python3 -I tools/frame-check.py target/theo-pod.dis "__worker_task=45056" "TaskStorage<=$((main - 8192))"
+
 # Compile a credential-bearing local image only with explicit opt-in. No hardware operation.
 build-network config="config/wifi.local.toml":
     THEO_WIFI_CONFIG={{quote(config)}} ESP_LOG=info LIBCLANG_PATH="{{libclang_path}}" PATH="{{gcc_path}}:${PATH}" RUSTUP_TOOLCHAIN=esp cargo build --release --features local-network

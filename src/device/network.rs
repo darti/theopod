@@ -418,11 +418,22 @@ impl worker::DownloadIo for AudioIo<'_, '_> {
         transfer(self.stack, url, Purpose::Audio, self.buffers).await
     }
 }
+/// Upper bound of the network future placed in PSRAM (measured 64 KB).
+const NETWORK_FUTURE_BYTES: usize = 80 * 1024;
 #[embassy_executor::task]
 pub async fn run(wifi: WIFI<'static>) {
     RUNNING.store(true, Ordering::Release);
     STOPPED.reset();
-    let result = start(wifi).await;
+    // The 64 KB transfer state lives in PSRAM, polled in a frame of its own:
+    // as this task's static storage it took that much internal RAM from the
+    // main stack, which the TLS/storage call chain overflowed (t-133).
+    let result = theo_storage::future::run_in(
+        move || start(wifi),
+        &esp_alloc::ExternalMemory,
+        NETWORK_FUTURE_BYTES,
+    )
+    .await
+    .unwrap_or(Err(Error::Network));
     RF_READY.store(false, Ordering::Release);
     if let Err(error) = result {
         if matches!(error, Error::Storage) {

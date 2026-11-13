@@ -172,6 +172,8 @@ async fn domain(command: Command) -> Result<Reply, Error> {
         reply => Ok(reply),
     }
 }
+/// TCP receive buffer, hence the advertised window (under 64 KiB: no scaling).
+const TCP_RX_BYTES: usize = 32 * 1024;
 struct Buffers {
     tcp_rx: Vec<u8, &'static esp_alloc::ExternalMemory>,
     tcp_tx: Vec<u8, &'static esp_alloc::ExternalMemory>,
@@ -189,7 +191,9 @@ fn buffer(n: usize) -> Result<Vec<u8, &'static esp_alloc::ExternalMemory>, Error
 impl Buffers {
     fn new() -> Result<Self, Error> {
         Ok(Self {
-            tcp_rx: buffer(4096)?,
+            // The receive window: the server keeps sending while a chunk is
+            // stored. At 4 KB each chunk waited a round trip (t-133).
+            tcp_rx: buffer(TCP_RX_BYTES)?,
             tcp_tx: buffer(4096)?,
             tls_rx: buffer(16640)?,
             tls_tx: buffer(4096)?,
@@ -344,6 +348,8 @@ async fn transfer(
         let mut reader = response.body().reader();
         let started = Instant::now();
         let (mut total, mut slowest, mut last_store) = (0usize, 0u64, 0u64);
+        // Time spent waiting for the network and for storage, per MiB.
+        let (mut read_us, mut store_us, mut reads) = (0u64, 0u64, 0u32);
         loop {
             if Instant::now() >= absolute {
                 log::warn!("network: {purpose:?} transfer over its absolute deadline");
@@ -355,6 +361,7 @@ async fn transfer(
                 BodyReader::FixedLength(reader) => reader.remaining.min(buffers.chunk.len()),
                 _ => buffers.chunk.len(),
             };
+            let read = Instant::now();
             let n = bounded(15, reader.read(&mut buffers.chunk[..limit]))
                 .await
                 .inspect_err(|_| {
@@ -383,12 +390,17 @@ async fn transfer(
             // a feed chunk in parts and makes space in steps, so resend
             // what it did not take. Each request is bounded by the
             // storage owner's IO budget.
+            read_us += read.elapsed().as_micros();
+            reads += 1;
             if (total + n) / (1 << 20) != total / (1 << 20) {
                 log::debug!(
-                    "network: {} MiB in {} s, slowest store {slowest} ms",
+                    "network: {} MiB in {} s, last MiB: read {} ms, store {} ms, {reads} reads, slowest store {slowest} ms",
                     (total + n) >> 20,
-                    started.elapsed().as_secs()
+                    started.elapsed().as_secs(),
+                    read_us / 1000,
+                    store_us / 1000,
                 );
+                (read_us, store_us, reads) = (0, 0, 0);
             }
             total += n;
             let store = Instant::now();
@@ -420,6 +432,7 @@ async fn transfer(
                     }
                 }
             }
+            store_us += store.elapsed().as_micros();
             last_store = store.elapsed().as_millis();
             slowest = slowest.max(last_store);
         }

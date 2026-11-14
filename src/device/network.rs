@@ -1,6 +1,7 @@
 //! Selected Wi-Fi/DNS/strict TLS/streaming HTTP adapter (ADR-0016).
 use allocator_api2::vec::Vec;
 use core::{
+    cell::Cell,
     future::Future,
     sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering},
 };
@@ -27,6 +28,7 @@ use static_cell::StaticCell;
 use theo_podcasts::{
     catalogue::MAX_URL_BYTES,
     download::DownloadOutcome,
+    media::AUDIO_CHUNK,
     network_policy::{Purpose, Redirects, ResponseHeaders, Root, endpoint},
     runtime::{Command, Reply},
 };
@@ -157,21 +159,22 @@ async fn domain(command: Command) -> Result<Reply, Error> {
     }
     // Storage owns the complete queue/admission/I/O deadline. A shorter
     // network timer would cancel a healthy queued request and poison its mount.
-    let reply = worker::cancellable(
-        async {
-            super::storage::command(command)
-                .await
-                .map_err(|_| Error::Storage)
-        },
-        STOP_WAKE.wait(),
-    )
-    .await?;
-    match reply {
+    worker::cancellable(request(command), STOP_WAKE.wait()).await
+}
+/// One owner request, without STOP: the caller races it against STOP.
+async fn request(command: Command) -> Result<Reply, Error> {
+    match super::storage::command(command)
+        .await
+        .map_err(|_| Error::Storage)?
+    {
         Reply::Offline => Err(Error::Storage),
         Reply::Rejected => Err(Error::Protocol),
         reply => Ok(reply),
     }
 }
+/// Body bytes per pump step: a whole TLS record (16 KiB of plaintext), so
+/// storing one record overlaps decrypting the next (t-160).
+const BODY_STEP_BYTES: usize = 4 * AUDIO_CHUNK;
 /// TCP receive buffer, hence the advertised window (under 64 KiB: no scaling).
 const TCP_RX_BYTES: usize = 32 * 1024;
 struct Buffers {
@@ -181,6 +184,8 @@ struct Buffers {
     tls_tx: Vec<u8, &'static esp_alloc::ExternalMemory>,
     headers: Vec<u8, &'static esp_alloc::ExternalMemory>,
     chunk: Vec<u8, &'static esp_alloc::ExternalMemory>,
+    /// The audio step being stored while `chunk` is filled (t-160).
+    back: Vec<u8, &'static esp_alloc::ExternalMemory>,
 }
 fn buffer(n: usize) -> Result<Vec<u8, &'static esp_alloc::ExternalMemory>, Error> {
     let mut bytes = Vec::new_in(&esp_alloc::ExternalMemory);
@@ -198,7 +203,8 @@ impl Buffers {
             tls_rx: buffer(16640)?,
             tls_tx: buffer(4096)?,
             headers: buffer(8192)?,
-            chunk: buffer(4096)?,
+            chunk: buffer(BODY_STEP_BYTES)?,
+            back: buffer(BODY_STEP_BYTES)?,
         })
     }
 }
@@ -343,99 +349,167 @@ async fn transfer(
                 .await?;
             }
         }
-        let absolute =
-            Instant::now() + Duration::from_secs(if purpose == Purpose::Feed { 300 } else { 3600 });
-        let mut reader = response.body().reader();
-        let started = Instant::now();
-        let (mut total, mut slowest, mut last_store) = (0usize, 0u64, 0u64);
-        // Time spent waiting for the network and for storage, per MiB.
-        let (mut read_us, mut store_us, mut reads) = (0u64, 0u64, 0u32);
-        loop {
-            if Instant::now() >= absolute {
-                log::warn!("network: {purpose:?} transfer over its absolute deadline");
-                return Err(Error::Network);
-            }
-            // reqwless0.14's fixed reader does not clamp the caller's slice
-            // to remaining bytes, so enforce that limit before every read.
-            let limit = match &reader {
-                BodyReader::FixedLength(reader) => reader.remaining.min(buffers.chunk.len()),
-                _ => buffers.chunk.len(),
+        let mut body = Body {
+            reader: response.body().reader(),
+            purpose,
+            absolute: Instant::now()
+                + Duration::from_secs(if purpose == Purpose::Feed { 300 } else { 3600 }),
+            total: 0,
+            started: Instant::now(),
+            timing: &Timing::default(),
+        };
+        let mut sink = Store {
+            purpose,
+            timing: body.timing,
+        };
+        // Audio stores chunk N on core1 while chunk N+1 is read and
+        // decrypted here (t-160); a feed chunk is consumed in parts, so it
+        // is stored before the next read.
+        theo_podcasts::body::pump(
+            &mut body,
+            &mut sink,
+            &mut buffers.chunk,
+            &mut buffers.back,
+            purpose == Purpose::Audio,
+            || async {
+                if !STOP.load(Ordering::Acquire) {
+                    STOP_WAKE.wait().await;
+                }
+            },
+        )
+        .await?;
+        let complete = match &body.reader {
+            BodyReader::Empty => true,
+            BodyReader::FixedLength(reader) => reader.remaining == 0,
+            BodyReader::Chunked(reader) => reader.is_done(),
+            BodyReader::ToEnd(_) => false,
+        };
+        return if complete {
+            Ok(())
+        } else {
+            Err(Error::Protocol)
+        };
+    }
+}
+/// Time spent waiting for the network and for storage, per MiB.
+#[derive(Default)]
+struct Timing {
+    read_us: Cell<u64>,
+    store_us: Cell<u64>,
+    reads: Cell<u32>,
+    last_store: Cell<u64>,
+    slowest: Cell<u64>,
+    /// End of the previous MiB: wall time shows how much the two overlap.
+    mark: Cell<Option<Instant>>,
+}
+/// A response body, read in bounded steps under the transfer's deadline.
+struct Body<'t, B> {
+    reader: BodyReader<B>,
+    purpose: Purpose,
+    absolute: Instant,
+    total: usize,
+    started: Instant,
+    timing: &'t Timing,
+}
+impl<B: Read> theo_podcasts::body::BodyRead for Body<'_, B> {
+    async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Error> {
+        let purpose = self.purpose;
+        if Instant::now() >= self.absolute {
+            log::warn!("network: {purpose:?} transfer over its absolute deadline");
+            return Err(Error::Network);
+        }
+        // reqwless0.14's fixed reader does not clamp the caller's slice
+        // to remaining bytes, so enforce that limit before every read.
+        let limit = match &self.reader {
+            BodyReader::FixedLength(reader) => reader.remaining.min(buf.len()),
+            _ => buf.len(),
+        };
+        let t = self.timing;
+        let read = Instant::now();
+        let n = with_timeout(Duration::from_secs(15), self.reader.read(&mut buf[..limit]))
+            .await
+            .map_err(|_| {
+                log::warn!(
+                    "network: body stalled after {} B in {} s, last store {} ms, slowest {} ms",
+                    self.total,
+                    self.started.elapsed().as_secs(),
+                    t.last_store.get(),
+                    t.slowest.get(),
+                );
+                Error::Network
+            })?
+            .map_err(|e| {
+                log::warn!("network: body {e:?}");
+                Error::Network
+            })?;
+        t.read_us.set(t.read_us.get() + read.elapsed().as_micros());
+        t.reads.set(t.reads.get() + 1);
+        let total = self.total + n;
+        if total >> 20 != self.total >> 20 {
+            let mark = t.mark.replace(Some(Instant::now())).unwrap_or(self.started);
+            log::debug!(
+                "network: {} MiB in {} s, last MiB: wall {} ms, read {} ms, store {} ms, {} reads, slowest store {} ms",
+                total >> 20,
+                self.started.elapsed().as_secs(),
+                mark.elapsed().as_millis(),
+                t.read_us.take() / 1000,
+                t.store_us.take() / 1000,
+                t.reads.take(),
+                t.slowest.get(),
+            );
+        }
+        self.total = total;
+        Ok(n)
+    }
+}
+/// Hands body bytes to the storage owner, one chunk request at a time.
+struct Store<'t> {
+    purpose: Purpose,
+    timing: &'t Timing,
+}
+impl theo_podcasts::body::ChunkSink for Store<'_> {
+    async fn store(&mut self, bytes: &[u8]) -> Result<(), Error> {
+        let (purpose, n) = (self.purpose, bytes.len());
+        let store = Instant::now();
+        let mut at = 0;
+        // One commit per podcast request (ADR-0022): the owner consumes
+        // a feed chunk in parts and makes space in steps, so resend
+        // what it did not take. Each request is bounded by the
+        // storage owner's IO budget; `pump` races them against STOP.
+        while at < n {
+            let piece = n.min(at + AUDIO_CHUNK) - at;
+            let chunk = theo_podcasts::runtime::Chunk::from_slice(&bytes[at..at + piece])
+                .map_err(|_| Error::Protocol)?;
+            let command = match purpose {
+                Purpose::Feed => Command::SyncChunk(chunk),
+                Purpose::Audio => Command::DownloadChunk(chunk),
             };
-            let read = Instant::now();
-            let n = bounded(15, reader.read(&mut buffers.chunk[..limit]))
-                .await
-                .inspect_err(|_| {
-                    log::warn!(
-                        "network: body stalled after {total} B in {} s, last store {last_store} ms, slowest {slowest} ms",
-                        started.elapsed().as_secs()
-                    );
-                })?
-                .map_err(|e| {
-                    log::warn!("network: body {e:?}");
-                    Error::Network
-                })?;
-            if n == 0 {
-                let complete = match &reader {
-                    BodyReader::Empty => true,
-                    BodyReader::FixedLength(reader) => reader.remaining == 0,
-                    BodyReader::Chunked(reader) => reader.is_done(),
-                    BodyReader::ToEnd(_) => false,
-                };
-                if !complete {
+            match (purpose, request(command).await?) {
+                (Purpose::Feed, Reply::Consumed(used)) if used > 0 && used <= piece => {
+                    at += used;
+                }
+                (Purpose::Audio, Reply::Done) => at += piece,
+                (Purpose::Audio, Reply::Pending) => (),
+                (Purpose::Audio, Reply::Downloaded(DownloadOutcome::WaitingForSpace)) => {
+                    return Err(Error::Waiting);
+                }
+                (_, reply) => {
+                    // `request` already turned Rejected/Offline into errors.
+                    let kind = match reply {
+                        Reply::Consumed(_) => "bad consumed count",
+                        _ => "unexpected reply",
+                    };
+                    log::warn!("network: {purpose:?} chunk: {kind}");
                     return Err(Error::Protocol);
                 }
-                return Ok(());
             }
-            // One commit per podcast request (ADR-0022): the owner consumes
-            // a feed chunk in parts and makes space in steps, so resend
-            // what it did not take. Each request is bounded by the
-            // storage owner's IO budget.
-            read_us += read.elapsed().as_micros();
-            reads += 1;
-            if (total + n) / (1 << 20) != total / (1 << 20) {
-                log::debug!(
-                    "network: {} MiB in {} s, last MiB: read {} ms, store {} ms, {reads} reads, slowest store {slowest} ms",
-                    (total + n) >> 20,
-                    started.elapsed().as_secs(),
-                    read_us / 1000,
-                    store_us / 1000,
-                );
-                (read_us, store_us, reads) = (0, 0, 0);
-            }
-            total += n;
-            let store = Instant::now();
-            let mut at = 0;
-            while at < n {
-                let bytes = theo_podcasts::runtime::Chunk::from_slice(&buffers.chunk[at..n])
-                    .map_err(|_| Error::Protocol)?;
-                let command = match purpose {
-                    Purpose::Feed => Command::SyncChunk(bytes),
-                    Purpose::Audio => Command::DownloadChunk(bytes),
-                };
-                match (purpose, domain(command).await?) {
-                    (Purpose::Feed, Reply::Consumed(used)) if used > 0 && used <= n - at => {
-                        at += used;
-                    }
-                    (Purpose::Audio, Reply::Done) => at = n,
-                    (Purpose::Audio, Reply::Pending) => (),
-                    (Purpose::Audio, Reply::Downloaded(DownloadOutcome::WaitingForSpace)) => {
-                        return Err(Error::Waiting);
-                    }
-                    (_, reply) => {
-                        // `domain` already turned Rejected/Offline into errors.
-                        let kind = match reply {
-                            Reply::Consumed(_) => "bad consumed count",
-                            _ => "unexpected reply",
-                        };
-                        log::warn!("network: {purpose:?} chunk: {kind}");
-                        return Err(Error::Protocol);
-                    }
-                }
-            }
-            store_us += store.elapsed().as_micros();
-            last_store = store.elapsed().as_millis();
-            slowest = slowest.max(last_store);
         }
+        let t = self.timing;
+        let elapsed = store.elapsed();
+        t.store_us.set(t.store_us.get() + elapsed.as_micros());
+        t.last_store.set(elapsed.as_millis());
+        t.slowest.set(t.slowest.get().max(elapsed.as_millis()));
+        Ok(())
     }
 }
 fn heapless_url(url: &str) -> Result<heapless::String<MAX_URL_BYTES>, Error> {
@@ -484,6 +558,10 @@ impl worker::DownloadIo for AudioIo<'_, '_> {
 }
 /// Upper bound of the network future placed in PSRAM (measured 64 KB).
 const NETWORK_FUTURE_BYTES: usize = 80 * 1024;
+/// Size of the future `make` returns, without calling it.
+fn future_bytes<F: Future>(_: &impl FnOnce() -> F) -> usize {
+    core::mem::size_of::<F>()
+}
 #[embassy_executor::task]
 pub async fn run(wifi: WIFI<'static>) {
     RUNNING.store(true, Ordering::Release);
@@ -491,13 +569,16 @@ pub async fn run(wifi: WIFI<'static>) {
     // The 64 KB transfer state lives in PSRAM, polled in a frame of its own:
     // as this task's static storage it took that much internal RAM from the
     // main stack, which the TLS/storage call chain overflowed (t-133).
-    let result = theo_storage::future::run_in(
-        move || start(wifi),
-        &esp_alloc::ExternalMemory,
-        NETWORK_FUTURE_BYTES,
-    )
-    .await
-    .unwrap_or(Err(Error::Network));
+    let make = move || start(wifi);
+    let bytes = future_bytes(&make);
+    log::debug!("network: task future {bytes} B of {NETWORK_FUTURE_BYTES} B");
+    let result =
+        theo_storage::future::run_in(make, &esp_alloc::ExternalMemory, NETWORK_FUTURE_BYTES)
+            .await
+            .unwrap_or_else(|_| {
+                log::error!("network: task future ({bytes} B) not placed in PSRAM");
+                Err(Error::Network)
+            });
     RF_READY.store(false, Ordering::Release);
     if let Err(error) = result {
         if matches!(error, Error::Storage) {

@@ -411,10 +411,12 @@ impl<CS: OutputPin> FrameBus for EspQspi<'_, CS> {
 /// it: chip select must not rise while the last byte is still clocked out.
 struct IdleOnDrop;
 
-/// Polls of SPI2's busy bit before [`IdleOnDrop`] gives up (about 1 ms).
+/// Polls of SPI2's busy bit before [`IdleOnDrop`] gives up.
 ///
-/// One aborted byte takes well under a microsecond at 40 MHz; the bound
-/// only keeps a stuck peripheral from hanging the executor.
+/// A count, not a duration: it lasts about 1 ms with the CPU at 80 MHz and
+/// less at 240 MHz (t-157), each poll being bounded by an APB register
+/// read. One aborted byte takes well under a microsecond at 40 MHz; the
+/// bound only keeps a stuck peripheral from hanging the executor.
 const IDLE_SPIN_LIMIT: u32 = 10_000;
 
 impl Drop for IdleOnDrop {

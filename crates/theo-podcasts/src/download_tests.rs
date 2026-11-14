@@ -1,34 +1,10 @@
 use super::*;
 use crate::{
-    media_test_support::{HostMedia, root_for, start_all},
+    media_test_support::{HostMedia, queued, root_for, start_all},
     reclaim::Reclaim,
     test_support::Image,
 };
 use futures::executor::block_on;
-pub(super) fn queued(
-    cat: &mut Catalogue,
-    guid: &str,
-    expected: Option<u64>,
-    scratch: &mut [u8],
-) -> DownloadJob {
-    let id = cat
-        .upsert(
-            SubscriptionId(1),
-            EpisodeMetadata {
-                guid: Some(guid),
-                title: guid,
-                enclosure: "https://cdn.example/audio",
-                description: None,
-                published: Some(1),
-                enclosure_bytes: expected,
-                duration_seconds: None,
-            },
-            scratch,
-        )
-        .unwrap()
-        .id;
-    DownloadJob::from_episode(cat.get(id, scratch).unwrap().unwrap()).unwrap()
-}
 #[test]
 fn durable_publication_is_required_before_available() {
     // Regression (t-109): streamed bytes are not playable until sync+publish+DB commit.
@@ -45,7 +21,9 @@ fn durable_publication_is_required_before_available() {
         else {
             panic!("not started")
         };
-        session.response(200, Some(3), None).unwrap();
+        session
+            .response(200, Some(3), None, None, &mut crate::resume::Resume::new())
+            .unwrap();
         assert_eq!(
             session
                 .push(
@@ -91,8 +69,26 @@ fn short_or_failed_bodies_and_partial_http_never_publish() {
         media.physical_sync = false;
         let mut scratch = [0; MAX_RECORD_BYTES];
         for (i, status, length, range) in [
-            (0, 206, Some(3), Some("bytes 0-2/3")),
-            (1, 200, Some(3), Some("bytes 1-2/3")),
+            (
+                0,
+                206,
+                Some(3),
+                Some(crate::network_policy::ContentRange {
+                    first: 0,
+                    last: 2,
+                    total: 3,
+                }),
+            ),
+            (
+                1,
+                200,
+                Some(3),
+                Some(crate::network_policy::ContentRange {
+                    first: 1,
+                    last: 2,
+                    total: 3,
+                }),
+            ),
             (2, 200, Some(4), None),
             (3, 500, None, None),
         ] {
@@ -105,7 +101,13 @@ fn short_or_failed_bodies_and_partial_http_never_publish() {
                 panic!()
             };
             assert_eq!(
-                s.response(status, length, range),
+                s.response(
+                    status,
+                    length,
+                    range,
+                    None,
+                    &mut crate::resume::Resume::new()
+                ),
                 Err(DownloadOutcome::RetryLater)
             );
             assert_eq!(
@@ -125,7 +127,8 @@ fn short_or_failed_bodies_and_partial_http_never_publish() {
             else {
                 panic!()
             };
-            s.response(200, Some(4), None).unwrap();
+            s.response(200, Some(4), None, None, &mut crate::resume::Resume::new())
+                .unwrap();
             s.push(
                 &mut cat,
                 &mut media,
@@ -167,7 +170,8 @@ fn unknown_length_never_spends_reserve_or_publishes_while_waiting() {
         else {
             panic!()
         };
-        s.response(200, None, None).unwrap();
+        s.response(200, None, None, None, &mut crate::resume::Resume::new())
+            .unwrap();
         s.push(
             &mut cat,
             &mut media,
@@ -222,7 +226,8 @@ fn every_media_boundary_recovers_without_false_available() {
                 else {
                     panic!("must fit")
                 };
-                s.response(200, Some(3), None).unwrap();
+                s.response(200, Some(3), None, None, &mut crate::resume::Resume::new())
+                    .unwrap();
                 s.push(
                     &mut cat,
                     &mut media,
@@ -277,7 +282,8 @@ fn restart_discards_old_partial_and_capacity_wait_can_retry_same_chunk() {
         else {
             panic!()
         };
-        s.response(200, None, None).unwrap();
+        s.response(200, None, None, None, &mut crate::resume::Resume::new())
+            .unwrap();
         media.other_bytes = media.capacity - reserve(media.capacity) - AUDIO_CHUNK as u64;
         assert_eq!(
             s.push(
@@ -346,7 +352,9 @@ fn publication_database_failure_and_append_cancellation_recover_safely() {
             else {
                 panic!()
             };
-            session.response(200, Some(3), None).unwrap();
+            session
+                .response(200, Some(3), None, None, &mut crate::resume::Resume::new())
+                .unwrap();
             if cancelled {
                 media.hang_append = true;
                 {
@@ -453,7 +461,14 @@ fn known_final_chunk_uses_actual_pending_bytes_without_unneeded_reclaim() {
             else {
                 panic!("known body fits")
             };
-            s.response(200, Some(length), None).unwrap();
+            s.response(
+                200,
+                Some(length),
+                None,
+                None,
+                &mut crate::resume::Resume::new(),
+            )
+            .unwrap();
             let bytes = std::vec![1;length as usize];
             for chunk in bytes.chunks(AUDIO_CHUNK) {
                 assert_eq!(
@@ -499,7 +514,8 @@ fn ordinary_body_failure_cleans_up_and_can_retry_without_reboot() {
         else {
             panic!()
         };
-        s.response(200, Some(3), None).unwrap();
+        s.response(200, Some(3), None, None, &mut crate::resume::Resume::new())
+            .unwrap();
         s.push(
             &mut cat,
             &mut media,
@@ -545,7 +561,8 @@ fn changed_expected_length_before_publication_restarts_current_representation() 
         else {
             panic!()
         };
-        s.response(200, Some(3), None).unwrap();
+        s.response(200, Some(3), None, None, &mut crate::resume::Resume::new())
+            .unwrap();
         s.push(
             &mut cat,
             &mut media,
@@ -655,12 +672,23 @@ mod capacity {
             };
             let over = u64::from(UNITS) * UNIT_BYTES + 1;
             assert_eq!(
-                session.response(200, Some(over), None),
+                session.response(
+                    200,
+                    Some(over),
+                    None,
+                    None,
+                    &mut crate::resume::Resume::new()
+                ),
                 Err(DownloadOutcome::RetryLater)
             );
             assert_eq!(
                 session
-                    .abort(&mut cat, &mut media, &mut scratch)
+                    .abort(
+                        &mut cat,
+                        &mut media,
+                        &mut crate::resume::Resume::new(),
+                        &mut scratch
+                    )
                     .await
                     .unwrap(),
                 DownloadOutcome::RetryLater
@@ -686,7 +714,9 @@ mod capacity {
             else {
                 panic!("not started")
             };
-            session.response(200, None, None).unwrap();
+            session
+                .response(200, None, None, None, &mut crate::resume::Resume::new())
+                .unwrap();
             session
                 .push(
                     &mut cat,
@@ -718,7 +748,12 @@ mod capacity {
             // succeed and neither re-queue the episode nor touch the store.
             assert_eq!(
                 session
-                    .abort(&mut cat, &mut media, &mut scratch)
+                    .abort(
+                        &mut cat,
+                        &mut media,
+                        &mut crate::resume::Resume::new(),
+                        &mut scratch
+                    )
                     .await
                     .unwrap(),
                 DownloadOutcome::RetryLater

@@ -471,6 +471,9 @@ impl<M: MediaStore> MediaStore for Probe<'_, M> {
     fn active(&self, id: EpisodeId) -> bool {
         self.inner.active(id)
     }
+    fn temp_len(&self, id: EpisodeId) -> Option<u64> {
+        self.inner.temp_len(id)
+    }
     async fn space(&mut self, cat: &mut Cat) -> Result<Space, M::Error> {
         probed!(self, self.inner.space(cat))
     }
@@ -528,7 +531,15 @@ async fn cut_history<M: MediaStore>(
     else {
         return Err(());
     };
-    session.response(200, Some(CUT_LEN), None).map_err(|_| ())?;
+    session
+        .response(
+            200,
+            Some(CUT_LEN),
+            None,
+            None,
+            &mut crate::resume::Resume::new(),
+        )
+        .map_err(|_| ())?;
     let mut left = CUT_LEN;
     while left > 0 {
         let n = left.min(AUDIO_CHUNK as u64) as usize;

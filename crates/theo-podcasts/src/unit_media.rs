@@ -633,6 +633,10 @@ impl<D: SectorIo, A: Allocator + Clone> MediaStore for UnitMedia<D, A> {
     fn active(&self, _: EpisodeId) -> bool {
         false
     }
+    fn temp_len(&self, id: EpisodeId) -> Option<u64> {
+        self.check().ok()?;
+        (self.temp.id == Some(id)).then_some(self.temp.len)
+    }
     async fn space(&mut self, _: &mut Catalogue) -> Result<Space, Self::Error> {
         self.check()?;
         let tail = self.temp.capacity().saturating_sub(self.temp.len);

@@ -3,8 +3,10 @@ use crate::{
     catalogue::{self, *},
     download::*,
     media::*,
+    network_policy::{ContentRange, range_validator},
     reclaim::Reclaim,
     recovery::Recovery,
+    resume::Resume,
     subscriptions::Subscription,
     sync::*,
 };
@@ -27,10 +29,14 @@ pub enum Command {
     SyncEnd,
     NextJob(Option<EpisodeId>),
     DownloadStart(DownloadJob),
+    /// The `Range` start and `If-Range` validator of the started download.
+    DownloadRange,
     DownloadHeaders {
         status: u16,
         length: Option<u64>,
-        partial: bool,
+        range: Option<ContentRange>,
+        etag: String<512>,
+        modified: String<128>,
     },
     DownloadChunk(Chunk),
     DownloadEnd(bool),
@@ -55,6 +61,12 @@ pub enum Reply {
         done: bool,
     },
     Ready,
+    /// `DownloadRange`: ask from byte `from` with `If-Range: validator`;
+    /// 0 asks for the whole body, unconditionally.
+    Range {
+        from: u64,
+        validator: String<512>,
+    },
     Downloaded(DownloadOutcome),
     /// `SyncChunk`: bytes consumed; send the rest again.
     Consumed(usize),
@@ -93,6 +105,8 @@ pub struct Runtime<M: MediaStore> {
     reclaim: Reclaim,
     sync: SyncSlot,
     download: Option<DownloadSession>,
+    /// The partial kept for a same-boot resume (t-156), in place.
+    resume: Resume,
     enabled: bool,
 }
 impl<M: MediaStore> Runtime<M> {
@@ -107,6 +121,7 @@ impl<M: MediaStore> Runtime<M> {
                 active: false,
             },
             download: None,
+            resume: Resume::new(),
             enabled: true,
         }
     }
@@ -255,6 +270,19 @@ impl<M: MediaStore> Runtime<M> {
             }
             Command::NextJob(after) => {
                 apart(async move {
+                    // A kept partial comes first, wherever the cursor is.
+                    if let Some(job) = self
+                        .resume
+                        .offer(&mut self.catalogue, &mut self.media, scratch)
+                        .await
+                        .map_err(media_error::<M>)?
+                    {
+                        return Ok(Reply::Job {
+                            job: Some(job),
+                            after: *after,
+                            done: false,
+                        });
+                    }
                     let mut job = None;
                     let page = self
                         .catalogue
@@ -285,6 +313,7 @@ impl<M: MediaStore> Runtime<M> {
                             &mut self.catalogue,
                             &mut self.media,
                             &mut self.reclaim,
+                            &mut self.resume,
                             job,
                             scratch,
                         )
@@ -305,18 +334,53 @@ impl<M: MediaStore> Runtime<M> {
                 })
                 .await
             }
+            Command::DownloadRange => {
+                apart(async move {
+                    let from = self.download.as_ref().ok_or(Error::Invalid)?.from();
+                    let validator = match self.resume.validator() {
+                        Some(validator) if from > 0 => validator,
+                        _ => "",
+                    };
+                    Ok(Reply::Range {
+                        from,
+                        validator: validator.try_into().map_err(|_| Error::Invalid)?,
+                    })
+                })
+                .await
+            }
             Command::DownloadHeaders {
                 status,
                 length,
-                partial,
+                range,
+                etag,
+                modified,
             } => {
                 apart(async move {
                     self.download
                         .as_mut()
                         .ok_or(Error::Invalid)?
-                        .response(*status, *length, partial.then_some("partial"))
+                        .response(
+                            *status,
+                            *length,
+                            *range,
+                            range_validator(etag, modified),
+                            &mut self.resume,
+                        )
                         .map_err(|_| Error::Invalid)?;
                     Ok(Reply::Done)
+                })
+                .await
+            }
+            Command::DownloadChunk(_) if self.download.as_ref().is_some_and(|d| d.restarting()) => {
+                // Its own frame, not push's: the store's reset is deep.
+                apart(async move {
+                    self.download
+                        .as_mut()
+                        .ok_or(Error::Invalid)?
+                        .restart(&mut self.catalogue, &mut self.media)
+                        .await
+                        .map_err(media_error::<M>)?;
+                    Ok(Reply::Pending)
                 })
                 .await
             }
@@ -365,7 +429,12 @@ impl<M: MediaStore> Runtime<M> {
                     self.sync.active = false;
                     if let Some(download) = self.download.take() {
                         download
-                            .abort(&mut self.catalogue, &mut self.media, scratch)
+                            .abort(
+                                &mut self.catalogue,
+                                &mut self.media,
+                                &mut self.resume,
+                                scratch,
+                            )
                             .await
                             .map_err(media_error::<M>)?;
                     }

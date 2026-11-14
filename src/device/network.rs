@@ -212,6 +212,7 @@ async fn transfer(
 ) -> Result<(), Error> {
     let mut redirects = Redirects::new(original, purpose).map_err(|_| Error::Protocol)?;
     let mut url = heapless_url(original)?;
+    let mut range = heapless::String::<32>::new();
     loop {
         if Clock::now().is_none() {
             return Err(Error::Trust);
@@ -253,18 +254,41 @@ async fn transfer(
                 log::warn!("network: TLS {e:?}");
                 worker::handshake_error(e)
             })?;
-        let (etag, modified) = if purpose == Purpose::Feed && redirects.forward_conditionals() {
-            match domain(Command::SyncConditionals).await? {
-                Reply::Conditionals { etag, modified } => (etag, modified),
-                _ => return Err(Error::Protocol),
-            }
-        } else {
-            (heapless::String::new(), heapless::String::new())
-        };
+        // A kept audio partial resumes with `Range`/`If-Range` (t-156,
+        // ADR-0023), sent on every hop: a redirect ignores them, and
+        // If-Range makes the final host send the whole body unless its
+        // representation matches. One query site for both purposes: each
+        // awaited `Reply` costs 2 KB of this frame on core0's stack.
+        let (etag, modified, from) =
+            if purpose == Purpose::Audio || redirects.forward_conditionals() {
+                match domain(if purpose == Purpose::Audio {
+                    Command::DownloadRange
+                } else {
+                    Command::SyncConditionals
+                })
+                .await?
+                {
+                    Reply::Conditionals { etag, modified } => (etag, modified, 0),
+                    // The If-Range validator travels in `etag`.
+                    Reply::Range { from, validator } => (validator, heapless::String::new(), from),
+                    _ => return Err(Error::Protocol),
+                }
+            } else {
+                (heapless::String::new(), heapless::String::new(), 0)
+            };
+        range.clear();
+        if from > 0 {
+            core::fmt::Write::write_fmt(&mut range, format_args!("bytes={from}-"))
+                .map_err(|_| Error::Protocol)?;
+            log::info!("network: resuming audio at {from} B");
+        }
         let mut headers = heapless::Vec::<(&str, &str), 4>::new();
         let _ = headers.push(("Accept-Encoding", "identity"));
         let _ = headers.push(("Connection", "close"));
-        if !etag.is_empty() {
+        if from > 0 {
+            let _ = headers.push(("Range", range.as_str()));
+            let _ = headers.push(("If-Range", etag.as_str()));
+        } else if !etag.is_empty() {
             let _ = headers.push(("If-None-Match", etag.as_str()));
         }
         if !modified.is_empty() {
@@ -319,7 +343,7 @@ async fn transfer(
             .await?;
             return Ok(());
         }
-        if status != 200 {
+        if status != 200 && !(status == 206 && from > 0) {
             return Err(Error::Protocol);
         }
         if facts.length.is_none() && !facts.chunked {
@@ -338,7 +362,9 @@ async fn transfer(
                 domain(Command::DownloadHeaders {
                     status,
                     length: facts.length,
-                    partial: facts.partial,
+                    range: facts.range,
+                    etag: facts.etag,
+                    modified: facts.modified,
                 })
                 .await?;
             }
@@ -642,7 +668,8 @@ async fn work(
             }
             Err(error) => {
                 log::warn!("network: {error:?}, retrying");
-                // Ordinary network/protocol errors recover partials; storage
+                // Ordinary network/protocol errors recover partials, or keep
+                // one mid-body to resume it (t-156); storage
                 // failures remain disabled and never become a fresh mount.
                 domain(Command::Abort).await?;
                 if matches!(error, Error::Waiting) {

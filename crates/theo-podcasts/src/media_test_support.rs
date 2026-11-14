@@ -100,6 +100,9 @@ impl MediaStore for HostMedia {
     fn active(&self, id: EpisodeId) -> bool {
         self.active.contains(&id.0)
     }
+    fn temp_len(&self, id: EpisodeId) -> Option<u64> {
+        fs::metadata(self.path(id, true)).ok().map(|m| m.len())
+    }
     async fn space(&mut self, _: &mut Catalogue) -> io::Result<Space> {
         self.operation(|this| {
             let mut used = this.other_bytes;
@@ -383,12 +386,49 @@ pub(crate) async fn start_all<M: MediaStore>(
     job: crate::download::DownloadJob,
     scratch: &mut [u8],
 ) -> Result<crate::download::Start, MediaError<M::Error>> {
+    start_with(cat, media, &mut crate::resume::Resume::new(), job, scratch).await
+}
+
+/// `start_all` that may resume the partial `resume` kept.
+pub(crate) async fn start_with<M: MediaStore>(
+    cat: &mut Catalogue,
+    media: &mut M,
+    resume: &mut crate::resume::Resume,
+    job: crate::download::DownloadJob,
+    scratch: &mut [u8],
+) -> Result<crate::download::Start, MediaError<M::Error>> {
     use crate::download::{DownloadSession, Start};
     let mut reclaim = crate::reclaim::Reclaim::new();
     loop {
-        match DownloadSession::start(cat, media, &mut reclaim, &job, scratch).await? {
+        match DownloadSession::start(cat, media, &mut reclaim, resume, &job, scratch).await? {
             Start::Pending => (),
             start => return Ok(start),
         }
     }
+}
+
+/// Upsert an unread queued episode `guid` and return its download job.
+pub(crate) fn queued(
+    cat: &mut crate::catalogue::Catalogue,
+    guid: &str,
+    expected: Option<u64>,
+    scratch: &mut [u8],
+) -> crate::download::DownloadJob {
+    let id = cat
+        .upsert(
+            crate::catalogue::SubscriptionId(1),
+            crate::catalogue::EpisodeMetadata {
+                guid: Some(guid),
+                title: guid,
+                enclosure: "https://cdn.example/audio",
+                description: None,
+                published: Some(1),
+                enclosure_bytes: expected,
+                duration_seconds: None,
+            },
+            scratch,
+        )
+        .unwrap()
+        .id;
+    crate::download::DownloadJob::from_episode(cat.get(id, scratch).unwrap().unwrap()).unwrap()
 }

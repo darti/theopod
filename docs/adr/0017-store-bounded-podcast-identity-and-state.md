@@ -188,6 +188,8 @@ It exposes bounded4096byte appends and16ID file-list pages. Filesystem/radio
 implementation and global request guards remain t-110, not a second mount.
 
 Downloads restart, without Range/If-Range or retained representation validators.
+(Superseded by ADR-0023: a download interrupted mid-body resumes within the
+same boot with Range/If-Range.)
 A stale partial is discarded before space preflight so it cannot cause needless
 reclamation of playable audio. Only Queued+unread+inactive jobs start; current
 enclosure URL and optional length must match the job snapshot. HTTP200 without

@@ -60,7 +60,9 @@ impl DownloadIo for Io {
         self.command(Command::DownloadHeaders {
             status: 200,
             length: None,
-            partial: false,
+            range: None,
+            etag: Default::default(),
+            modified: Default::default(),
         })
         .await?;
         self.command(Command::DownloadChunk(

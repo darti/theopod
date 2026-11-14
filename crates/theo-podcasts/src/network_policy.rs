@@ -135,7 +135,8 @@ mod tests;
 pub struct ResponseHeaders {
     pub length: Option<u64>,
     pub chunked: bool,
-    pub partial: bool,
+    /// A satisfied `Content-Range` (`bytes first-last/total`).
+    pub range: Option<ContentRange>,
     pub location: String<MAX_URL_BYTES>,
     pub etag: String<512>,
     pub modified: String<128>,
@@ -169,7 +170,10 @@ impl ResponseHeaders {
             {
                 return Err(Error::Url);
             } else if name.eq_ignore_ascii_case("content-range") {
-                out.partial = true;
+                if out.range.is_some() {
+                    return Err(Error::Url);
+                }
+                out.range = Some(ContentRange::parse(value).ok_or(Error::Url)?);
             } else if name.eq_ignore_ascii_case("location") {
                 if !out.location.is_empty() {
                     return Err(Error::Url);
@@ -191,4 +195,37 @@ impl ResponseHeaders {
         }
         Ok(out)
     }
+}
+/// A satisfied byte range of a `206` response, `last` inclusive.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ContentRange {
+    pub first: u64,
+    pub last: u64,
+    pub total: u64,
+}
+impl ContentRange {
+    /// Parse `bytes first-last/total`; `*` forms and `last >= total` are refused.
+    fn parse(value: &str) -> Option<Self> {
+        let (span, total) = value.strip_prefix("bytes ")?.split_once('/')?;
+        let (first, last) = span.split_once('-')?;
+        let number = |s: &str| {
+            (!s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
+                .then(|| s.parse::<u64>().ok())
+                .flatten()
+        };
+        let range = Self {
+            first: number(first)?,
+            last: number(last)?,
+            total: number(total)?,
+        };
+        (range.first <= range.last && range.last < range.total).then_some(range)
+    }
+}
+/// The `If-Range` validator of a response: its strong ETag, else (no ETag at
+/// all) its `Last-Modified`. A weak ETag gives none (RFC 9110 13.1.5).
+pub fn range_validator<'a>(etag: &'a str, modified: &'a str) -> Option<&'a str> {
+    if !etag.is_empty() {
+        return (!etag.starts_with("W/")).then_some(etag);
+    }
+    (!modified.is_empty()).then_some(modified)
 }

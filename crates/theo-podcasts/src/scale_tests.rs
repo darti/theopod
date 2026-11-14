@@ -178,6 +178,7 @@ fn started(
             cat,
             media,
             &mut reclaim,
+            &mut crate::resume::Resume::new(),
             &job,
             &mut scratch,
         ))
@@ -189,7 +190,15 @@ fn started(
             _ => panic!("not started"),
         }
     };
-    session.response(200, Some(len), None).unwrap();
+    session
+        .response(
+            200,
+            Some(len),
+            None,
+            None,
+            &mut crate::resume::Resume::new(),
+        )
+        .unwrap();
     let mut left = len;
     while left > 0 {
         let n = left.min(AUDIO_CHUNK as u64) as usize;

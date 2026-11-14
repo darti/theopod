@@ -98,3 +98,62 @@ fn redirected_unconditional_response_cannot_reuse_prior_not_modified() {
     redirects.follow("?page=0").unwrap();
     assert!(!redirects.accepts_not_modified(true));
 }
+#[test]
+fn content_range_parses_a_satisfied_byte_range() {
+    // Regression (t-156): a resumed audio body is accepted only for the exact range asked.
+    let parsed =
+        ResponseHeaders::parse([("Content-Range", b"bytes 100-199/200".as_slice())]).unwrap();
+    assert_eq!(
+        parsed.range,
+        Some(ContentRange {
+            first: 100,
+            last: 199,
+            total: 200
+        })
+    );
+    assert_eq!(ResponseHeaders::parse([]).unwrap().range, None);
+}
+#[test]
+fn content_range_rejects_malformed_or_unsatisfied_ranges() {
+    // Regression (t-156): an ambiguous Content-Range never reaches the storage owner.
+    for value in [
+        "bytes */200",
+        "bytes 100-199/*",
+        "bytes 200-100/300",
+        "bytes 100-200/200",
+        "items 0-1/2",
+        "bytes 1-2",
+        "bytes -1-2/3",
+        "bytes +1-2/3",
+        "bytes 1 -2/3",
+    ] {
+        assert!(
+            ResponseHeaders::parse([("Content-Range", value.as_bytes())]).is_err(),
+            "{value}"
+        );
+    }
+    assert!(
+        ResponseHeaders::parse([
+            ("Content-Range", b"bytes 0-1/2".as_slice()),
+            ("Content-Range", b"bytes 0-1/2")
+        ])
+        .is_err()
+    );
+}
+#[test]
+fn range_validator_prefers_strong_etag_and_never_uses_a_weak_one() {
+    // Regression (t-156): If-Range must not carry a weak entity tag, nor a date when one exists.
+    assert_eq!(
+        range_validator("\"abc\"", "Sat, 01 Nov 2026 00:00:00 GMT"),
+        Some("\"abc\"")
+    );
+    assert_eq!(
+        range_validator("W/\"abc\"", "Sat, 01 Nov 2026 00:00:00 GMT"),
+        None
+    );
+    assert_eq!(
+        range_validator("", "Sat, 01 Nov 2026 00:00:00 GMT"),
+        Some("Sat, 01 Nov 2026 00:00:00 GMT")
+    );
+    assert_eq!(range_validator("", ""), None);
+}

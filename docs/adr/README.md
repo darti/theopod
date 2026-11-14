@@ -21,3 +21,4 @@
 | [0017](0017-store-bounded-podcast-identity-and-state.md) | Store bounded podcast identity and local state in EKV | Host catalogue implemented; firmware activation pending |
 
 | [0018](0018-integrate-podcast-background-services.md) | Integrate bounded podcast background services | Implemented in software; hardware validation pending |
+| [0019](0019-run-the-cpu-at-240-mhz.md) | Run the CPU at 240 MHz and build for speed | Accepted |

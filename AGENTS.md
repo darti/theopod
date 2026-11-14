@@ -15,7 +15,8 @@ the ESP toolchain and target are defined in `rust-toolchain.toml`.
   not justify closing it.
 
 - Preserve the existing `no_std`/`no_main` model and ESP-HAL startup conventions.
-- Display pin assignments, panel geometry, the BOOT button, PSRAM mode and
+- Display pin assignments, panel geometry, the BOOT button, the CPU clock
+  (240 MHz, ADR-0019), PSRAM mode and
   frequency, and the TCA9554 power-up values are defined in
   `src/device/mod.rs`, the single source of truth for board wiring; the
   power-up sequence itself is `PanelPower` in `crates/theo-drivers`. The

@@ -48,6 +48,7 @@ use embassy_sync::mutex::Mutex;
 use embassy_time::{Delay, Instant};
 use esp_alloc::ExternalMemory;
 use esp_hal::{
+    clock::CpuClock,
     gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull},
     peripherals::GPIO0,
     psram::{PsramConfig, PsramMode, SpiRamFreq},
@@ -90,6 +91,12 @@ pub use esp_hal::main as entry;
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
+/// CPU clock: the ESP32-S3 maximum, where esp-hal defaults to 80 MHz (t-157).
+///
+/// No peripheral follows it: SPI and the TIMG timers (watchdogs, Embassy
+/// time driver) run from the fixed 80 MHz APB, I2C and SYSTIMER from the
+/// 40 MHz crystal. It costs active current, not timing (ADR-0019).
+const CPU_CLOCK: CpuClock = CpuClock::_240MHz;
 /// Internal RAM heap; the framebuffer lives in PSRAM instead.
 const HEAP_SIZE: usize = 64 * 1024;
 /// The ESP32-S3R8 module carries 8 MB of octal PSRAM; auto-detection is
@@ -235,7 +242,7 @@ impl Board {
         esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 64 * 1024);
         logging::init();
         log::info!("firmware init");
-        let peripherals = esp_hal::init(esp_hal::Config::default());
+        let peripherals = esp_hal::init(esp_hal::Config::default().with_cpu_clock(CPU_CLOCK));
         // Registered after the internal heap, so general allocations only
         // spill into PSRAM once internal RAM is full.
         let psram_config = PsramConfig {

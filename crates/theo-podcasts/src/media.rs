@@ -1,7 +1,9 @@
 //! ID-addressed media operations supplied by the unique storage owner.
 use crate::catalogue::{Catalogue, EpisodeId};
 pub const FILE_PAGE: usize = 16;
-pub const AUDIO_CHUNK: usize = 4096;
+/// Most audio bytes one append takes: a TLS record of plaintext, so the
+/// network hands the owner one record per request (t-162).
+pub const AUDIO_CHUNK: usize = 16 * 1024;
 /// Media capacity and free bytes, as `MediaStore::space` reports them.
 #[derive(Clone, Copy, Debug)]
 pub struct Space {

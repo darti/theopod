@@ -8,9 +8,34 @@ use crate::{
     subscriptions::Subscription,
     sync::*,
 };
+use allocator_api2::alloc::Allocator;
 use heapless::{String, Vec};
 use theo_storage::future::apart;
-pub type Chunk = Vec<u8, AUDIO_CHUNK>;
+/// Most feed bytes one `SyncChunk` carries; the owner may consume fewer.
+pub const FEED_CHUNK: usize = 4096;
+/// Feed bytes, inline: the owner consumes them in parts (`Reply::Consumed`).
+pub type FeedChunk = Vec<u8, FEED_CHUNK>;
+/// Allocator owning an [`AudioChunk`]; PSRAM on the board.
+pub type ChunkAllocator = &'static (dyn Allocator + Sync);
+/// Audio bytes for one `DownloadChunk`, at most [`AUDIO_CHUNK`].
+///
+/// Owned out of line: a record-sized inline array would make every
+/// `Command` 16 KiB, built on the owner's 48 KiB stack (t-162).
+pub type AudioChunk = allocator_api2::vec::Vec<u8, ChunkAllocator>;
+/// Copies `bytes` into a new [`AudioChunk`], or `None` if too long or out of memory.
+pub fn audio_chunk(bytes: &[u8], allocator: ChunkAllocator) -> Option<AudioChunk> {
+    if bytes.len() > AUDIO_CHUNK {
+        return None;
+    }
+    let mut chunk = allocator_api2::vec::Vec::new_in(allocator);
+    chunk.try_reserve_exact(bytes.len()).ok()?;
+    chunk.extend_from_slice(bytes);
+    Some(chunk)
+}
+#[expect(
+    clippy::large_enum_variant,
+    reason = "every request is boxed in PSRAM; `SyncChunk` stays inline (t-162)"
+)]
 pub enum Command {
     Recover,
     Follow(String<256>),
@@ -23,7 +48,7 @@ pub enum Command {
         etag: String<512>,
         modified: String<128>,
     },
-    SyncChunk(Chunk),
+    SyncChunk(FeedChunk),
     SyncEnd,
     NextJob(Option<EpisodeId>),
     DownloadStart(DownloadJob),
@@ -32,7 +57,7 @@ pub enum Command {
         length: Option<u64>,
         partial: bool,
     },
-    DownloadChunk(Chunk),
+    DownloadChunk(AudioChunk),
     DownloadEnd(bool),
     Abort,
 }
@@ -331,7 +356,7 @@ impl<M: MediaStore> Runtime<M> {
                                 &mut self.catalogue,
                                 &mut self.media,
                                 &mut self.reclaim,
-                                bytes,
+                                bytes.as_slice(),
                                 scratch,
                             )
                             .await

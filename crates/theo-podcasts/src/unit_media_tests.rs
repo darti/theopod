@@ -372,10 +372,11 @@ fn appended_whole_sectors_are_written_as_one_batch() {
             .unwrap();
         let batches = &media.device().batches;
         // 1000 bytes: one whole sector; then 24 bytes complete the next
-        // sector and the remaining 4072 hold 7 whole sectors.
+        // sector and the remaining chunk bytes hold all but one sector.
+        let sectors = AUDIO_CHUNK / 512;
         assert_eq!(batches.len(), 3, "{batches:?}");
-        assert_eq!(batches[1], (first[0].0 + 8, 1));
-        assert_eq!(batches[2], (first[0].0 + 10, 7));
+        assert_eq!(batches[1], (first[0].0 + sectors as u32, 1));
+        assert_eq!(batches[2], (first[0].0 + sectors as u32 + 2, sectors - 1));
     });
 }
 

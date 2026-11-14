@@ -6,7 +6,7 @@
 //! time (ADR-0022), and a store already handed to the owner always runs to
 //! its end: only the stop future cancels it, together with the read.
 use crate::worker::{Error, cancellable};
-use embassy_futures::join::join;
+use embassy_futures::{join::join, yield_now};
 
 /// Source of a response body. Implement this to feed [`pump`].
 #[expect(async_fn_in_trait, reason = "single-threaded executor, no Send bound")]
@@ -26,7 +26,9 @@ pub trait ChunkSink {
 ///
 /// `front` and `back` are the two chunk buffers (same length), each
 /// filled across reads before it is stored; `back` is unused unless
-/// `overlap`. A store error wins over a concurrent read
+/// `overlap`. While overlapping, the next read waits (yielding) until
+/// `handed_off()` says the store in flight no longer needs this core to
+/// reach storage. A store error wins over a concurrent read
 /// error: `Storage` must reach the caller, who then skips `Abort`. Each
 /// read/store step races a fresh `stop()` future, so one stop request
 /// cancels both sides at once.
@@ -37,6 +39,7 @@ pub async fn pump<'b, F: core::future::Future<Output = ()>>(
     mut back: &'b mut [u8],
     overlap: bool,
     mut stop: impl FnMut() -> F,
+    handed_off: impl Fn() -> bool,
 ) -> Result<(), Error> {
     // Bytes at the start of `back` still to be stored.
     let mut pending = 0;
@@ -49,10 +52,18 @@ pub async fn pump<'b, F: core::future::Future<Output = ()>>(
                         n => sink.store(&back[..n]).await,
                     }
                 };
-                // Store first: its first poll hands the chunk to the other
-                // core, whereas a read decrypting a buffered TLS record
-                // completes within one poll and holds this core meanwhile.
-                Ok(join(store, fill(reader, front)).await)
+                // Store first, and read only once the chunk has left this
+                // core (`handed_off`): a read decrypting a buffered TLS
+                // record completes within one poll and holds this core
+                // meanwhile, so whatever relays the store here would wait
+                // for it (t-160, t-163).
+                let read = async {
+                    while pending > 0 && !handed_off() {
+                        yield_now().await;
+                    }
+                    fill(reader, front).await
+                };
+                Ok(join(store, read).await)
             },
             stop(),
         )

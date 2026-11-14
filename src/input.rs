@@ -22,7 +22,7 @@ use embassy_sync::{
     channel::Channel,
     signal::Signal,
 };
-use embassy_time::{Delay, Duration, Instant, Ticker, Timer, with_timeout};
+use embassy_time::{Delay, Duration, Instant, Timer, with_timeout};
 use theo_drivers::{
     ButtonEvent, InputTask, InputWatch, LongPressButton, LongPressEvent, OrientationDetector,
     Rotation, TouchEvent, reset_due,
@@ -76,7 +76,7 @@ const TOUCH_RESET_AFTER: u32 = 8;
 const TOUCH_RESET_EVERY: u32 = 64;
 /// Longest pause between attempts to reset the touch controller.
 const TOUCH_RESET_RETRY_MAX: Duration = Duration::from_secs(1);
-/// Accelerometer sample period; a rotation needs
+/// Pause between accelerometer samples; a rotation needs
 /// [`OrientationDetector::STABLE_SAMPLES`] samples in a row.
 const ORIENTATION_PERIOD: Duration = Duration::from_millis(100);
 /// Longest wait for the UI loop to put the panel to sleep before a stop.
@@ -393,12 +393,14 @@ async fn report_orientation(imu: &mut device::Imu) -> ! {
     let mut detector = OrientationDetector::new(INITIAL_ROTATION);
     let mut first_sample = true;
     let mut samples: u64 = 0;
-    // A ticker keeps the period exact whatever each read costs.
-    let mut ticker = Ticker::every(ORIENTATION_PERIOD);
+    // A pause, not a ticker: when core0 is busy (a download decrypts TLS
+    // records back to back), a read spans several ~40 ms polls and a ticker
+    // fell behind and fired at once, so this task took the shared I2C bus
+    // again and again and starved touch into a watchdog reset (t-163).
     // Consecutive failed reads.
     let mut failures: u32 = 0;
     loop {
-        ticker.next().await;
+        Timer::after(ORIENTATION_PERIOD).await;
         let sample = imu.acceleration().await;
         progress(InputTask::Orientation);
         match sample {

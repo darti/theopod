@@ -2,7 +2,6 @@ use crate::{
     catalogue::{Catalogue, EpisodeId},
     media::*,
 };
-use ekv::flash::Flash;
 use std::{
     collections::BTreeSet,
     fs::{self, File, OpenOptions},
@@ -19,8 +18,10 @@ pub(crate) struct HostMedia {
     pub fail_at: Option<usize>,
     pub physical_sync: bool,
     pub hang_append: bool,
-    pub after_publish: Option<std::rc::Rc<std::cell::Cell<bool>>>,
-    pub after_unlink: Option<std::rc::Rc<std::cell::Cell<bool>>>,
+    /// Catalogue disk whose writes start failing after a publish.
+    pub after_publish: Option<theo_storage::test_disk::TestDisk>,
+    /// Catalogue disk whose writes start failing after an audio unlink.
+    pub after_unlink: Option<theo_storage::test_disk::TestDisk>,
 }
 impl HostMedia {
     pub fn new(root: PathBuf) -> Self {
@@ -94,12 +95,12 @@ impl Drop for HostMedia {
         let _ = fs::remove_dir_all(&self.root);
     }
 }
-impl<F: Flash> MediaStore<F> for HostMedia {
+impl MediaStore for HostMedia {
     type Error = io::Error;
     fn active(&self, id: EpisodeId) -> bool {
         self.active.contains(&id.0)
     }
-    async fn space(&mut self, _: &mut Catalogue<F>) -> io::Result<Space> {
+    async fn space(&mut self, _: &mut Catalogue) -> io::Result<Space> {
         self.operation(|this| {
             let mut used = this.other_bytes;
             for entry in fs::read_dir(&this.root)? {
@@ -115,7 +116,7 @@ impl<F: Flash> MediaStore<F> for HostMedia {
     }
     async fn reset_temp(
         &mut self,
-        _: &mut Catalogue<F>,
+        _: &mut Catalogue,
         id: EpisodeId,
         _: Option<u64>,
     ) -> io::Result<()> {
@@ -126,7 +127,7 @@ impl<F: Flash> MediaStore<F> for HostMedia {
     }
     async fn append_temp(
         &mut self,
-        _: &mut Catalogue<F>,
+        _: &mut Catalogue,
         id: EpisodeId,
         bytes: &[u8],
     ) -> io::Result<()> {
@@ -141,7 +142,7 @@ impl<F: Flash> MediaStore<F> for HostMedia {
                 .write_all(bytes)
         })
     }
-    async fn sync_temp(&mut self, _: &mut Catalogue<F>, id: EpisodeId) -> io::Result<u64> {
+    async fn sync_temp(&mut self, _: &mut Catalogue, id: EpisodeId) -> io::Result<u64> {
         self.operation(|this| {
             let f = File::open(this.path(id, true))?;
             if this.physical_sync {
@@ -150,7 +151,7 @@ impl<F: Flash> MediaStore<F> for HostMedia {
             Ok(f.metadata()?.len())
         })
     }
-    async fn publish_temp(&mut self, _: &mut Catalogue<F>, id: EpisodeId) -> io::Result<()> {
+    async fn publish_temp(&mut self, _: &mut Catalogue, id: EpisodeId) -> io::Result<()> {
         let result = self.operation(|this| {
             if this.path(id, false).exists() {
                 return Err(io::Error::other("refuse overwrite"));
@@ -159,25 +160,25 @@ impl<F: Flash> MediaStore<F> for HostMedia {
             this.sync_dir()
         });
         if result.is_ok()
-            && let Some(flag) = &self.after_publish
+            && let Some(disk) = &self.after_publish
         {
-            flag.set(true);
+            disk.state().fail_writes = true;
         }
         result
     }
-    async fn unlink_temp(&mut self, _: &mut Catalogue<F>, id: EpisodeId) -> io::Result<()> {
+    async fn unlink_temp(&mut self, _: &mut Catalogue, id: EpisodeId) -> io::Result<()> {
         self.operation(|this| this.unlink(id, true))
     }
-    async fn unlink_audio(&mut self, _: &mut Catalogue<F>, id: EpisodeId) -> io::Result<()> {
+    async fn unlink_audio(&mut self, _: &mut Catalogue, id: EpisodeId) -> io::Result<()> {
         let result = self.operation(|this| this.unlink(id, false));
         if result.is_ok()
-            && let Some(flag) = &self.after_unlink
+            && let Some(disk) = &self.after_unlink
         {
-            flag.set(true);
+            disk.state().fail_writes = true;
         }
         result
     }
-    async fn audio_len(&mut self, _: &mut Catalogue<F>, id: EpisodeId) -> io::Result<Option<u64>> {
+    async fn audio_len(&mut self, _: &mut Catalogue, id: EpisodeId) -> io::Result<Option<u64>> {
         self.operation(|this| match fs::metadata(this.path(id, false)) {
             Ok(m) => Ok(Some(m.len())),
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
@@ -186,7 +187,7 @@ impl<F: Flash> MediaStore<F> for HostMedia {
     }
     async fn list_ids(
         &mut self,
-        _: &mut Catalogue<F>,
+        _: &mut Catalogue,
         after: Option<EpisodeId>,
         out: &mut [EpisodeId; FILE_PAGE],
     ) -> io::Result<usize> {
@@ -220,10 +221,8 @@ impl<F: Flash> MediaStore<F> for HostMedia {
 pub(crate) fn root_for(image: &crate::test_support::Image) -> PathBuf {
     Path::new(&image.path).with_extension("media")
 }
-pub(crate) async fn available(
-    cat: &mut crate::catalogue::Catalogue<
-        theo_storage::page_store::PageStore<crate::test_support::HostFile>,
-    >,
+pub(crate) fn available(
+    cat: &mut crate::catalogue::Catalogue,
     media: &mut HostMedia,
     guid: &str,
     date: Option<i64>,
@@ -246,11 +245,9 @@ pub(crate) async fn available(
             },
             scratch,
         )
-        .await
         .unwrap()
         .id;
     cat.transition_audio(id, AudioState::Downloading, scratch)
-        .await
         .unwrap();
     fs::write(media.path(id, false), bytes).unwrap();
     if media.physical_sync {
@@ -261,10 +258,9 @@ pub(crate) async fn available(
         media.sync_dir().unwrap();
     }
     cat.finish_download(id, bytes.len() as u64, scratch)
-        .await
         .unwrap();
     if read {
-        cat.mark_read(id, scratch).await.unwrap();
+        cat.mark_read(id, scratch).unwrap();
     }
     id
 }
@@ -279,6 +275,8 @@ pub(crate) struct Disk {
     /// Highest sector written, if any.
     pub highest: Option<u32>,
     pub limit: u32,
+    /// `(first sector, sectors)` of each `write_sectors` call.
+    pub batches: std::vec::Vec<(u32, usize)>,
 }
 impl Disk {
     pub fn counting(limit: u32) -> Self {
@@ -289,6 +287,7 @@ impl Disk {
             writes: 0,
             highest: None,
             limit,
+            batches: std::vec::Vec::new(),
         }
     }
     pub fn storing(limit: u32) -> Self {
@@ -322,6 +321,13 @@ impl theo_storage::littlefs::SectorIo for Disk {
         }
         Ok(())
     }
+    fn write_sectors(&mut self, first: u32, data: &[u8]) -> Result<(), littlefs_rust::Error> {
+        self.batches.push((first, data.len() / 512));
+        for (i, sector) in data.as_chunks::<512>().0.iter().enumerate() {
+            self.write_sector(first + i as u32, sector)?;
+        }
+        Ok(())
+    }
     fn sync(&mut self) -> Result<(), littlefs_rust::Error> {
         Ok(())
     }
@@ -341,10 +347,48 @@ impl theo_storage::littlefs::SectorIo for &mut Disk {
     fn write_sector(&mut self, sector: u32, data: &[u8; 512]) -> Result<(), littlefs_rust::Error> {
         (**self).write_sector(sector, data)
     }
+    fn write_sectors(&mut self, first: u32, data: &[u8]) -> Result<(), littlefs_rust::Error> {
+        (**self).write_sectors(first, data)
+    }
     fn sync(&mut self) -> Result<(), littlefs_rust::Error> {
         Ok(())
     }
     fn check(&mut self) -> Result<(), littlefs_rust::Error> {
         Ok(())
+    }
+}
+
+/// Repeat one-step `make_space` until it settles: true when space is free.
+pub(crate) async fn make_space_all<M: MediaStore>(
+    cat: &mut Catalogue,
+    media: &mut M,
+    required: u64,
+    scratch: &mut [u8],
+) -> Result<bool, MediaError<M::Error>> {
+    use crate::reclaim::{Reclaim, SpaceStep, make_space};
+    let mut reclaim = Reclaim::new();
+    loop {
+        match make_space(cat, media, &mut reclaim, required, scratch).await? {
+            SpaceStep::Ready => return Ok(true),
+            SpaceStep::Unavailable => return Ok(false),
+            SpaceStep::Pending => (),
+        }
+    }
+}
+
+/// Repeat `DownloadSession::start` while it is pending, as the worker does.
+pub(crate) async fn start_all<M: MediaStore>(
+    cat: &mut Catalogue,
+    media: &mut M,
+    job: crate::download::DownloadJob,
+    scratch: &mut [u8],
+) -> Result<crate::download::Start, MediaError<M::Error>> {
+    use crate::download::{DownloadSession, Start};
+    let mut reclaim = crate::reclaim::Reclaim::new();
+    loop {
+        match DownloadSession::start(cat, media, &mut reclaim, &job, scratch).await? {
+            Start::Pending => (),
+            start => return Ok(start),
+        }
     }
 }

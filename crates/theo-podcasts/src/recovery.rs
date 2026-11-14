@@ -1,22 +1,21 @@
 //! Recovery by persisted local identity, never by remote URL or filename.
 use crate::{catalogue::*, media::*};
-use ekv::flash::Flash;
-pub async fn recover_one<F: Flash, M: MediaStore<F>>(
-    cat: &mut Catalogue<F>,
+/// Recover one identity in at most one catalogue commit: the unlinks and
+/// state transitions are one batch (ADR-0022), so a podcast request stays
+/// within its IO budget and a crash keeps all of it or none.
+pub async fn recover_one<M: MediaStore>(
+    cat: &mut Catalogue,
     media: &mut M,
     id: EpisodeId,
     scratch: &mut [u8],
-) -> Result<(), MediaError<F::Error, M::Error>> {
+) -> Result<(), MediaError<M::Error>> {
     if media.active(id) {
         return Ok(());
     }
-    let episode = cat.get(id, scratch).await.map_err(MediaError::Catalogue)?;
+    let episode = cat.get(id, scratch).map_err(MediaError::Catalogue)?;
     let state = episode.map(|e| e.state);
     if state.is_some_and(|s| s.audio == AudioState::Available) {
-        let expected = cat
-            .completed_audio_len(id)
-            .await
-            .map_err(MediaError::Catalogue)?;
+        let expected = cat.completed_audio_len(id).map_err(MediaError::Catalogue)?;
         let actual = media.audio_len(cat, id).await.map_err(MediaError::Media)?;
         if expected.is_some() && expected == actual {
             media
@@ -29,6 +28,18 @@ pub async fn recover_one<F: Flash, M: MediaStore<F>>(
     if state.is_some_and(|s| s.audio == AudioState::Deleting && !s.read) {
         return Err(MediaError::InvalidState);
     }
+    cat.begin_batch().map_err(MediaError::Catalogue)?;
+    let result = reset_identity(cat, media, id, state, scratch).await;
+    end_batch::<M, _>(cat, result)
+}
+/// Unlink both files of `id` and settle its state; inside one batch.
+async fn reset_identity<M: MediaStore>(
+    cat: &mut Catalogue,
+    media: &mut M,
+    id: EpisodeId,
+    state: Option<EpisodeState>,
+    scratch: &mut [u8],
+) -> Result<(), MediaError<M::Error>> {
     media
         .unlink_temp(cat, id)
         .await
@@ -43,29 +54,26 @@ pub async fn recover_one<F: Flash, M: MediaStore<F>>(
     match state.audio {
         AudioState::Deleting => {
             cat.transition_audio(id, AudioState::Reclaimed, scratch)
-                .await
                 .map_err(MediaError::Catalogue)?;
         }
         AudioState::Reclaimed => (),
         AudioState::Queued if !state.read => (),
         _ => {
             cat.transition_audio(id, AudioState::Missing, scratch)
-                .await
                 .map_err(MediaError::Catalogue)?;
             if !state.read {
                 cat.transition_audio(id, AudioState::Queued, scratch)
-                    .await
                     .map_err(MediaError::Catalogue)?;
             }
         }
     }
     Ok(())
 }
-pub async fn recover_all<F: Flash, M: MediaStore<F>>(
-    cat: &mut Catalogue<F>,
+pub async fn recover_all<M: MediaStore>(
+    cat: &mut Catalogue,
     media: &mut M,
     scratch: &mut [u8],
-) -> Result<(), MediaError<F::Error, M::Error>> {
+) -> Result<(), MediaError<M::Error>> {
     let mut after = None;
     loop {
         let mut ids = heapless::Vec::<EpisodeId, MAX_SCAN_RECORDS>::new();
@@ -73,7 +81,6 @@ pub async fn recover_all<F: Flash, M: MediaStore<F>>(
             .scan(after, scratch, |e| {
                 let _ = ids.push(e.id);
             })
-            .await
             .map_err(MediaError::Catalogue)?;
         for id in ids {
             recover_one(cat, media, id, scratch).await?;
@@ -136,12 +143,12 @@ impl Recovery {
             end: false,
         }
     }
-    pub async fn step<F: Flash, M: MediaStore<F>>(
+    pub async fn step<M: MediaStore>(
         &mut self,
-        cat: &mut Catalogue<F>,
+        cat: &mut Catalogue,
         media: &mut M,
         scratch: &mut [u8],
-    ) -> Result<bool, MediaError<F::Error, M::Error>> {
+    ) -> Result<bool, MediaError<M::Error>> {
         if let Some(&id) = self.ids.get(self.at) {
             recover_one(cat, media, id, scratch).await?;
             self.at += 1;
@@ -179,7 +186,6 @@ impl Recovery {
                 .scan(self.after, scratch, |e| {
                     let _ = self.ids.push(e.id);
                 })
-                .await
                 .map_err(MediaError::Catalogue)?;
             self.after = page.resume_after;
             self.end = !page.has_more;

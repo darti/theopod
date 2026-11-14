@@ -54,12 +54,16 @@ pub async fn download_one<I: DownloadIo>(
             // retained failed job remains eligible on the next retry pass.
             *after = Some(job.id);
             let url = job.enclosure.clone();
-            match io.command(Command::DownloadStart(job)).await? {
-                Reply::Ready => (),
-                Reply::Downloaded(crate::download::DownloadOutcome::WaitingForSpace) => {
-                    return Err(Error::Waiting);
+            // Each start request makes one bounded step; repeat it.
+            loop {
+                match io.command(Command::DownloadStart(job.clone())).await? {
+                    Reply::Pending => continue,
+                    Reply::Ready => break,
+                    Reply::Downloaded(crate::download::DownloadOutcome::WaitingForSpace) => {
+                        return Err(Error::Waiting);
+                    }
+                    _ => return Ok(true),
                 }
-                _ => return Ok(true),
             }
             io.transfer(&url).await?;
             return match io.command(Command::DownloadEnd(true)).await? {

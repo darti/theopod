@@ -117,7 +117,7 @@ async fn main(spawner: Spawner) {
         mut watchdog,
         wifi,
         usb,
-    } = Board::init(spawner).await;
+    } = Board::init().await;
     device::spawn_storage(spawner, sd);
     podcasts::spawn(spawner, wifi, usb);
     input::spawn(spawner, button, deep_sleep, touch, imu);

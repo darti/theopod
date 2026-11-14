@@ -3,11 +3,10 @@ use crate::{
     catalogue::{AudioState, EpisodeId, EpisodeMetadata, MAX_RECORD_BYTES, SubscriptionId},
     media_test_support::{HostMedia, root_for},
     runtime::Runtime,
-    test_support::{HostFile, Image},
+    test_support::Image,
 };
 use futures::executor::block_on;
 use std::collections::VecDeque;
-use theo_storage::page_store::PageStore;
 #[test]
 fn connection_loss_during_handshake_retries_but_invalid_trust_stops() {
     // Regression (t-110): a transient socket failure must not require manual trust setup.
@@ -34,7 +33,7 @@ enum Transfer {
     Complete,
 }
 struct Io {
-    owner: Runtime<PageStore<HostFile>, HostMedia>,
+    owner: Runtime<HostMedia>,
     responses: VecDeque<Transfer>,
     attempts: std::vec::Vec<u64>,
     scratch: [u8; MAX_RECORD_BYTES],
@@ -71,8 +70,8 @@ impl DownloadIo for Io {
         Ok(())
     }
 }
-async fn io(image: &Image, responses: &[Transfer]) -> Io {
-    let mut cat = image.create().await;
+fn io(image: &Image, responses: &[Transfer]) -> Io {
+    let mut cat = image.create();
     let mut scratch = [0; MAX_RECORD_BYTES];
     for guid in ["one", "two"] {
         cat.upsert(
@@ -88,7 +87,6 @@ async fn io(image: &Image, responses: &[Transfer]) -> Io {
             },
             &mut scratch,
         )
-        .await
         .unwrap();
     }
     Io {
@@ -110,7 +108,7 @@ fn failed_first_episode_does_not_block_later_queued_audio() {
     // Regression (t-110): production traversal advances after failure; recovery retains the failed job.
     block_on(async {
         let image = Image::new();
-        let mut io = io(&image, &[Transfer::Disconnect, Transfer::Complete]).await;
+        let mut io = io(&image, &[Transfer::Disconnect, Transfer::Complete]);
         let mut after = None;
         assert_eq!(download_one(&mut io, &mut after).await, Err(Error::Network));
         io.command(Command::Abort).await.unwrap();
@@ -119,11 +117,10 @@ fn failed_first_episode_does_not_block_later_queued_audio() {
         assert_eq!(download_one(&mut io, &mut after).await, Ok(false));
         assert_eq!(after, None);
         drop(io);
-        let mut cat = image.reopen().await;
+        let mut cat = image.reopen();
         let mut scratch = [0; MAX_RECORD_BYTES];
         assert_eq!(
             cat.get(EpisodeId(1), &mut scratch)
-                .await
                 .unwrap()
                 .unwrap()
                 .state
@@ -132,7 +129,6 @@ fn failed_first_episode_does_not_block_later_queued_audio() {
         );
         assert_eq!(
             cat.get(EpisodeId(2), &mut scratch)
-                .await
                 .unwrap()
                 .unwrap()
                 .state
@@ -146,13 +142,12 @@ fn short_framed_body_is_not_reported_as_success() {
     // Regression (t-110): RetryLater must reach the worker's backoff path, not its success loop.
     block_on(async {
         let image = Image::new();
-        let mut io = io(&image, &[Transfer::Short]).await;
+        let mut io = io(&image, &[Transfer::Short]);
         assert_eq!(download_one(&mut io, &mut None).await, Err(Error::Network));
         drop(io);
-        let mut cat = image.reopen().await;
+        let mut cat = image.reopen();
         assert_eq!(
             cat.get(EpisodeId(1), &mut [0; MAX_RECORD_BYTES])
-                .await
                 .unwrap()
                 .unwrap()
                 .state
@@ -236,4 +231,48 @@ fn shutdown_reports_success_only_after_both_acknowledgments() {
         futures::future::pending()
     )));
     assert!(flushed.get());
+}
+
+// Regression (t-133): each podcast request makes at most one commit, so the
+// worker repeats `DownloadStart` while the owner answers `Pending`.
+#[test]
+fn download_start_is_repeated_while_pending() {
+    struct Scripted {
+        replies: VecDeque<Reply>,
+        starts: usize,
+    }
+    impl DownloadIo for Scripted {
+        async fn command(&mut self, command: Command) -> Result<Reply, Error> {
+            if let Command::DownloadStart(_) = command {
+                self.starts += 1;
+            }
+            self.replies.pop_front().ok_or(Error::Protocol)
+        }
+        async fn transfer(&mut self, _: &str) -> Result<(), Error> {
+            Ok(())
+        }
+    }
+    let job = crate::download::DownloadJob {
+        id: EpisodeId(7),
+        enclosure: "https://cdn.example/a".try_into().unwrap(),
+        expected_bytes: None,
+    };
+    let mut io = Scripted {
+        replies: VecDeque::from([
+            Reply::Job {
+                job: Some(job),
+                after: None,
+                done: false,
+            },
+            Reply::Pending,
+            Reply::Pending,
+            Reply::Ready,
+            Reply::Downloaded(crate::download::DownloadOutcome::Complete),
+        ]),
+        starts: 0,
+    };
+    let mut after = None;
+    assert_eq!(block_on(download_one(&mut io, &mut after)), Ok(true));
+    assert_eq!(io.starts, 3);
+    assert!(io.replies.is_empty());
 }

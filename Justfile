@@ -29,11 +29,18 @@ lint:
     LIBCLANG_PATH="{{libclang_path}}" PATH="{{gcc_path}}:${PATH}" RUSTUP_TOOLCHAIN=esp cargo clippy --features watchdog-loop -- -D warnings
     LIBCLANG_PATH="{{libclang_path}}" PATH="{{gcc_path}}:${PATH}" RUSTUP_TOOLCHAIN=esp cargo clippy --features sleep-check -- -D warnings
     LIBCLANG_PATH="{{libclang_path}}" PATH="{{gcc_path}}:${PATH}" RUSTUP_TOOLCHAIN=esp cargo clippy --features sd-check -- -D warnings
-    LIBCLANG_PATH="{{libclang_path}}" PATH="{{gcc_path}}:${PATH}" RUSTUP_TOOLCHAIN=esp cargo clippy --features sd-provision -- -D warnings
-    RUSTUP_TOOLCHAIN=stable cargo clippy -p theo-drivers -p theo-frame-dump -p theo-storage -p theo-podcasts -p frame-png --target {{host_target}} --all-targets --features theo-storage/legacy-fat -- -D warnings
+    THEO_SD_PROVISION=format LIBCLANG_PATH="{{libclang_path}}" PATH="{{gcc_path}}:${PATH}" RUSTUP_TOOLCHAIN=esp cargo clippy --features sd-provision -- -D warnings
+    RUSTUP_TOOLCHAIN=stable cargo clippy -p theo-drivers -p theo-frame-dump -p theo-storage -p theo-podcasts -p frame-png --target {{host_target}} --all-targets -- -D warnings
 
 build:
     ESP_LOG=info LIBCLANG_PATH="{{libclang_path}}" PATH="{{gcc_path}}:${PATH}" RUSTUP_TOOLCHAIN=esp cargo build --release
+
+# Bound each task's deepest call chain (release network build, placeholder
+# credentials): core1's 48 KiB SD owner stack, and core0's main stack (the
+# linker's remainder) less 8 KiB for interrupts and unresolved calls (t-133).
+frame-check: (build-network "config/wifi.example.toml")
+    PATH="{{gcc_path}}:${PATH}" xtensa-esp32s3-elf-objdump -d --no-show-raw-insn -C target/xtensa-esp32s3-none-elf/release/theo-pod > target/theo-pod.dis
+    main=$(PATH="{{gcc_path}}:${PATH}" xtensa-esp32s3-elf-size -A target/xtensa-esp32s3-none-elf/release/theo-pod | awk '$1 == ".stack" { print $2 }'); python3 -I tools/frame-check.py target/theo-pod.dis "__worker_task=45056" "TaskStorage<=$((main - 8192))"
 
 # Compile a credential-bearing local image only with explicit opt-in. No hardware operation.
 build-network config="config/wifi.local.toml":
@@ -126,8 +133,15 @@ sd-format device sectors="":
 
 # Run the HAL-independent unit tests on the host.
 test:
-    RUSTUP_TOOLCHAIN=stable cargo test -p theo-drivers -p theo-frame-dump -p theo-storage -p theo-podcasts -p frame-png --target {{host_target}} --features theo-storage/legacy-fat
+    RUSTUP_TOOLCHAIN=stable cargo test -p theo-drivers -p theo-frame-dump -p theo-storage -p theo-podcasts -p frame-png --target {{host_target}}
     RUSTUP_TOOLCHAIN=stable cargo test -p theo-podcasts --example prepare_image --target {{host_target}}
+
+# Sector-count bounds of the redb catalogue (open, scan, commit and each
+# podcast request at the scale target, ADR-0022; the first open of a fresh
+# region). Release only: redb walks every page on open under debug
+# assertions.
+test-catalogue-bounds:
+    RUSTUP_TOOLCHAIN=stable cargo test --release -p theo-storage -p theo-podcasts --target {{host_target}} -- open_after_crash_reads open_at_scale scan_page_and_commit upsert_commit_stays first_open_on_a_fresh_region download_end_is_one_commit recover_one_is_one_commit sync_chunk_requests make_space_steps
 
 # Run the driver tests under Miri, to catch undefined behaviour in their
 # unsafe code (`rustup +nightly component add miri rust-src` once). Cargo
@@ -162,15 +176,12 @@ fmt:
 clean:
     cargo clean
 
+# Explicitly ERASE the SD card inside the board and publish layout v3 (ADR-0021, ADR-0022).
+# `sectors` and `card` must match the boot log ("microSD capacity: N blocks",
+# "microSD card id: ID"); any other card, or one already on v3, is untouched.
+sd-provision-v3 sectors card log="target/sd-provision-v3.log" port="":
+    set -o pipefail; THEO_SD_PROVISION={{quote("v3:" + sectors + ":" + card)}} ESP_LOG=info LIBCLANG_PATH="{{libclang_path}}" PATH="{{gcc_path}}:${PATH}" RUSTUP_TOOLCHAIN=esp cargo espflash flash --release --features sd-provision --monitor --non-interactive --chip {{chip}} {{ if port != "" { "--port " + port } else { "" } }} | tee {{quote(log)}}
+
 # Explicitly provision the SD card inside the board, preserving an existing LittleFS.
 sd-provision log="target/sd-provision.log" port="":
     THEO_SD_PROVISION=format ESP_LOG=info LIBCLANG_PATH="{{libclang_path}}" PATH="{{gcc_path}}:${PATH}" RUSTUP_TOOLCHAIN=esp cargo espflash flash --release --features sd-provision --monitor --non-interactive --chip {{chip}} {{ if port != "" { "--port " + port } else { "" } }} | tee {{quote(log)}}
-
-# Full engine recovery sweeps, including mixed histories and sector cancellation.
-# Release mode keeps the exhaustive model tests practical; no board access.
-test-storage-recovery:
-    RUSTUP_TOOLCHAIN=stable cargo test -p theo-storage --release --target {{host_target}} page_store_rollover_tests -- --include-ignored --nocapture
-
-# File-backed immediate-durability fault model; normal reopen tests use sync_all.
-test-catalogue-recovery:
-    RUSTUP_TOOLCHAIN=stable cargo test -p theo-podcasts --release --target {{host_target}} atomic_catalogue_commit -- --include-ignored --nocapture

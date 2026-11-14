@@ -1,6 +1,6 @@
 # ADR-0012: Use the safe littlefs-rust API for SD files
 
-- Status: Implemented; initial board format/mount/reopen verified, full hardware matrix pending.
+- Status: Implemented; initial board format/mount/reopen verified, full hardware matrix pending. SD HAL ownership amended by ADR-0023.
 - Date: 2026-10-29
 - Supersedes: the FAT filesystem selection in ADR-0010 and the FAT backing-file direction in ADR-0011. The legacy FAT file adapter remains available behind theo-storage/legacy-fat for host tests.
 

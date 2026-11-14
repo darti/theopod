@@ -79,6 +79,70 @@ impl RadioFranceFeed {
     pub fn new() -> Self {
         Self::default()
     }
+    /// Returns to the state of [`Self::new`] in place.
+    ///
+    /// `self = Self::new()` builds a 16 KB temporary on the caller's stack,
+    /// which core1's SD owner cannot afford (t-133). The destructuring keeps
+    /// this exhaustive: a new field fails to compile until it is reset here.
+    pub fn reset(&mut self) {
+        let Self {
+            item,
+            stack,
+            token,
+            text,
+            entity,
+            in_entity,
+            overflow,
+            mode,
+            quote,
+            tail,
+            root,
+            channel,
+            done,
+            failed,
+            next,
+            utf8,
+            utf8_left,
+            text_brackets,
+            bytes_seen,
+            namespaces,
+        } = self;
+        let OwnedEpisode {
+            guid,
+            title,
+            enclosure,
+            description,
+            published,
+            enclosure_bytes,
+            duration_seconds,
+        } = item;
+        guid.clear();
+        title.clear();
+        enclosure.clear();
+        description.clear();
+        *published = None;
+        *enclosure_bytes = None;
+        *duration_seconds = None;
+        stack.clear();
+        token.clear();
+        text.clear();
+        entity.clear();
+        *in_entity = false;
+        *overflow = false;
+        *mode = Mode::default();
+        *quote = 0;
+        *tail = 0;
+        *root = false;
+        *channel = false;
+        *done = false;
+        *failed = false;
+        next.clear();
+        utf8.clear();
+        *utf8_left = 0;
+        *text_brackets = 0;
+        *bytes_seen = 0;
+        namespaces.clear();
+    }
     pub fn push(&mut self, byte: u8) -> Result<Option<&OwnedEpisode>, FeedError> {
         if self.failed {
             return Err(FeedError::Xml);

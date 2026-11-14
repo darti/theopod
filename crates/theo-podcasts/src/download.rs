@@ -1,7 +1,11 @@
 //! Restart-only streaming audio publication.
-use crate::{catalogue::*, media::*, reclaim::make_space};
-use ekv::flash::Flash;
+use crate::{
+    catalogue::*,
+    media::*,
+    reclaim::{Reclaim, SpaceStep, make_space},
+};
 use heapless::String;
+use theo_storage::future::apart;
 #[derive(Clone, Debug)]
 pub struct DownloadJob {
     pub id: EpisodeId,
@@ -32,6 +36,8 @@ pub enum DownloadOutcome {
 pub enum ChunkOutcome {
     Written,
     WaitingForSpace,
+    /// Space is being made: send the same chunk again.
+    Pending,
 }
 #[expect(
     clippy::large_enum_variant,
@@ -40,6 +46,9 @@ pub enum ChunkOutcome {
 pub enum Start {
     Ready(DownloadSession),
     WaitingForSpace,
+    /// One bounded step done (a commit or a reclaim scan): start the same
+    /// job again.
+    Pending,
     Skip,
 }
 #[derive(PartialEq, Eq)]
@@ -66,32 +75,40 @@ pub struct DownloadSession {
 }
 /// An episode larger than the whole media region can never be stored: free
 /// what it owns and set it `Missing`, so it is not retried.
-async fn refuse_oversize<F: Flash, M: MediaStore<F>>(
-    cat: &mut Catalogue<F>,
+async fn refuse_oversize<M: MediaStore>(
+    cat: &mut Catalogue,
     media: &mut M,
     id: EpisodeId,
     scratch: &mut [u8],
-) -> Result<(), MediaError<F::Error, M::Error>> {
-    media
-        .unlink_temp(cat, id)
-        .await
-        .map_err(MediaError::Media)?;
-    cat.transition_audio(id, AudioState::Missing, scratch)
-        .await
-        .map_err(MediaError::Catalogue)
+) -> Result<(), MediaError<M::Error>> {
+    cat.begin_batch().map_err(MediaError::Catalogue)?;
+    let result = async {
+        media
+            .unlink_temp(cat, id)
+            .await
+            .map_err(MediaError::Media)?;
+        cat.transition_audio(id, AudioState::Missing, scratch)
+            .map_err(MediaError::Catalogue)
+    }
+    .await;
+    end_batch::<M, _>(cat, result)
 }
 impl DownloadSession {
     /// Restart only: discard partials before issuing an unconditional GET. Never
     /// issue Range/If-Range;200 therefore always begins a fresh file at offset0.
-    pub async fn start<F: Flash, M: MediaStore<F>>(
-        cat: &mut Catalogue<F>,
+    ///
+    /// Each call makes at most one catalogue commit (ADR-0022): discarding
+    /// this job's files, one reclaim step, or the start itself. Repeat with
+    /// the same job and `reclaim` while it returns [`Start::Pending`].
+    pub async fn start<M: MediaStore>(
+        cat: &mut Catalogue,
         media: &mut M,
-        job: DownloadJob,
+        reclaim: &mut Reclaim,
+        job: &DownloadJob,
         scratch: &mut [u8],
-    ) -> Result<Start, MediaError<F::Error, M::Error>> {
+    ) -> Result<Start, MediaError<M::Error>> {
         let episode = cat
             .get(job.id, scratch)
-            .await
             .map_err(MediaError::Catalogue)?
             .ok_or(MediaError::InvalidInput)?;
         if episode.state.read || episode.state.audio != AudioState::Queued || media.active(job.id) {
@@ -104,37 +121,57 @@ impl DownloadSession {
             return Err(MediaError::InvalidInput);
         }
         // Refuse before any unlink, eviction or allocation (t-121).
-        let capacity = media.space(cat).await.map_err(MediaError::Media)?.capacity;
+        // Each step below is polled in a frame of its own (core1, t-133).
+        let capacity = apart(media.space(cat))
+            .await
+            .map_err(MediaError::Media)?
+            .capacity;
         if job.expected_bytes.is_some_and(|n| n > capacity) {
             cat.transition_audio(job.id, AudioState::Missing, scratch)
-                .await
                 .map_err(MediaError::Catalogue)?;
             return Err(MediaError::InvalidInput);
         }
         // Discard only this non-Available job's orphaned files first. Their
         // capacity must be recovered before considering playable read audio.
-        media
-            .unlink_temp(cat, job.id)
-            .await
-            .map_err(MediaError::Media)?;
-        media
-            .unlink_audio(cat, job.id)
-            .await
-            .map_err(MediaError::Media)?;
-        let required = job.expected_bytes.unwrap_or(AUDIO_CHUNK as u64);
-        if !make_space(cat, media, required, scratch).await? {
-            return Ok(Start::WaitingForSpace);
+        let commits = cat.commits();
+        cat.begin_batch().map_err(MediaError::Catalogue)?;
+        let result = apart(async {
+            media
+                .unlink_temp(cat, job.id)
+                .await
+                .map_err(MediaError::Media)?;
+            media
+                .unlink_audio(cat, job.id)
+                .await
+                .map_err(MediaError::Media)
+        })
+        .await;
+        end_batch::<M, _>(cat, result)?;
+        if cat.commits() != commits {
+            return Ok(Start::Pending);
         }
-        cat.transition_audio(job.id, AudioState::Downloading, scratch)
-            .await
-            .map_err(MediaError::Catalogue)?;
+        let required = job.expected_bytes.unwrap_or(AUDIO_CHUNK as u64);
+        match apart(make_space(cat, media, reclaim, required, scratch)).await? {
+            SpaceStep::Ready => (),
+            SpaceStep::Pending => return Ok(Start::Pending),
+            SpaceStep::Unavailable => return Ok(Start::WaitingForSpace),
+        }
         let expected = job.expected_bytes;
-        media
-            .reset_temp(cat, job.id, expected)
-            .await
-            .map_err(MediaError::Media)?;
+        // Reserve first: its `Full` and `Invalid` refusals change nothing,
+        // so they leave the batch empty and the owner enabled.
+        cat.begin_batch().map_err(MediaError::Catalogue)?;
+        let result = apart(async {
+            media
+                .reset_temp(cat, job.id, expected)
+                .await
+                .map_err(MediaError::Media)?;
+            cat.transition_audio(job.id, AudioState::Downloading, scratch)
+                .map_err(MediaError::Catalogue)
+        })
+        .await;
+        end_batch::<M, _>(cat, result)?;
         Ok(Start::Ready(Self {
-            job,
+            job: job.clone(),
             phase: Phase::Headers,
             bytes: 0,
             expected,
@@ -170,13 +207,16 @@ impl DownloadSession {
     }
     /// Written consumes all input. WaitingForSpace consumes none: retain this
     /// exact chunk until a relevant space/state change or explicit retry.
-    pub async fn push<F: Flash, M: MediaStore<F>>(
+    /// Pending consumes none either: one reclaim step was made, send the
+    /// same chunk again with the same `reclaim`.
+    pub async fn push<M: MediaStore>(
         &mut self,
-        cat: &mut Catalogue<F>,
+        cat: &mut Catalogue,
         media: &mut M,
+        reclaim: &mut Reclaim,
         bytes: &[u8],
         scratch: &mut [u8],
-    ) -> Result<ChunkOutcome, MediaError<F::Error, M::Error>> {
+    ) -> Result<ChunkOutcome, MediaError<M::Error>> {
         let valid = matches!(self.phase, Phase::Body | Phase::Waiting);
         self.phase = Phase::Poisoned;
         if !valid || bytes.is_empty() || bytes.len() > AUDIO_CHUNK {
@@ -199,9 +239,16 @@ impl DownloadSession {
         } else {
             AUDIO_CHUNK as u64
         };
-        if !make_space(cat, media, required, scratch).await? {
-            self.phase = Phase::Waiting;
-            return Ok(ChunkOutcome::WaitingForSpace);
+        match apart(make_space(cat, media, reclaim, required, scratch)).await? {
+            SpaceStep::Ready => (),
+            SpaceStep::Pending => {
+                self.phase = Phase::Body;
+                return Ok(ChunkOutcome::Pending);
+            }
+            SpaceStep::Unavailable => {
+                self.phase = Phase::Waiting;
+                return Ok(ChunkOutcome::WaitingForSpace);
+            }
         }
         media
             .append_temp(cat, self.job.id, bytes)
@@ -213,12 +260,12 @@ impl DownloadSession {
     }
     /// Ordinary HTTP/network failure can retry without reboot. A storage-failed
     /// or cancelled session is left to mount invalidation and startup recovery.
-    pub async fn abort<F: Flash, M: MediaStore<F>>(
+    pub async fn abort<M: MediaStore>(
         self,
-        cat: &mut Catalogue<F>,
+        cat: &mut Catalogue,
         media: &mut M,
         scratch: &mut [u8],
-    ) -> Result<DownloadOutcome, MediaError<F::Error, M::Error>> {
+    ) -> Result<DownloadOutcome, MediaError<M::Error>> {
         if matches!(self.phase, Phase::Poisoned | Phase::Refused) {
             return Ok(DownloadOutcome::RetryLater);
         }
@@ -234,13 +281,13 @@ impl DownloadSession {
     }
     /// `body_complete` must come from successful transport framing, never an
     /// arbitrary socket EOF. A failed/short/stalled body remains non-Available.
-    pub async fn finish<F: Flash, M: MediaStore<F>>(
+    pub async fn finish<M: MediaStore>(
         self,
-        cat: &mut Catalogue<F>,
+        cat: &mut Catalogue,
         media: &mut M,
         body_complete: bool,
         scratch: &mut [u8],
-    ) -> Result<DownloadOutcome, MediaError<F::Error, M::Error>> {
+    ) -> Result<DownloadOutcome, MediaError<M::Error>> {
         if self.phase != Phase::Body
             || !body_complete
             || self.bytes == 0
@@ -250,7 +297,6 @@ impl DownloadSession {
         }
         let episode = cat
             .get(self.job.id, scratch)
-            .await
             .map_err(MediaError::Catalogue)?
             .ok_or(MediaError::InvalidState)?;
         if episode.state.audio != AudioState::Downloading
@@ -267,13 +313,18 @@ impl DownloadSession {
         if bytes != self.bytes {
             return self.abort(cat, media, scratch).await;
         }
-        media
-            .publish_temp(cat, self.job.id)
-            .await
-            .map_err(MediaError::Media)?;
-        cat.finish_download(self.job.id, bytes, scratch)
-            .await
-            .map_err(MediaError::Catalogue)?;
+        // Publication and the Available state are one commit (ADR-0022).
+        cat.begin_batch().map_err(MediaError::Catalogue)?;
+        let result = async {
+            media
+                .publish_temp(cat, self.job.id)
+                .await
+                .map_err(MediaError::Media)?;
+            cat.finish_download(self.job.id, bytes, scratch)
+                .map_err(MediaError::Catalogue)
+        }
+        .await;
+        end_batch::<M, _>(cat, result)?;
         Ok(DownloadOutcome::Complete)
     }
 }

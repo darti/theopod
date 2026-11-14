@@ -138,6 +138,13 @@ async fn bounded<T>(seconds: u64, future: impl Future<Output = T>) -> Result<T, 
     )
     .await
 }
+/// Logs where a transfer failed before passing its error on.
+fn at(stage: &'static str) -> impl Fn(Error) -> Error {
+    move |error| {
+        log::warn!("network: {error:?} at {stage}");
+        error
+    }
+}
 async fn idle(seconds: u64) -> Result<(), Error> {
     match bounded(seconds, WAKE.wait()).await {
         Ok(()) | Err(Error::Network) => Ok(()),
@@ -165,6 +172,8 @@ async fn domain(command: Command) -> Result<Reply, Error> {
         reply => Ok(reply),
     }
 }
+/// TCP receive buffer, hence the advertised window (under 64 KiB: no scaling).
+const TCP_RX_BYTES: usize = 32 * 1024;
 struct Buffers {
     tcp_rx: Vec<u8, &'static esp_alloc::ExternalMemory>,
     tcp_tx: Vec<u8, &'static esp_alloc::ExternalMemory>,
@@ -182,7 +191,9 @@ fn buffer(n: usize) -> Result<Vec<u8, &'static esp_alloc::ExternalMemory>, Error
 impl Buffers {
     fn new() -> Result<Self, Error> {
         Ok(Self {
-            tcp_rx: buffer(4096)?,
+            // The receive window: the server keeps sending while a chunk is
+            // stored. At 4 KB each chunk waited a round trip (t-133).
+            tcp_rx: buffer(TCP_RX_BYTES)?,
             tcp_tx: buffer(4096)?,
             tls_rx: buffer(16640)?,
             tls_tx: buffer(4096)?,
@@ -211,15 +222,17 @@ async fn transfer(
             10,
             stack.dns_query(target.host, embassy_net::dns::DnsQueryType::A),
         )
-        .await?
-        .map_err(|_| Error::Network)?;
+        .await
+        .map_err(at("dns"))?
+        .map_err(|_| at("dns")(Error::Network))?;
         let ip = *ips.first().ok_or(Error::Network)?;
         let mut socket =
             embassy_net::tcp::TcpSocket::new(stack, &mut buffers.tcp_rx, &mut buffers.tcp_tx);
         socket.set_timeout(Some(Duration::from_secs(15)));
         bounded(10, socket.connect((ip, 443)))
-            .await?
-            .map_err(|_| Error::Network)?;
+            .await
+            .map_err(at("connect"))?
+            .map_err(|_| at("connect")(Error::Network))?;
         let root: &[u8] = match target.root {
             Root::GtsR4 => include_bytes!("../../docs/experiments/t106-runtime/gtsr4.der"),
             Root::IsrgX1 => include_bytes!("../../docs/experiments/t106-runtime/isrgrootx1.der"),
@@ -234,8 +247,12 @@ async fn transfer(
             &mut buffers.tls_tx,
         );
         bounded(20, tls.open(TlsContext::new(&config, verifier)))
-            .await?
-            .map_err(worker::handshake_error)?;
+            .await
+            .map_err(at("handshake"))?
+            .map_err(|e| {
+                log::warn!("network: TLS {e:?}");
+                worker::handshake_error(e)
+            })?;
         let (etag, modified) = if purpose == Purpose::Feed && redirects.forward_conditionals() {
             match domain(Command::SyncConditionals).await? {
                 Reply::Conditionals { etag, modified } => (etag, modified),
@@ -261,18 +278,25 @@ async fn transfer(
                 .build()
                 .write_header(&mut tls),
         )
-        .await?
-        .map_err(|_| Error::Network)?;
+        .await
+        .map_err(at("request"))?
+        .map_err(|_| at("request")(Error::Network))?;
         bounded(15, tls.flush())
-            .await?
-            .map_err(|_| Error::Network)?;
+            .await
+            .map_err(at("flush"))?
+            .map_err(|_| at("flush")(Error::Network))?;
         let response = bounded(
             15,
             reqwless::response::Response::read(&mut tls, Method::GET, &mut buffers.headers),
         )
-        .await?
-        .map_err(|_| Error::Protocol)?;
+        .await
+        .map_err(at("response"))?
+        .map_err(|e| {
+            log::warn!("network: response {e:?}");
+            Error::Protocol
+        })?;
         let status = response.status.0;
+        log::info!("network: {purpose:?} {} {status}", target.host);
         let facts = ResponseHeaders::parse(response.headers()).map_err(|_| Error::Protocol)?;
         if matches!(status, 301 | 302 | 303 | 307 | 308) {
             url = redirects
@@ -322,8 +346,13 @@ async fn transfer(
         let absolute =
             Instant::now() + Duration::from_secs(if purpose == Purpose::Feed { 300 } else { 3600 });
         let mut reader = response.body().reader();
+        let started = Instant::now();
+        let (mut total, mut slowest, mut last_store) = (0usize, 0u64, 0u64);
+        // Time spent waiting for the network and for storage, per MiB.
+        let (mut read_us, mut store_us, mut reads) = (0u64, 0u64, 0u32);
         loop {
             if Instant::now() >= absolute {
+                log::warn!("network: {purpose:?} transfer over its absolute deadline");
                 return Err(Error::Network);
             }
             // reqwless0.14's fixed reader does not clamp the caller's slice
@@ -332,9 +361,19 @@ async fn transfer(
                 BodyReader::FixedLength(reader) => reader.remaining.min(buffers.chunk.len()),
                 _ => buffers.chunk.len(),
             };
+            let read = Instant::now();
             let n = bounded(15, reader.read(&mut buffers.chunk[..limit]))
-                .await?
-                .map_err(|_| Error::Network)?;
+                .await
+                .inspect_err(|_| {
+                    log::warn!(
+                        "network: body stalled after {total} B in {} s, last store {last_store} ms, slowest {slowest} ms",
+                        started.elapsed().as_secs()
+                    );
+                })?
+                .map_err(|e| {
+                    log::warn!("network: body {e:?}");
+                    Error::Network
+                })?;
             if n == 0 {
                 let complete = match &reader {
                     BodyReader::Empty => true,
@@ -347,18 +386,55 @@ async fn transfer(
                 }
                 return Ok(());
             }
-            let bytes = theo_podcasts::runtime::Chunk::from_slice(&buffers.chunk[..n])
-                .map_err(|_| Error::Protocol)?;
-            let command = match purpose {
-                Purpose::Feed => Command::SyncChunk(bytes),
-                Purpose::Audio => Command::DownloadChunk(bytes),
-            };
-            if matches!(
-                domain(command).await?,
-                Reply::Downloaded(DownloadOutcome::WaitingForSpace)
-            ) {
-                return Err(Error::Waiting);
+            // One commit per podcast request (ADR-0022): the owner consumes
+            // a feed chunk in parts and makes space in steps, so resend
+            // what it did not take. Each request is bounded by the
+            // storage owner's IO budget.
+            read_us += read.elapsed().as_micros();
+            reads += 1;
+            if (total + n) / (1 << 20) != total / (1 << 20) {
+                log::debug!(
+                    "network: {} MiB in {} s, last MiB: read {} ms, store {} ms, {reads} reads, slowest store {slowest} ms",
+                    (total + n) >> 20,
+                    started.elapsed().as_secs(),
+                    read_us / 1000,
+                    store_us / 1000,
+                );
+                (read_us, store_us, reads) = (0, 0, 0);
             }
+            total += n;
+            let store = Instant::now();
+            let mut at = 0;
+            while at < n {
+                let bytes = theo_podcasts::runtime::Chunk::from_slice(&buffers.chunk[at..n])
+                    .map_err(|_| Error::Protocol)?;
+                let command = match purpose {
+                    Purpose::Feed => Command::SyncChunk(bytes),
+                    Purpose::Audio => Command::DownloadChunk(bytes),
+                };
+                match (purpose, domain(command).await?) {
+                    (Purpose::Feed, Reply::Consumed(used)) if used > 0 && used <= n - at => {
+                        at += used;
+                    }
+                    (Purpose::Audio, Reply::Done) => at = n,
+                    (Purpose::Audio, Reply::Pending) => (),
+                    (Purpose::Audio, Reply::Downloaded(DownloadOutcome::WaitingForSpace)) => {
+                        return Err(Error::Waiting);
+                    }
+                    (_, reply) => {
+                        // `domain` already turned Rejected/Offline into errors.
+                        let kind = match reply {
+                            Reply::Consumed(_) => "bad consumed count",
+                            _ => "unexpected reply",
+                        };
+                        log::warn!("network: {purpose:?} chunk: {kind}");
+                        return Err(Error::Protocol);
+                    }
+                }
+            }
+            store_us += store.elapsed().as_micros();
+            last_store = store.elapsed().as_millis();
+            slowest = slowest.max(last_store);
         }
     }
 }
@@ -406,11 +482,22 @@ impl worker::DownloadIo for AudioIo<'_, '_> {
         transfer(self.stack, url, Purpose::Audio, self.buffers).await
     }
 }
+/// Upper bound of the network future placed in PSRAM (measured 64 KB).
+const NETWORK_FUTURE_BYTES: usize = 80 * 1024;
 #[embassy_executor::task]
 pub async fn run(wifi: WIFI<'static>) {
     RUNNING.store(true, Ordering::Release);
     STOPPED.reset();
-    let result = start(wifi).await;
+    // The 64 KB transfer state lives in PSRAM, polled in a frame of its own:
+    // as this task's static storage it took that much internal RAM from the
+    // main stack, which the TLS/storage call chain overflowed (t-133).
+    let result = theo_storage::future::run_in(
+        move || start(wifi),
+        &esp_alloc::ExternalMemory,
+        NETWORK_FUTURE_BYTES,
+    )
+    .await
+    .unwrap_or(Err(Error::Network));
     RF_READY.store(false, Ordering::Release);
     if let Err(error) = result {
         if matches!(error, Error::Storage) {
@@ -554,6 +641,7 @@ async fn work(
                 return Err(Error::Stopped);
             }
             Err(error) => {
+                log::warn!("network: {error:?}, retrying");
                 // Ordinary network/protocol errors recover partials; storage
                 // failures remain disabled and never become a fresh mount.
                 domain(Command::Abort).await?;

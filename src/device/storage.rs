@@ -41,6 +41,14 @@ pub async fn command(command: Command) -> Result<Reply, ()> {
     .map_err(|_| ())?
 }
 const IO_TIMEOUT: Duration = Duration::from_millis(500);
+/// Bound on the stop before sleep: an in-flight podcast request
+/// (`PODCAST_BUDGET`) then the final log append (`IO_TIMEOUT`). User-approved
+/// 2026-11-12 (t-133): 2 s, up from 1.2 s once podcast requests got 1 s.
+const SLEEP_FLUSH_TIMEOUT: Duration = Duration::from_secs(2);
+const _: () = assert!(
+    sd::PODCAST_BUDGET.as_millis() + IO_TIMEOUT.as_millis() <= SLEEP_FLUSH_TIMEOUT.as_millis()
+        && SLEEP_FLUSH_TIMEOUT.as_millis() < super::WATCHDOG_TIMEOUT_MS / 2
+);
 static FLUSH: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 static FINAL: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 static FLUSHED: Signal<CriticalSectionRawMutex, ()> = Signal::new();
@@ -62,7 +70,7 @@ pub async fn flush_before_sleep() {
             FINAL.signal(());
             FLUSHED.wait().await;
         },
-        Timer::after_millis(1200),
+        Timer::after(SLEEP_FLUSH_TIMEOUT),
     )
     .await;
     if !completed {

@@ -34,81 +34,89 @@ pub fn choose_reclaim(
 mod tests;
 use crate::{
     catalogue::Catalogue,
-    media::{MediaError, MediaStore},
+    media::{MediaError, MediaStore, end_batch, reserve},
 };
-use ekv::flash::Flash;
-/// Make room for one actual pending append/download. No clock or purge path.
-pub async fn make_space<F: Flash, M: MediaStore<F>>(
-    cat: &mut Catalogue<F>,
+
+/// What one [`make_space`] step achieved.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SpaceStep {
+    /// The space is free: go on, nothing was committed by this step.
+    Ready,
+    /// One commit made: repeat the request.
+    Pending,
+    /// Nothing more can be evicted: wait for a space change.
+    Unavailable,
+}
+
+/// An eviction carried across requests, so each request makes at most one
+/// commit: the `Deleting` intent of the policy's first evictable episode
+/// (read from the `EVICTABLE` index, no scan), then its unlink and
+/// `Reclaimed` in one commit (ADR-0022).
+#[derive(Debug, Default)]
+pub struct Reclaim {
+    /// A committed `Deleting` intent; the next step unlinks its audio.
+    deleting: Option<EpisodeId>,
+}
+impl Reclaim {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Make room for one actual pending append/download, one commit at a time:
+/// repeat while it returns [`SpaceStep::Pending`]. No clock or purge path.
+pub async fn make_space<M: MediaStore>(
+    cat: &mut Catalogue,
     media: &mut M,
+    reclaim: &mut Reclaim,
     required: u64,
     scratch: &mut [u8],
-) -> Result<bool, MediaError<F::Error, M::Error>> {
-    use crate::catalogue::AudioState;
-    use crate::media::reserve;
-    if required == 0 {
-        return Ok(true);
-    }
-    loop {
-        let space = media.space(cat).await.map_err(MediaError::Media)?;
-        if space.free > space.capacity {
-            return Err(MediaError::InvalidState);
+) -> Result<SpaceStep, MediaError<M::Error>> {
+    if let Some(id) = reclaim.deleting.take() {
+        // Lease admission for Deleting is forbidden by the storage-owner
+        // contract; startup recovery finishes an intent left here.
+        if media.active(id) {
+            return Ok(SpaceStep::Unavailable);
         }
-        let Some(target) = reserve(space.capacity)
-            .checked_add(required)
-            .filter(|&n| n <= space.capacity)
-        else {
-            return Ok(false);
-        };
-        let deficit = target.saturating_sub(space.free);
-        if deficit == 0 {
-            return Ok(true);
-        }
-        let mut after = None;
-        let mut best = None;
-        loop {
-            let page = cat
-                .scan(after, scratch, |episode| {
-                    let candidate = ReclaimCandidate {
-                        id: episode.id,
-                        read: episode.state.read,
-                        audio: episode.state.audio,
-                        published: episode.metadata.published,
-                        import_order: episode.id.0,
-                        active: media.active(episode.id),
-                        bytes: 0,
-                    };
-                    best = choose_reclaim(
-                        best.into_iter().chain(core::iter::once(candidate)),
-                        deficit,
-                    );
-                })
+        cat.begin_batch().map_err(MediaError::Catalogue)?;
+        let result = async {
+            media
+                .unlink_audio(cat, id)
                 .await
-                .map_err(MediaError::Catalogue)?;
-            if !page.has_more {
-                break;
-            }
-            after = page.resume_after;
+                .map_err(MediaError::Media)?;
+            cat.transition_audio(id, AudioState::Reclaimed, scratch)
+                .map_err(MediaError::Catalogue)
         }
-        let Some(candidate) = best else {
-            return Ok(false);
-        };
-        if media.active(candidate.id) {
-            return Ok(false);
-        }
-        cat.transition_audio(candidate.id, AudioState::Deleting, scratch)
-            .await
-            .map_err(MediaError::Catalogue)?;
-        // Lease admission for Deleting is forbidden by the storage-owner contract.
-        if media.active(candidate.id) {
-            return Ok(false);
-        }
-        media
-            .unlink_audio(cat, candidate.id)
-            .await
-            .map_err(MediaError::Media)?;
-        cat.transition_audio(candidate.id, AudioState::Reclaimed, scratch)
-            .await
-            .map_err(MediaError::Catalogue)?;
+        .await;
+        end_batch::<M, _>(cat, result)?;
+        return Ok(SpaceStep::Pending);
     }
+    if required == 0 {
+        return Ok(SpaceStep::Ready);
+    }
+    let space = media.space(cat).await.map_err(MediaError::Media)?;
+    if space.free > space.capacity {
+        return Err(MediaError::InvalidState);
+    }
+    let Some(target) = reserve(space.capacity)
+        .checked_add(required)
+        .filter(|&n| n <= space.capacity)
+    else {
+        return Ok(SpaceStep::Unavailable);
+    };
+    if target <= space.free {
+        return Ok(SpaceStep::Ready);
+    }
+    // The index holds exactly the read `Available` episodes, in the
+    // policy's order (`choose_reclaim`); leased ones are skipped.
+    let Some(id) = cat
+        .first_evictable(|id| media.active(id))
+        .map_err(MediaError::Catalogue)?
+    else {
+        return Ok(SpaceStep::Unavailable);
+    };
+    cat.transition_audio(id, AudioState::Deleting, scratch)
+        .map_err(MediaError::Catalogue)?;
+    reclaim.deleting = Some(id);
+    Ok(SpaceStep::Pending)
 }

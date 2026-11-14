@@ -38,6 +38,8 @@
 //! - [`Tca9554`], [`ExpanderPin`]: TCA9554 async I2C I/O expander with per-pin access.
 //! - [`PanelPower`]: panel rail/reset power-up and power-down through the
 //!   expander.
+//! - [`gcm`]: AES-GCM [`seal`](gcm::seal)/[`open`](gcm::open) on any
+//!   [`GcmCipher`](gcm::GcmCipher) cipher (hardware AES, software GHASH).
 
 #![cfg_attr(not(test), no_std)]
 
@@ -49,6 +51,7 @@ pub mod cst820;
 pub mod dirty_rows;
 pub mod dma_layout;
 pub mod framebuffer;
+pub mod gcm;
 pub mod geometry;
 pub mod long_press;
 pub mod memory_check;
@@ -79,6 +82,8 @@ mod dirty_rows_tests;
 mod dma_layout_tests;
 #[cfg(test)]
 mod framebuffer_tests;
+#[cfg(test)]
+mod gcm_tests;
 #[cfg(test)]
 mod long_press_tests;
 #[cfg(test)]

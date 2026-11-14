@@ -54,10 +54,17 @@ the ESP toolchain and target are defined in `rust-toolchain.toml`.
   checks the idle wait and `FLUSH_TIMEOUT`.
 - The SD storage owner runs on core1's 48 KiB stack (`sd_worker.rs`).
   Awaiting a large future there builds it on that stack and inlines its
-  poll into the owner's frame: await big one-shot work through `apart`
+  poll into the owner's frame: await big one-shot work through `in_psram`
   (`theo_storage::future::run_in`) and build large values in PSRAM
-  (t-121). Check the owner's frame in the disassembly (`l32r` literal
-  after `entry` in `__worker_task…::poll`) after changing its futures.
+  (t-121). Each request arm of `Runtime` runs through
+  `theo_storage::future::apart` (its own frame), and large state is
+  reset in place, never rebuilt as a stack temporary (`SyncSession::restart`,
+  `RadioFranceFeed::reset`): a 53 KB request frame overflowed core1 on the
+  first podcast write (t-133). Core0's main stack is the internal RAM the
+  linker leaves after `.bss`: keep large task futures out of it (the
+  network task's 64 KB state runs in PSRAM through `run_in`; as a static
+  it left 47 KB for a 99 KB TLS/storage chain, t-133). Run
+  `just frame-check` after changing either.
 - The display DMA reads the PSRAM framebuffer in place only through
   `PsramTxBuf` (64-byte bursts, aligned descriptors) with PSRAM at 80 MHz
   and transfers starting 64-byte aligned; dropping any of these brings back
@@ -67,9 +74,11 @@ the ESP toolchain and target are defined in `rust-toolchain.toml`.
 - Firmware `log` output is silent unless `ESP_LOG` (e.g. `info`) is set at
   build time. `src/device/logging.rs` installs the dual serial/SD logger
   before HAL startup; normal build/flash recipes default to `info`.
-- SD logging uses a bounded queue and a separate async task. Never block on
-  the shared I2C expander to select the card: touch/IMU also use that bus.
-  A cancelled or failed storage operation disables that mount until reboot.
+- SD logging uses a bounded queue and a separate async task. Core1 drives
+  SPI3 itself; only identification asks core0 to set chip select on the
+  shared I2C expander (touch/IMU also use that bus), then the card stays
+  selected (ADR-0023). A failed storage operation disables storage until
+  reboot.
 - `IMU_AXES` is measured, not documented: `just imu-calibrate` keeps the
   view upright and logs raw accelerometer axes once a second. Calibrate from
   positions defined against gravity (vertical with text upright, a quarter
@@ -107,12 +116,21 @@ the ESP toolchain and target are defined in `rust-toolchain.toml`.
 - Run `just check` to verify compilation with the ESP toolchain.
 - Run `just test` to run the host unit tests (drivers, storage, frame dump, frame-png).
 - Run `just lint` to run clippy on the firmware and the host crates.
+- Run `just test-catalogue-bounds` after changing the catalogue, the redb
+  backend or sync (release-only sector bounds, under a minute; kept out of
+  `just test`, which runs debug).
 - Run `just miri` after changing `unsafe` code in `crates/theo-drivers`
   (slow, about 5 minutes), and `just audit` after changing dependencies.
 - Run `just build` to produce a release firmware image.
+- Run `just frame-check` after changing the SD owner, the podcast runtime,
+  the network task or what they call (release network build with the
+  placeholder credentials, then each task's deepest call chain against its
+  stack; `tools/frame-check.py`). Rebuild before flashing: it leaves a
+  placeholder-credential image in `target/`.
 
 Flashing and the serial monitor (`just flash`, `just monitor`, `just run`,
 `just flash-monitor`, `just flash-dump`, `just monitor-log`,
-`just monitor-passive`, `just sleep-check`,
+`just monitor-passive`, `just sleep-check`, `just sd-provision-v3` (erases
+the card),
 `just imu-calibrate`, `just watchdog-check`, `just watchdog-loop`) require
 the board to be connected and must not be run without an explicit request.

@@ -1,7 +1,7 @@
 //! Checked, versioned SD region descriptors. Parsing never writes or formats media.
 //!
-//! Layout v2 places three ranges after the descriptors in sectors 0..16: the
-//! database (raw page store), the log (LittleFS, fixed `LOG_SECTORS`), and the
+//! Layout v3 places three ranges after the descriptors in sectors 0..16: the
+//! database (redb, fixed 64 MiB, ADR-0022), the log (LittleFS, fixed `LOG_SECTORS`), and the
 //! media region (raw allocation units of `UNIT_SECTORS`, no filesystem).
 //!
 //! Two immutable descriptor copies occupy sectors 0 and 8. Provisioning must
@@ -9,14 +9,16 @@
 //! descriptors only permit trying the legacy whole-card LittleFS mount; they
 //! never authorize creation, migration, or formatting (ADR-0015).
 
-use crate::page_store::{crc32, file_len};
+use crate::crc::crc32;
 
 pub const DESCRIPTOR_SECTORS: [u32; 2] = [0, 8];
 const DATABASE_START: u32 = 16;
 const MIN_MEDIA_SECTORS: u32 = 65536; // 32 MiB; the download reserve is separate.
-const MAGIC: &[u8; 8] = b"THEOSD02";
-const VERSION: u32 = 2;
-const V1_MAGIC: &[u8; 8] = b"THEOSD01";
+const MAGIC: &[u8; 8] = b"THEOSD03";
+const VERSION: u32 = 3;
+const OLD_MAGICS: [&[u8; 8]; 2] = [b"THEOSD01", b"THEOSD02"];
+/// Sectors of the database region (64 MiB, fixed).
+pub const DATABASE_SECTORS: u32 = 131_072;
 /// Sectors of the log region (16 MiB): two 128 KiB log files plus LittleFS headroom.
 pub const LOG_SECTORS: u32 = 32_768;
 /// Sectors of one raw media allocation unit (1 MiB).
@@ -25,7 +27,11 @@ pub const UNIT_SECTORS: u32 = 2_048;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LayoutError {
     Geometry,
+    /// An unknown (future) descriptor version.
     Version,
+    /// A valid v1 or v2 descriptor: an obsolete layout that explicit
+    /// provisioning may replace (ADR-0021).
+    Obsolete,
     Checksum,
     Conflict,
 }
@@ -60,18 +66,17 @@ impl Region {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CardLayout {
     card_sectors: u64,
-    pages: u32,
     database: Region,
     log: Region,
     media: Region,
 }
 
 impl CardLayout {
-    pub fn new(card_sectors: u64, pages: usize) -> Result<Self, LayoutError> {
-        if card_sectors > u32::MAX as u64 || !(32..=4096).contains(&pages) {
+    pub fn new(card_sectors: u64) -> Result<Self, LayoutError> {
+        if card_sectors > u32::MAX as u64 {
             return Err(LayoutError::Geometry);
         }
-        let database_sectors = file_len(pages) / 512;
+        let database_sectors = DATABASE_SECTORS as u64;
         let log_start = (DATABASE_START as u64 + database_sectors).next_multiple_of(8);
         let media_start = (log_start + LOG_SECTORS as u64).next_multiple_of(UNIT_SECTORS as u64);
         let media_sectors = card_sectors
@@ -84,7 +89,6 @@ impl CardLayout {
         }
         Ok(Self {
             card_sectors,
-            pages: pages as u32,
             database: Region {
                 start: DATABASE_START,
                 sectors: database_sectors as u32,
@@ -112,9 +116,6 @@ impl CardLayout {
     pub const fn media_units(self) -> u32 {
         self.media.sectors / UNIT_SECTORS
     }
-    pub const fn pages(self) -> usize {
-        self.pages as usize
-    }
 
     /// Canonical immutable descriptor; encoding does not publish or provision it.
     pub fn encode(self) -> [u8; 512] {
@@ -133,28 +134,35 @@ impl CardLayout {
         ] {
             bytes[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
         }
-        bytes[72..76].copy_from_slice(&self.pages.to_le_bytes());
         checksum(&mut bytes);
         bytes
     }
 
     fn decode(bytes: &[u8; 512], card_sectors: u64) -> Result<Option<Self>, LayoutError> {
-        let v1 = &bytes[..8] == V1_MAGIC;
-        if &bytes[..8] != MAGIC && !v1 {
+        let old = OLD_MAGICS.iter().any(|m| &bytes[..8] == *m);
+        if &bytes[..8] != MAGIC && !old {
+            // An unknown `THEOSD??` magic is a descriptor from a layout this
+            // firmware does not know (a newer one, or a torn one): never
+            // "absent", or provisioning would erase it and boot would try a
+            // legacy mount. Its CRC format is unknown, so it is not checked.
+            if bytes[..6] == *b"THEOSD" {
+                return Err(LayoutError::Version);
+            }
             return Ok(None);
         }
-        let words = bytes.as_chunks::<4>().0;
-        let (Some(&crc), Some(&pages)) = (words.get(508 / 4), words.get(72 / 4)) else {
+        let Some(&crc) = bytes.as_chunks::<4>().0.get(508 / 4) else {
             return Err(LayoutError::Geometry);
         };
         if u32::from_le_bytes(crc) != crc32(&bytes[..508]) {
             return Err(LayoutError::Checksum);
         }
-        if v1 || bytes[8..12] != VERSION.to_le_bytes() {
+        if old {
+            return Err(LayoutError::Obsolete);
+        }
+        if bytes[8..12] != VERSION.to_le_bytes() {
             return Err(LayoutError::Version);
         }
-        let pages = u32::from_le_bytes(pages) as usize;
-        let layout = Self::new(card_sectors, pages)?;
+        let layout = Self::new(card_sectors)?;
         // Exact canonical encoding also checks card size, sector size, offsets,
         // capacities and every reserved byte. No arbitrary overlapping ranges.
         if layout.encode() != *bytes {
@@ -166,6 +174,9 @@ impl CardLayout {
     /// None means descriptor absent: try legacy mount without formatting.
     /// A valid copy survives a torn copy. Unknown versions/geometries or two
     /// conflicting valid copies must stop region mounting rather than guess.
+    /// An unknown `THEOSD??` magic yields `Version`, whatever its CRC.
+    /// `Obsolete` only when no copy is a v3 layout, an unknown version or an
+    /// invalid geometry: only then may provisioning replace the card's layout.
     pub fn select(
         first: &[u8; 512],
         second: &[u8; 512],
@@ -180,6 +191,16 @@ impl CardLayout {
             {
                 return Err(*error);
             }
+        }
+        if [&first, &second]
+            .iter()
+            .any(|result| matches!(result, Err(LayoutError::Obsolete)))
+        {
+            return match (first, second) {
+                // An obsolete copy beside a current one: never guess.
+                (Ok(Some(_)), _) | (_, Ok(Some(_))) => Err(LayoutError::Conflict),
+                _ => Err(LayoutError::Obsolete),
+            };
         }
         match (first, second) {
             (Ok(Some(a)), Ok(Some(b))) if a != b => Err(LayoutError::Conflict),

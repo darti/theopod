@@ -2,7 +2,7 @@
 //!
 //! Bus-level faults (card or HAL errors, an aborted in-flight sector RPC,
 //! caller-side cancellation) poison the shared sector bus and disable every
-//! scope until reboot. Any other failure, such as a LittleFS or EKV error or
+//! scope until reboot. Any other failure, such as a LittleFS or redb error or
 //! the owner's soft deadline passing between sector RPCs, disables only the
 //! scope of the request that hit it.
 

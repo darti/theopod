@@ -3,17 +3,13 @@ use crate::{
     LogBuffer,
     card_layout::CardLayout,
     littlefs::{Geometry, SectorIo, SectorStorage},
-    page_store::{PageStore, SectorFile},
 };
 use alloc::{collections::BTreeMap, rc::Rc, vec, vec::Vec};
-use core::{
-    cell::RefCell,
-    future::Future,
-    pin::pin,
-    task::{Context, Poll, Waker},
-};
-use embassy_sync_06::blocking_mutex::raw::NoopRawMutex;
+use core::cell::RefCell;
 use littlefs_rust::{Error, Filesystem};
+
+/// Sectors of the synthetic card behind every test layout.
+const TEST_CARD_SECTORS: u64 = 300_000;
 
 #[derive(Default)]
 struct Image {
@@ -82,7 +78,7 @@ type Setup3 = (
 );
 fn setup3() -> Setup3 {
     let image = Rc::new(RefCell::new(Image::default()));
-    let layout = CardLayout::new(128 * 1024, 32).unwrap();
+    let layout = CardLayout::new(TEST_CARD_SECTORS).unwrap();
     let (db, log, media) = split(Disk(image.clone()), layout);
     (db, log, media, image, layout)
 }
@@ -147,152 +143,6 @@ fn error_on_one_region_disables_all_regions() {
     assert_eq!(media.read_sector(0, &mut [0; 512]), Err(Error::Io));
     assert_eq!(image.borrow().calls.len(), calls);
 }
-#[test]
-fn async_sector_yields_only_after_releasing_the_shared_owner() {
-    // Regression (t-106): pending DB work must permit a synchronous log operation between sectors.
-    let (db, mut media, _, _) = setup();
-    let mut file = AsyncRegion::new(db);
-    let mut op = pin!(file.write_sector(0, &[1; 512]));
-    assert!(matches!(
-        op.as_mut().poll(&mut Context::from_waker(Waker::noop())),
-        Poll::Pending
-    ));
-    media.write_sector(0, &[2; 512]).unwrap();
-    assert!(matches!(
-        op.as_mut().poll(&mut Context::from_waker(Waker::noop())),
-        Poll::Ready(Ok(()))
-    ));
-}
-#[test]
-fn cancelled_sector_future_disables_both_regions() {
-    // Regression (t-106): cancelling a pending DB sector disables the entire shared mount.
-    let (db, mut media, image, _) = setup();
-    let mut file = AsyncRegion::new(db);
-    {
-        let mut op = pin!(file.write_sector(0, &[1; 512]));
-        assert!(matches!(
-            op.as_mut().poll(&mut Context::from_waker(Waker::noop())),
-            Poll::Pending
-        ));
-    }
-    let calls = image.borrow().calls.len();
-    assert_eq!(media.sync(), Err(Error::Io));
-    assert_eq!(image.borrow().calls.len(), calls);
-}
-#[test]
-fn deadline_hook_runs_before_every_sector_and_its_failure_poisons_session() {
-    // Regression (t-106): resumed DB work must restore its own deadline after a log operation.
-    let (db, mut media, image, _) = setup();
-    let calls = Rc::new(core::cell::Cell::new(0));
-    let seen = calls.clone();
-    let mut file = AsyncRegion::with_before_io(db, move || {
-        seen.set(seen.get() + 1);
-        if seen.get() == 3 {
-            Err(Error::Io)
-        } else {
-            Ok(())
-        }
-    });
-    futures::executor::block_on(async {
-        file.write_sector(0, &[1; 512]).await.unwrap();
-        file.sync().await.unwrap();
-        let before = image.borrow().calls.len();
-        assert_eq!(file.read_sector(0, &mut [0; 512]).await, Err(Error::Io));
-        assert_eq!(image.borrow().calls.len(), before);
-    });
-    assert_eq!(calls.get(), 3);
-    assert_eq!(media.sync(), Err(Error::Io));
-}
-#[test]
-fn actual_ekv_and_littlefs_share_one_device_and_reopen() {
-    // Regression (t-106): actual engines use disjoint regions of one device and logs make progress during DB work.
-    futures::executor::block_on(async {
-        let (db_region, log, image, layout) = setup();
-        let geometry = Geometry::new(layout.log().sectors() as u64).unwrap();
-        let mut log = SectorStorage::new(log, geometry);
-        Filesystem::format(&mut log, &geometry.config()).unwrap();
-        let fs = Filesystem::mount(log, geometry.config())
-            .map_err(|(e, _)| e)
-            .unwrap();
-        let store = PageStore::create(AsyncRegion::new(db_region), 32)
-            .await
-            .unwrap();
-        let db = ekv::Database::<_, NoopRawMutex>::new(store, ekv::Config::default());
-        db.format().await.unwrap();
-        let log_progress = Rc::new(core::cell::Cell::new(0));
-        let progress = log_progress.clone();
-        let done = core::cell::Cell::new(false);
-        let database = async {
-            for version in 0u64..16 {
-                let before = log_progress.get();
-                let mut tx = db.write_transaction().await;
-                tx.write(b"read", &version.to_le_bytes()).await.unwrap();
-                tx.commit().await.unwrap();
-                assert!(
-                    log_progress.get() > before,
-                    "logger must run between DB sectors"
-                );
-            }
-            done.set(true);
-        };
-        let logger = async {
-            while !done.get() {
-                let mut log = LogBuffer::<64>::new();
-                log.push(b"during DB\n");
-                crate::littlefs::append_log(&fs, &mut log, "/theo.log", "/theo.1.log").unwrap();
-                progress.set(progress.get() + 1);
-                embassy_futures::yield_now().await;
-            }
-        };
-        futures::join!(database, logger);
-        drop(db);
-        fs.unmount().unwrap();
-        let (db_region, log, _media) = split(Disk(image), layout);
-        let store = PageStore::open(AsyncRegion::new(db_region), 32)
-            .await
-            .unwrap();
-        let db = ekv::Database::<_, NoopRawMutex>::new(store, ekv::Config::default());
-        db.mount().await.unwrap();
-        let mut out = [0; 8];
-        assert_eq!(
-            db.read_transaction()
-                .await
-                .read(b"read", &mut out)
-                .await
-                .unwrap(),
-            8
-        );
-        assert_eq!(u64::from_le_bytes(out), 15);
-        let fs = Filesystem::mount(SectorStorage::new(log, geometry), geometry.config())
-            .map_err(|(e, _)| e)
-            .unwrap();
-        let tail = crate::littlefs::log_tail(&fs, "/theo.log").unwrap();
-        assert!(tail.size > 0);
-        assert!(
-            core::str::from_utf8(&tail.bytes[..tail.len])
-                .unwrap()
-                .contains("during DB")
-        );
-    });
-}
-
-#[test]
-fn late_database_completion_after_media_failure_is_rejected() {
-    // Regression (t-106): another region's failure must win over an already-started DB reply.
-    let (db, mut media, image, _) = setup();
-    let mut file = AsyncRegion::new(db);
-    let mut op = pin!(SectorFile::sync(&mut file));
-    let mut cx = Context::from_waker(Waker::noop());
-    assert!(matches!(op.as_mut().poll(&mut cx), Poll::Pending));
-    image.borrow_mut().fail = true;
-    assert_eq!(media.write_sector(0, &[2; 512]), Err(Error::Io));
-    image.borrow_mut().fail = false;
-    assert!(matches!(
-        op.as_mut().poll(&mut cx),
-        Poll::Ready(Err(Error::Io))
-    ));
-}
-
 #[test]
 fn legacy_mount_does_not_create_regions_or_write_descriptors() {
     // Regression (t-106): normal legacy discovery only reads; no implicit migration.
@@ -368,7 +218,7 @@ fn timed(poisoned: bool) -> TimedSetup {
         expired: expired.clone(),
         poisoned,
     };
-    let (db, log, media) = split(device, CardLayout::new(128 * 1024, 32).unwrap());
+    let (db, log, media) = split(device, CardLayout::new(TEST_CARD_SECTORS).unwrap());
     (db, log, media, expired)
 }
 
@@ -394,41 +244,6 @@ fn hard_failure_still_disables_every_region() {
     expired.set(false);
     assert_eq!(log.read_sector(0, &mut [0; 512]), Err(Error::Io));
     assert!(log.device_failed());
-}
-
-// Regression (t-121): an EKV sector call that returns a soft error completes
-// its guard, so the log handle stays usable.
-#[test]
-fn async_region_soft_error_keeps_log_handle() {
-    let (db, mut log, _media, expired) = timed(false);
-    let mut file = AsyncRegion::new(db);
-    futures::executor::block_on(async {
-        expired.set(true);
-        assert_eq!(file.read_sector(0, &mut [0; 512]).await, Err(Error::Io));
-        assert_eq!(file.write_sector(0, &[1; 512]).await, Err(Error::Io));
-        assert_eq!(SectorFile::sync(&mut file).await, Err(Error::Io));
-        expired.set(false);
-        file.read_sector(0, &mut [0; 512]).await.unwrap();
-    });
-    log.read_sector(0, &mut [0; 512]).unwrap();
-}
-
-// Regression (t-121): cancelling an in-flight EKV sector still disables every
-// region, even on a device that reports no hard failure.
-#[test]
-fn dropped_async_region_future_still_disables_all_regions() {
-    let (db, mut log, mut media, _expired) = timed(false);
-    let mut file = AsyncRegion::new(db);
-    let mut out = [0; 512];
-    {
-        let mut op = pin!(file.read_sector(0, &mut out));
-        assert!(matches!(
-            op.as_mut().poll(&mut Context::from_waker(Waker::noop())),
-            Poll::Pending
-        ));
-    }
-    assert_eq!(log.read_sector(0, &mut [0; 512]), Err(Error::Io));
-    assert_eq!(media.sync(), Err(Error::Io));
 }
 
 /// (sector reads, sector writes) of a log-region mount plus one append, after
@@ -470,4 +285,32 @@ fn log_mount_and_append_cost_is_independent_of_media() {
     let with = log_mount_and_append_cost(u32::MAX);
     assert!(without.0 > 0 && without.1 > 0, "{without:?}");
     assert_eq!(without, with);
+}
+// Regression (t-153): a batch is translated into its region and written in
+// order, one sector after the other, by the default `write_sectors`.
+#[test]
+fn batch_write_translates_into_the_region_in_order() {
+    let (_db, _log, mut media, image, layout) = setup3();
+    let mut data = vec![0u8; 3 * 512];
+    for (i, sector) in data.as_chunks_mut::<512>().0.iter_mut().enumerate() {
+        sector.fill(i as u8 + 1);
+    }
+    media.write_sectors(5, &data).unwrap();
+    let start = layout.media().start();
+    let image = image.borrow();
+    assert_eq!(image.calls, vec![start + 5, start + 6, start + 7]);
+    for i in 0..3u32 {
+        assert_eq!(image.sectors[&(start + 5 + i)], [i as u8 + 1; 512]);
+    }
+}
+// Regression (t-153): a batch whose last sector is past the region, or that
+// is not whole sectors, fails before any device I/O.
+#[test]
+fn batch_write_out_of_bounds_or_partial_fails_before_io() {
+    let (mut db, _log, image, layout) = setup();
+    let last = layout.database().sectors() - 1;
+    assert_eq!(db.write_sectors(last, &[0; 1024]), Err(Error::Invalid));
+    assert_eq!(db.write_sectors(0, &[0; 100]), Err(Error::Invalid));
+    assert_eq!(db.write_sectors(0, &[]), Err(Error::Invalid));
+    assert!(image.borrow().calls.is_empty());
 }

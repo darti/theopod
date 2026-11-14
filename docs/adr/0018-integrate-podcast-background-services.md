@@ -1,6 +1,6 @@
 # ADR-0018: Integrate bounded podcast background services
 
-- Status: Implemented in software; hardware validation pending.
+- Status: Implemented in software; hardware validation pending. SD HAL ownership amended by ADR-0023.
 - Date: 2026-11-01
 - Related: t-110, t-105; implements ADR-0016/0017 contracts.
 

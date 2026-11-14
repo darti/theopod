@@ -1,7 +1,10 @@
-//! Core 1 owns LittleFS; core 0 keeps the async SD HAL device. Only owned messages cross
-//! cores. Its synchronous callbacks may wait for async I2C while core 0 keeps
-//! running touch/IMU tasks that can release that bus (ADR-0012).
+//! Core 1 owns the card and everything stored on it: it identifies the card
+//! over blocking SPI3, then runs LittleFS, the catalogue and the media units
+//! without waiting for core 0 (ADR-0023). Only identification asks core 0 to
+//! drive chip select over the shared I2C bus; core 0 sends owned requests and
+//! receives owned replies.
 
+use aligned::{A4, Aligned};
 use alloc::{rc::Rc, vec::Vec};
 use allocator_api2::{alloc::AllocError, boxed::Box};
 #[cfg(feature = "sd-check")]
@@ -37,10 +40,7 @@ use theo_storage::{
     scope::{OWNER_MARGIN_MS, ReplyKind, RequestKind, after_failure, failure_scope},
 };
 
-use super::{SdInitError, io};
-use theo_storage::sector_bus::{
-    Operation, Request as SectorRequest, STAGED_SECTORS, SectorBus, SectorClient,
-};
+use super::{HalDevice, SdInitError};
 
 const IO_BUDGET: Duration = Duration::from_millis(500);
 /// Budget of one podcast (`Domain`) request: at most one catalogue commit
@@ -57,7 +57,16 @@ const _: () = assert!(
         && OWNER_MARGIN_MS < PODCAST_BUDGET.as_millis()
         && OWNER_MARGIN_MS < MOUNT_BUDGET.as_millis()
 );
-pub(super) static SECTORS: SectorBus = SectorBus::new();
+/// Set once the card or a request failed: storage stays offline until
+/// reboot (ADR-0010). Shared by core 0's requests and core 1's owner.
+static DISABLED: AtomicBool = AtomicBool::new(false);
+fn is_disabled() -> bool {
+    DISABLED.load(Ordering::Acquire)
+}
+/// Identification's outcome, from core 1 to `init` on core 0.
+static IDENTIFIED: Signal<CriticalSectionRawMutex, Result<(), SdInitError>> = Signal::new();
+/// Identification's own budget; `init`'s caller allows 3 s in all.
+const IDENTIFY_BUDGET: Duration = Duration::from_millis(2500);
 static COMMANDS: Channel<CriticalSectionRawMutex, Request, 1> = Channel::new();
 static REPLY: Signal<CriticalSectionRawMutex, Result<Reply, Error>> = Signal::new();
 const STACK_SIZE: usize = 48 * 1024;
@@ -130,13 +139,13 @@ pub struct SdStorage {
 
 impl Drop for SdStorage {
     fn drop(&mut self) {
-        SECTORS.disable();
+        disable();
     }
 }
 
 impl SdStorage {
     async fn request(&mut self, command: Command, budget: Duration) -> Result<Reply, Error> {
-        let guard = RequestGuard::begin(SECTORS.poison_flag())?;
+        let guard = RequestGuard::begin(&DISABLED)?;
         let deadline = Instant::now() + budget;
         let result = with_deadline(deadline, async {
             COMMANDS.send(Request { command, deadline }).await;
@@ -156,9 +165,12 @@ impl SdStorage {
     }
 }
 
-/// Identify the card on core 0, then start the isolated filesystem owner.
+/// Start core 1, which identifies the card then runs the storage owner.
+///
+/// Core 0 drives chip select over the shared I2C bus while core 1
+/// identifies; afterwards the card stays selected and core 1 drives SPI3
+/// alone (ADR-0023).
 pub async fn init(
-    spawner: embassy_executor::Spawner,
     core: (CPU_CTRL<'static>, FROM_CPU_INTR1<'static>),
     spi: SPI3<'static>,
     clk: GPIO2<'static>,
@@ -166,28 +178,53 @@ pub async fn init(
     miso: GPIO3<'static>,
     expander: &'static crate::device::Expander,
 ) -> Result<SdStorage, SdInitError> {
-    let guard = RequestGuard::begin(SECTORS.poison_flag()).map_err(|_| SdInitError::Host)?;
-    let deadline = Instant::now() + Duration::from_secs(3);
-    let (device, sectors, card_id) =
-        with_deadline(deadline, super::init_card(spi, clk, mosi, miso, expander))
-            .await
-            .map_err(|_| SdInitError::Card(sdio::MmcError::Timeout))??;
-    let geometry =
-        Geometry::new(sectors).map_err(|_| SdInitError::Card(sdio::MmcError::BlockSize))?;
-    spawner.spawn(io::serve(device).expect("SD I/O once"));
+    let guard = RequestGuard::begin(&DISABLED).map_err(|_| SdInitError::Host)?;
     let (cpu, interrupt) = core;
     let stack = STACK.take();
     let stack_bottom = stack.bottom() as usize;
     esp_rtos::start_second_core(cpu, interrupt, stack, move || {
+        let deadline = Instant::now() + IDENTIFY_BUDGET;
+        let identified = super::identify(spi, clk, mosi, miso, deadline).and_then(
+            |(device, sectors, card_id)| {
+                Geometry::new(sectors)
+                    .map(|geometry| (device, geometry, sectors, card_id))
+                    .map_err(|_| SdInitError::Card(sdio::MmcError::BlockSize))
+            },
+        );
+        let (device, geometry, sectors, card_id) = match identified {
+            Ok(owner) => owner,
+            Err(error) => {
+                IDENTIFIED.signal(Err(error));
+                return;
+            }
+        };
+        // Core 0 gave up (its caller's timeout): stay offline.
+        if is_disabled() {
+            return;
+        }
+        IDENTIFIED.signal(Ok(()));
         static EXECUTOR: StaticCell<esp_rtos::embassy::Executor> = StaticCell::new();
         EXECUTOR
             .init(esp_rtos::embassy::Executor::new())
             .run(|spawner| {
                 spawner.spawn(
-                    worker(geometry, sectors, card_id, stack_bottom).expect("SD owner once"),
+                    worker(device, geometry, sectors, card_id, stack_bottom)
+                        .expect("SD owner once"),
                 );
             });
     });
+    let deadline = Instant::now() + IDENTIFY_BUDGET + Duration::from_millis(OWNER_MARGIN_MS);
+    let outcome = with_deadline(
+        deadline,
+        embassy_futures::select::select(super::serve_chip_select(expander), IDENTIFIED.wait()),
+    )
+    .await;
+    match outcome {
+        Ok(embassy_futures::select::Either::Second(Ok(()))) => {}
+        Ok(embassy_futures::select::Either::Second(Err(error))) => return Err(error),
+        Ok(embassy_futures::select::Either::First(never)) => match never {},
+        Err(_) => return Err(SdInitError::Card(sdio::MmcError::Timeout)),
+    }
     guard.complete().map_err(|_| SdInitError::Host)?;
     Ok(SdStorage { _private: () })
 }
@@ -223,7 +260,7 @@ pub async fn append_log<const N: usize>(
 }
 
 pub fn disable() {
-    SECTORS.disable();
+    DISABLED.store(true, Ordering::Release);
 }
 
 /// Whether this build provisions layout v3 (ADR-0021).
@@ -237,7 +274,7 @@ pub const fn provisions_v3() -> bool {
     false
 }
 pub fn guard() -> Result<RequestGuard<'static>, Error> {
-    RequestGuard::begin(SECTORS.poison_flag())
+    RequestGuard::begin(&DISABLED)
 }
 
 pub async fn domain(
@@ -270,164 +307,19 @@ pub async fn report_log_tail(storage: &mut SdStorage) -> Result<(), Error> {
     Ok(())
 }
 
-/// Distinct sectors traced per request by the `sd-check` read histogram.
-#[cfg(feature = "sd-check")]
-const TRACED_SECTORS: usize = 256;
-
-#[cfg(feature = "sd-check")]
-struct Measurements {
-    stack_bottom: usize,
-    min_sampled_headroom: Cell<usize>,
-    reads: Cell<usize>,
-    writes: Cell<usize>,
-    syncs: Cell<usize>,
-    io_us: Cell<u64>,
-    max_io_us: Cell<u64>,
-    read_sectors: RefCell<Vec<(u32, usize)>>,
-    untracked_reads: Cell<usize>,
-}
-
-#[cfg(feature = "sd-check")]
-impl Measurements {
-    // Sample a synchronous callback's stack address without reading memory
-    // owned by the running stack. This is sampled margin, not a high-water scan.
-    #[inline(never)]
-    fn sample(&self) {
-        let marker = 0u8;
-        let address = core::hint::black_box(&marker) as *const u8 as usize;
-        let margin = address
-            .checked_sub(self.stack_bottom)
-            .filter(|margin| *margin <= STACK_SIZE)
-            .unwrap_or(0);
-        self.min_sampled_headroom
-            .set(self.min_sampled_headroom.get().min(margin));
-    }
-}
-
-struct CardIo {
-    sectors: u64,
-    client: SectorClient<'static>,
-    #[cfg(feature = "sd-check")]
-    measurements: Rc<Measurements>,
-    /// The request's (hard) deadline: bounds and aborts in-flight sector RPCs.
-    deadline: Rc<Cell<Instant>>,
-    /// `deadline - OWNER_MARGIN_MS`: no new sector RPC starts after it.
-    soft: Rc<Cell<Instant>>,
-}
-
-impl CardIo {
-    /// Runs between sector RPCs, when none is in flight, so passing the soft
-    /// deadline fails only the current scope: no late reply can exist and
-    /// the bus stays live (t-121). A disabled bus fails everything.
-    fn ensure_live(&self) -> Result<(), Error> {
-        #[cfg(feature = "sd-check")]
-        self.measurements.sample();
-        if SECTORS.is_disabled() || Instant::now() >= self.soft.get() {
-            Err(Error::Io)
-        } else {
-            Ok(())
-        }
-    }
-}
-
-impl CardIo {
-    fn request(&mut self, operation: Operation) -> Result<[u8; 512], Error> {
-        self.ensure_live()?;
-        #[cfg(feature = "sd-check")]
-        let started = {
-            let count = match &operation {
-                Operation::Read(_) => &self.measurements.reads,
-                // Write requests: a batch counts its stages and its flush.
-                Operation::Write(..) | Operation::Stage(..) | Operation::Flush(..) => {
-                    &self.measurements.writes
-                }
-                Operation::Sync => &self.measurements.syncs,
-            };
-            count.set(count.get() + 1);
-            if let Operation::Read(sector) = &operation {
-                let mut trace = self.measurements.read_sectors.borrow_mut();
-                if let Some((_, hits)) = trace.iter_mut().find(|(key, _)| key == sector) {
-                    *hits += 1;
-                } else if trace.len() < TRACED_SECTORS {
-                    trace.push((*sector, 1));
-                } else {
-                    self.measurements
-                        .untracked_reads
-                        .set(self.measurements.untracked_reads.get() + 1);
-                }
-            }
-            Instant::now()
-        };
-        let deadline = self.deadline.get();
-        // Core 0's executor runs the async SD/I2C service while this core
-        // waits. Its channels carry owned buffers only.
-        let result = self.client.exchange_blocking(
-            SectorRequest {
-                operation,
-                deadline_ticks: deadline.as_ticks(),
-            },
-            || SECTORS.is_disabled() || Instant::now() >= deadline,
-        );
-        #[cfg(feature = "sd-check")]
-        {
-            let elapsed = started.elapsed().as_micros();
-            self.measurements
-                .io_us
-                .set(self.measurements.io_us.get() + elapsed);
-            self.measurements
-                .max_io_us
-                .set(self.measurements.max_io_us.get().max(elapsed));
-        }
-        result
-    }
-}
-
-impl SectorIo for CardIo {
-    fn read_sector(&mut self, sector: u32, out: &mut [u8; 512]) -> Result<(), Error> {
-        out.copy_from_slice(&self.request(Operation::Read(sector))?);
-        Ok(())
-    }
-    fn write_sector(&mut self, sector: u32, data: &[u8; 512]) -> Result<(), Error> {
-        self.request(Operation::Write(sector, *data)).map(|_| ())
-    }
-    /// Stages up to [`STAGED_SECTORS`] sectors on core 0, then writes them
-    /// with one CMD25: the card is selected once and programs them together.
-    fn write_sectors(&mut self, first: u32, data: &[u8]) -> Result<(), Error> {
-        theo_storage::littlefs::whole_sectors(data)?;
-        for (group, bytes) in data.chunks(STAGED_SECTORS * 512).enumerate() {
-            let mut count = 0u8;
-            for sector in bytes.as_chunks::<512>().0 {
-                self.request(Operation::Stage(count, *sector))?;
-                count += 1;
-            }
-            let at = (group * STAGED_SECTORS) as u32;
-            self.request(Operation::Flush(
-                first.checked_add(at).ok_or(Error::Invalid)?,
-                count,
-            ))?;
-        }
-        Ok(())
-    }
-    fn sync(&mut self) -> Result<(), Error> {
-        self.request(Operation::Sync).map(|_| ())
-    }
-    fn check(&mut self) -> Result<(), Error> {
-        self.ensure_live()
-    }
-    /// Card/HAL errors and aborted exchanges disable the bus; a passed soft
-    /// deadline does not.
-    fn device_failed(&self) -> bool {
-        SECTORS.is_disabled()
-    }
-}
-
 #[embassy_executor::task]
-async fn worker(geometry: Geometry, sectors: u64, card_id: Option<CardId>, stack_bottom: usize) {
+async fn worker(
+    device: HalDevice,
+    geometry: Geometry,
+    sectors: u64,
+    card_id: Option<CardId>,
+    stack_bottom: usize,
+) {
     // Keep Embassy's task header/atomic wake state in internal memory. Only
     // the large, pinned domain future is placed externally; cache-sensitive
     // HAL and sector I/O tasks retain their existing internal storage.
     match theo_storage::future::try_pin_in(
-        move || owner(geometry, sectors, card_id, stack_bottom),
+        move || owner(device, geometry, sectors, card_id, stack_bottom),
         &esp_alloc::ExternalMemory,
         114000,
     ) {
@@ -439,12 +331,18 @@ async fn worker(geometry: Geometry, sectors: u64, card_id: Option<CardId>, stack
             future.await;
         }
         Err(_) => {
-            SECTORS.disable();
+            disable();
             log::warn!("storage offline: PSRAM owner allocation failed");
         }
     }
 }
-async fn owner(geometry: Geometry, sectors: u64, card_id: Option<CardId>, _stack_bottom: usize) {
+async fn owner(
+    device: HalDevice,
+    geometry: Geometry,
+    sectors: u64,
+    card_id: Option<CardId>,
+    _stack_bottom: usize,
+) {
     #[cfg(feature = "sd-check")]
     let measurements = Rc::new(Measurements {
         stack_bottom: _stack_bottom,
@@ -459,11 +357,20 @@ async fn owner(geometry: Geometry, sectors: u64, card_id: Option<CardId>, _stack
     });
     let deadline = Rc::new(Cell::new(Instant::now()));
     let soft = Rc::new(Cell::new(Instant::now()));
+    let Ok(staged) = Box::try_new_in(
+        [Aligned::<A4, _>([0u8; 512]); STAGED_SECTORS],
+        &esp_alloc::ExternalMemory,
+    ) else {
+        disable();
+        log::warn!("storage offline: PSRAM staging allocation failed");
+        return;
+    };
     let mut card = Some(CardIo {
         sectors,
+        device,
+        staged,
         #[cfg(feature = "sd-check")]
         measurements: measurements.clone(),
-        client: SECTORS.take_client().expect("one sector client"),
         deadline: deadline.clone(),
         soft: soft.clone(),
     });
@@ -516,7 +423,7 @@ async fn owner(geometry: Geometry, sectors: u64, card_id: Option<CardId>, _stack
             measurements.untracked_reads.set(0);
             Instant::now()
         };
-        let result = if SECTORS.is_disabled() || Instant::now() >= soft.get() {
+        let result = if is_disabled() || Instant::now() >= soft.get() {
             Err(Error::Io)
         } else {
             match request.command {
@@ -588,7 +495,7 @@ async fn owner(geometry: Geometry, sectors: u64, card_id: Option<CardId>, _stack
                 },
             }
         };
-        let poisoned = SECTORS.is_disabled();
+        let poisoned = is_disabled();
         let result = if result.is_ok() && !poisoned {
             result
         } else {
@@ -596,13 +503,12 @@ async fn owner(geometry: Geometry, sectors: u64, card_id: Option<CardId>, _stack
             // completes and only a bus failure poisons the session.
             let effect = after_failure(failure_scope(poisoned, kind));
             if effect.disable_bus {
-                SECTORS.disable();
+                disable();
                 card = None;
             }
             if effect.drop_logs {
                 // On a legacy whole-card mount the log volume holds the only
-                // `CardIo`: dropping it drops the `SectorClient`, which
-                // disables the bus, as losing the last live scope does on a
+                // `CardIo`: dropping it disables the card, as losing the last live scope does on a
                 // region card.
                 volume = None;
             }
@@ -792,7 +698,7 @@ async fn mount_owner(
         Some(_) => log::warn!("podcasts offline: PSRAM scratch allocation failed"),
         None => log::info!("podcasts offline: existing whole-card LittleFS preserved"),
     }
-    if SECTORS.is_disabled() {
+    if is_disabled() {
         return Err(Error::Io);
     }
     Ok(logs)
@@ -926,6 +832,12 @@ async fn in_psram<F: core::future::Future>(
 ) -> Result<F::Output, AllocError> {
     theo_storage::future::run_in(make, &esp_alloc::ExternalMemory, STEP_FUTURE_BYTES).await
 }
+
+#[path = "sd_card_io.rs"]
+mod card_io;
+use card_io::{CardIo, STAGED_SECTORS};
+#[cfg(feature = "sd-check")]
+use card_io::{Measurements, TRACED_SECTORS};
 
 #[cfg(feature = "sd-provision")]
 #[path = "sd_provision.rs"]

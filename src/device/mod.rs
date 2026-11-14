@@ -230,7 +230,7 @@ impl Board {
     /// Panics if a bring-up step fails: the board cannot run without it.
     /// A touch controller or IMU that fails to start is only logged: the
     /// display and the BOOT button still work.
-    pub async fn init(spawner: embassy_executor::Spawner) -> Self {
+    pub async fn init() -> Self {
         logging::init();
         log::info!("firmware init");
         let peripherals = esp_hal::init(esp_hal::Config::default());
@@ -305,7 +305,6 @@ impl Board {
         let (mut sd, sd_status) = match embassy_time::with_timeout(
             embassy_time::Duration::from_secs(3),
             sd::init(
-                spawner,
                 (peripherals.CPU_CTRL, peripherals.FROM_CPU_INTR1),
                 peripherals.SPI3,
                 peripherals.GPIO2,

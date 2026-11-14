@@ -4,7 +4,6 @@
 //! - [`littlefs`]: `SectorStorage`, `mount_for_writes`, `append_log`, `log_tail`.
 //! - [`card_layout`], [`regions`]: checked database/media card regions.
 //! - [`scope`]: which storage scope a failed request disables.
-//! - [`sector_bus`]: cancellation-safe mailbox to the async SD service.
 //! - [`redb_backend`]: redb storage backend over the database region.
 //!
 //! See `ARCHITECTURE.md` for extension points and invariants.
@@ -19,7 +18,6 @@ pub mod littlefs;
 pub mod redb_backend;
 pub mod regions;
 pub mod scope;
-pub mod sector_bus;
 #[cfg(any(test, feature = "test-disk"))]
 pub mod test_disk;
 

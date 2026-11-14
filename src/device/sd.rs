@@ -75,11 +75,41 @@ type SpiBus = SdMmcBus;
 type HalDevice = sdio::DefaultBlockDevice<sdio::sd::Card, SpiBus, Delay>;
 /// The V2 routes SDCS to TCA9554 EXIO7. Always await the shared I2C bus:
 /// blocking a nested executor here would deadlock concurrent touch/IMU I/O.
+///
+/// Once `held` (after identification), the card stays selected: it is the
+/// only device on SPI3, and each toggle cost an I2C write of ~670 us, about
+/// 12 per 4 KB audio chunk (t-155). `init_idle` deselects it again.
 struct ExpanderCs {
     expander: &'static super::Expander,
+    held: Rc<Cell<bool>>,
+    selected: bool,
 }
 
 impl ExpanderCs {
+    async fn select(&mut self) -> Result<(), MmcError> {
+        if self.held.get() && self.selected {
+            return Ok(());
+        }
+        self.set(embedded_hal::digital::PinState::Low).await?;
+        self.selected = true;
+        Ok(())
+    }
+
+    /// Ends a command; the card stays selected once held.
+    async fn release(&mut self) -> Result<(), MmcError> {
+        if self.held.get() {
+            return Ok(());
+        }
+        self.deselect().await
+    }
+
+    async fn deselect(&mut self) -> Result<(), MmcError> {
+        // Cleared first: a failed write leaves the level unknown, so the
+        // next select drives it again.
+        self.selected = false;
+        self.set(embedded_hal::digital::PinState::High).await
+    }
+
     async fn set(&mut self, level: embedded_hal::digital::PinState) -> Result<(), MmcError> {
         self.expander
             .lock()
@@ -159,11 +189,13 @@ impl SdMmcBus {
     }
 
     async fn select(&mut self) -> Result<(), MmcError> {
-        self.cs.set(embedded_hal::digital::PinState::Low).await
+        self.cs.select().await
     }
 
+    /// Ends a command: releases chip select (unless held), then sends the
+    /// idle byte that lets the card release its data-out line.
     async fn deselect(&mut self) -> Result<(), MmcError> {
-        self.cs.set(embedded_hal::digital::PinState::High).await?;
+        self.cs.release().await?;
         self.spi.write(&[0xFF]).await.map_err(|_| MmcError::Io)
     }
 
@@ -438,7 +470,7 @@ impl MmcBus for SdMmcBus {
 
     async fn init_idle(&mut self, hz: u32) -> Result<(), MmcError> {
         self.spi.set_hz(hz);
-        self.cs.set(embedded_hal::digital::PinState::High).await?;
+        self.cs.deselect().await?;
         self.spi
             .write(&[0xFF; 10])
             .await
@@ -490,10 +522,19 @@ async fn init_card(
     .with_miso(miso)
     .into_async();
     let identity = Rc::new(Cell::new(Identity::default()));
-    let bus = SdMmcBus::new(SdSpi(spi), ExpanderCs { expander }, Delay, identity.clone());
+    let held = Rc::new(Cell::new(false));
+    let cs = ExpanderCs {
+        expander,
+        held: held.clone(),
+        selected: false,
+    };
+    let bus = SdMmcBus::new(SdSpi(spi), cs, Delay, identity.clone());
     let device: HalDevice = sdio::DefaultBlockDevice::new(bus, Delay, CARD_FREQUENCY_HZ)
         .await
         .map_err(SdInitError::Card)?;
+    // Identification toggled chip select per command; from here the card
+    // stays selected (t-155).
+    held.set(true);
     let Identity { blocks, card } = identity.get();
     log::info!(
         "microSD capacity: {} blocks ({} MiB)",

@@ -9,6 +9,7 @@
 //! provisioning only).
 #![no_std]
 extern crate alloc;
+pub mod body;
 pub mod catalogue;
 #[cfg(test)]
 extern crate std;

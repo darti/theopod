@@ -74,7 +74,7 @@ fn owner_imports_downloads_and_marks_read_through_bounded_commands() {
             .unwrap();
         owner
             .handle(
-                Command::DownloadChunk(heapless::Vec::from_slice(b"1234").unwrap()),
+                Command::DownloadChunk(crate::test_support::audio_chunk(b"1234")),
                 &mut scratch,
             )
             .await
@@ -359,7 +359,7 @@ fn cancelled_audio_append_stays_unpublished_and_recovery_requeues_after_reopen()
         assert!(
             owner
                 .handle(
-                    Command::DownloadChunk(heapless::Vec::from_slice(b"partial").unwrap()),
+                    Command::DownloadChunk(crate::test_support::audio_chunk(b"partial")),
                     &mut scratch
                 )
                 .now_or_never()

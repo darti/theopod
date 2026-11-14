@@ -46,3 +46,7 @@ impl Image {
         self.disk.crash(Crash::DropPending);
     }
 }
+/// `bytes` as a heap-backed `DownloadChunk` payload.
+pub(crate) fn audio_chunk(bytes: &[u8]) -> crate::runtime::AudioChunk {
+    crate::runtime::audio_chunk(bytes, &allocator_api2::alloc::Global).unwrap()
+}

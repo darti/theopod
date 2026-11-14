@@ -323,9 +323,9 @@ fn restart_discards_old_partial_and_capacity_wait_can_retry_same_chunk() {
             DownloadOutcome::Complete
         );
         let bytes = std::fs::read(media.path(id, false)).unwrap();
-        assert_eq!(bytes.len(), 4097);
-        assert_eq!(bytes[4096], b'x');
-        assert!(bytes[..4096].iter().all(|&b| b == 1));
+        assert_eq!(bytes.len(), AUDIO_CHUNK + 1);
+        assert_eq!(bytes[AUDIO_CHUNK], b'x');
+        assert!(bytes[..AUDIO_CHUNK].iter().all(|&b| b == 1));
     });
 }
 #[test]
@@ -727,4 +727,71 @@ mod capacity {
             assert_eq!(audio(&mut cat, id), AudioState::Missing);
         });
     }
+}
+/// One TLS record of plaintext.
+const RECORD: usize = 16 * 1024;
+#[test]
+fn push_takes_a_whole_tls_record() {
+    // Regression (t-162): one DownloadChunk carries a 16 KiB TLS record, so
+    // core1 stores a record per request instead of four 4 KB ones: with the
+    // read overlapping the store, core1 waited for core0 between requests.
+    assert_eq!(AUDIO_CHUNK, RECORD);
+    block_on(async {
+        let image = Image::new();
+        let mut cat = image.create();
+        let mut media = HostMedia::new(root_for(&image));
+        let mut scratch = [0; MAX_RECORD_BYTES];
+        let job = queued(&mut cat, "record", Some(RECORD as u64), &mut scratch);
+        let Start::Ready(mut s) = start_all(&mut cat, &mut media, job, &mut scratch)
+            .await
+            .unwrap()
+        else {
+            panic!()
+        };
+        s.response(200, Some(RECORD as u64), None).unwrap();
+        let outcome = s
+            .push(
+                &mut cat,
+                &mut media,
+                &mut Reclaim::new(),
+                &[1; RECORD],
+                &mut scratch,
+            )
+            .await
+            .unwrap();
+        assert_eq!(outcome, ChunkOutcome::Written);
+        assert_eq!(
+            s.finish(&mut cat, &mut media, true, &mut scratch)
+                .await
+                .unwrap(),
+            DownloadOutcome::Complete
+        );
+    });
+}
+#[test]
+fn push_rejects_more_than_one_record() {
+    block_on(async {
+        let image = Image::new();
+        let mut cat = image.create();
+        let mut media = HostMedia::new(root_for(&image));
+        let mut scratch = [0; MAX_RECORD_BYTES];
+        let job = queued(&mut cat, "oversized", None, &mut scratch);
+        let Start::Ready(mut s) = start_all(&mut cat, &mut media, job, &mut scratch)
+            .await
+            .unwrap()
+        else {
+            panic!()
+        };
+        s.response(200, None, None).unwrap();
+        let pushed = s
+            .push(
+                &mut cat,
+                &mut media,
+                &mut Reclaim::new(),
+                &[1; RECORD + 1],
+                &mut scratch,
+            )
+            .await;
+        assert!(matches!(pushed, Err(MediaError::InvalidInput)));
+    });
 }

@@ -30,7 +30,7 @@ use theo_podcasts::{
     download::DownloadOutcome,
     media::AUDIO_CHUNK,
     network_policy::{Purpose, Redirects, ResponseHeaders, Root, endpoint},
-    runtime::{Command, Reply},
+    runtime::{Command, FEED_CHUNK, FeedChunk, Reply, audio_chunk},
 };
 
 static RF_READY: AtomicBool = AtomicBool::new(false);
@@ -173,8 +173,9 @@ async fn request(command: Command) -> Result<Reply, Error> {
     }
 }
 /// Body bytes per pump step: a whole TLS record (16 KiB of plaintext), so
-/// storing one record overlaps decrypting the next (t-160).
-const BODY_STEP_BYTES: usize = 4 * AUDIO_CHUNK;
+/// storing one record overlaps decrypting the next (t-160), as one audio
+/// request (t-162).
+const BODY_STEP_BYTES: usize = AUDIO_CHUNK;
 /// TCP receive buffer, hence the advertised window (under 64 KiB: no scaling).
 const TCP_RX_BYTES: usize = 32 * 1024;
 struct Buffers {
@@ -477,12 +478,22 @@ impl theo_podcasts::body::ChunkSink for Store<'_> {
         // what it did not take. Each request is bounded by the
         // storage owner's IO budget; `pump` races them against STOP.
         while at < n {
-            let piece = n.min(at + AUDIO_CHUNK) - at;
-            let chunk = theo_podcasts::runtime::Chunk::from_slice(&bytes[at..at + piece])
-                .map_err(|_| Error::Protocol)?;
-            let command = match purpose {
-                Purpose::Feed => Command::SyncChunk(chunk),
-                Purpose::Audio => Command::DownloadChunk(chunk),
+            let (piece, command) = match purpose {
+                Purpose::Feed => {
+                    let piece = n.min(at + FEED_CHUNK) - at;
+                    let chunk = FeedChunk::from_slice(&bytes[at..at + piece])
+                        .map_err(|_| Error::Protocol)?;
+                    (piece, Command::SyncChunk(chunk))
+                }
+                Purpose::Audio => {
+                    // A whole record in one request: core1 then waits for
+                    // core0, busy decrypting the next record, once per
+                    // record rather than once per 4 KB (t-162).
+                    let piece = n.min(at + AUDIO_CHUNK) - at;
+                    let chunk = audio_chunk(&bytes[at..at + piece], &esp_alloc::ExternalMemory)
+                        .ok_or(Error::Network)?;
+                    (piece, Command::DownloadChunk(chunk))
+                }
             };
             match (purpose, request(command).await?) {
                 (Purpose::Feed, Reply::Consumed(used)) if used > 0 && used <= piece => {

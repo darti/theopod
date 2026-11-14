@@ -63,9 +63,9 @@ impl DownloadIo for Io {
             partial: false,
         })
         .await?;
-        self.command(Command::DownloadChunk(
-            crate::runtime::Chunk::from_slice(bytes).unwrap(),
-        ))
+        self.command(Command::DownloadChunk(crate::test_support::audio_chunk(
+            bytes,
+        )))
         .await?;
         Ok(())
     }

@@ -1,12 +1,15 @@
-//! Board-local microSD SPI protocol; LittleFS runs on its dedicated core.
+//! Board-local microSD SPI protocol, driven from the storage core (core1).
 
 use alloc::rc::Rc;
 use core::cell::Cell;
 
-use embassy_time::Delay;
+use core::{future::Future, task::Poll};
+use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, signal::Signal};
+use embassy_time::Instant;
+use embedded_hal::digital::PinState;
 use embedded_hal_async::{delay::DelayNs, spi::SpiBus as AsyncSpiBus};
 use esp_hal::{
-    Async,
+    Blocking,
     peripherals::{GPIO1, GPIO2, GPIO3, SPI3},
     spi::{
         Mode,
@@ -72,25 +75,94 @@ pub const fn init_error_message(error: SdInitError) -> &'static str {
 }
 
 type SpiBus = SdMmcBus;
-type HalDevice = sdio::DefaultBlockDevice<sdio::sd::Card, SpiBus, Delay>;
-/// The V2 routes SDCS to TCA9554 EXIO7. Always await the shared I2C bus:
-/// blocking a nested executor here would deadlock concurrent touch/IMU I/O.
-struct ExpanderCs {
-    expander: &'static super::Expander,
-}
+pub(super) type HalDevice = sdio::DefaultBlockDevice<sdio::sd::Card, SpiBus, SdDelay>;
 
-impl ExpanderCs {
-    async fn set(&mut self, level: embedded_hal::digital::PinState) -> Result<(), MmcError> {
-        self.expander
+/// One chip-select level change asked of core0, and its outcome.
+static CS_REQUEST: Signal<CriticalSectionRawMutex, PinState> = Signal::new();
+static CS_DONE: Signal<CriticalSectionRawMutex, Result<(), ()>> = Signal::new();
+
+/// Drive SDCS (TCA9554 EXIO7) for core1's identification. Runs on core0,
+/// which owns the shared async I2C bus (touch/IMU); never returns.
+pub(super) async fn serve_chip_select(expander: &'static super::Expander) -> ! {
+    loop {
+        let level = CS_REQUEST.wait().await;
+        let result = expander
             .lock()
             .await
             .set_level(super::SD_CARD_SELECT, level)
             .await
-            .map_err(|_| MmcError::Io)
+            .map_err(|_| ());
+        CS_DONE.signal(result);
     }
 }
 
-struct SdSpi(Spi<'static, Async>);
+/// Core1's view of SDCS: each level goes to core0's [`serve_chip_select`].
+///
+/// Once `held` (after identification) the card stays selected: it is the
+/// only device on SPI3, and each toggle cost an I2C write of ~670 us, about
+/// 12 per 4 KB audio chunk (t-155). Core1 then never waits for core0.
+struct LinkedCs {
+    held: Rc<Cell<bool>>,
+    /// Bounds each wait for core0; identification only.
+    deadline: Instant,
+}
+
+impl LinkedCs {
+    async fn select(&mut self) -> Result<(), MmcError> {
+        // Held: `identify` left the card selected before core0 stopped
+        // serving chip select.
+        if self.held.get() {
+            return Ok(());
+        }
+        self.set(PinState::Low).await
+    }
+
+    /// Ends a command; the card stays selected once held.
+    async fn release(&mut self) -> Result<(), MmcError> {
+        if self.held.get() {
+            return Ok(());
+        }
+        self.deselect().await
+    }
+
+    async fn deselect(&mut self) -> Result<(), MmcError> {
+        // Once held, nothing serves core1's requests any more.
+        if self.held.get() {
+            return Err(MmcError::Unsupported);
+        }
+        self.set(PinState::High).await
+    }
+
+    async fn set(&mut self, level: PinState) -> Result<(), MmcError> {
+        CS_DONE.reset();
+        CS_REQUEST.signal(level);
+        // Polled by core1's busy `block_on`: check the clock, not a timer.
+        let deadline = self.deadline;
+        let mut done = core::pin::pin!(CS_DONE.wait());
+        core::future::poll_fn(|cx| {
+            if Instant::now() >= deadline {
+                Poll::Ready(Err(MmcError::Timeout))
+            } else {
+                done.as_mut().poll(cx).map(|r| r.map_err(|_| MmcError::Io))
+            }
+        })
+        .await
+    }
+}
+
+/// Busy-wait delay: core1 polls the card with `block_on`, whose waker is
+/// not an Embassy task's, so it must not register an `embassy_time` timer.
+pub(super) struct SdDelay(esp_hal::delay::Delay);
+
+impl DelayNs for SdDelay {
+    async fn delay_ns(&mut self, ns: u32) {
+        embedded_hal::delay::DelayNs::delay_ns(&mut self.0, ns);
+    }
+}
+
+/// Blocking SPI3 behind the async traits `sdio` needs: every future is
+/// ready on its first poll, so core1 drives the card without an executor.
+struct SdSpi(Spi<'static, Blocking>);
 
 impl embedded_hal_async::spi::ErrorType for SdSpi {
     type Error = esp_hal::spi::Error;
@@ -103,23 +175,23 @@ impl embedded_hal_async::spi::SpiBus<u8> for SdSpi {
         // (the ESP-HAL may transmit 0x00), so use an in-place transfer with
         // an explicit idle-byte fill.
         words.fill(0xFF);
-        embedded_hal_async::spi::SpiBus::transfer_in_place(&mut self.0, words).await
+        embedded_hal::spi::SpiBus::transfer_in_place(&mut self.0, words)
     }
 
     async fn write(&mut self, words: &[u8]) -> Result<(), Self::Error> {
-        embedded_hal_async::spi::SpiBus::write(&mut self.0, words).await
+        embedded_hal::spi::SpiBus::write(&mut self.0, words)
     }
 
     async fn transfer(&mut self, read: &mut [u8], write: &[u8]) -> Result<(), Self::Error> {
-        embedded_hal_async::spi::SpiBus::transfer(&mut self.0, read, write).await
+        embedded_hal::spi::SpiBus::transfer(&mut self.0, read, write)
     }
 
     async fn transfer_in_place(&mut self, words: &mut [u8]) -> Result<(), Self::Error> {
-        embedded_hal_async::spi::SpiBus::transfer_in_place(&mut self.0, words).await
+        embedded_hal::spi::SpiBus::transfer_in_place(&mut self.0, words)
     }
 
     async fn flush(&mut self) -> Result<(), Self::Error> {
-        embedded_hal_async::spi::SpiBus::flush(&mut self.0).await
+        embedded_hal::spi::SpiBus::flush(&mut self.0)
     }
 }
 
@@ -141,15 +213,15 @@ struct Identity {
 
 /// SD SPI command bus. This is local because `sdio 0.5.1` decodes SPI R1/R7
 /// responses as if the leading R1 byte were part of the native 32-bit word.
-struct SdMmcBus {
+pub(super) struct SdMmcBus {
     spi: SdSpi,
-    cs: ExpanderCs,
-    delay: Delay,
+    cs: LinkedCs,
+    delay: SdDelay,
     identity: Rc<Cell<Identity>>,
 }
 
 impl SdMmcBus {
-    fn new(spi: SdSpi, cs: ExpanderCs, delay: Delay, identity: Rc<Cell<Identity>>) -> Self {
+    fn new(spi: SdSpi, cs: LinkedCs, delay: SdDelay, identity: Rc<Cell<Identity>>) -> Self {
         Self {
             spi,
             cs,
@@ -159,11 +231,13 @@ impl SdMmcBus {
     }
 
     async fn select(&mut self) -> Result<(), MmcError> {
-        self.cs.set(embedded_hal::digital::PinState::Low).await
+        self.cs.select().await
     }
 
+    /// Ends a command: releases chip select (unless held), then sends the
+    /// idle byte that lets the card release its data-out line.
     async fn deselect(&mut self) -> Result<(), MmcError> {
-        self.cs.set(embedded_hal::digital::PinState::High).await?;
+        self.cs.release().await?;
         self.spi.write(&[0xFF]).await.map_err(|_| MmcError::Io)
     }
 
@@ -438,7 +512,7 @@ impl MmcBus for SdMmcBus {
 
     async fn init_idle(&mut self, hz: u32) -> Result<(), MmcError> {
         self.spi.set_hz(hz);
-        self.cs.set(embedded_hal::digital::PinState::High).await?;
+        self.cs.deselect().await?;
         self.spi
             .write(&[0xFF; 10])
             .await
@@ -462,21 +536,23 @@ impl MmcBus for SdMmcBus {
     }
 }
 
-/// Initializes the microSD SPI slot and identifies the card.
+/// Identifies the card on core1 over blocking SPI3; core0 drives chip
+/// select until identification ends, then the card stays selected (t-155).
 ///
 /// Returns the device, its capacity in sectors and its CID identity.
-async fn init_card(
+pub(super) fn identify(
     spi3: SPI3<'static>,
     clk: GPIO2<'static>,
     mosi: GPIO1<'static>,
     miso: GPIO3<'static>,
-    expander: &'static super::Expander,
+    deadline: Instant,
 ) -> Result<(HalDevice, u64, Option<CardId>), SdInitError> {
     // Exercise the same bounded identification path as an absent/unresponsive
     // card without requiring physical removal or altering the card contents.
     #[cfg(feature = "sd-check")]
     if option_env!("THEO_SD_FAULT") == Some("absent") {
-        core::future::pending::<()>().await;
+        while Instant::now() < deadline {}
+        return Err(SdInitError::Card(sdio::MmcError::Timeout));
     }
     let spi = Spi::new(
         spi3,
@@ -487,13 +563,31 @@ async fn init_card(
     .map_err(|_| SdInitError::Host)?
     .with_sck(clk)
     .with_mosi(mosi)
-    .with_miso(miso)
-    .into_async();
+    .with_miso(miso);
     let identity = Rc::new(Cell::new(Identity::default()));
-    let bus = SdMmcBus::new(SdSpi(spi), ExpanderCs { expander }, Delay, identity.clone());
-    let device: HalDevice = sdio::DefaultBlockDevice::new(bus, Delay, CARD_FREQUENCY_HZ)
-        .await
-        .map_err(SdInitError::Card)?;
+    let held = Rc::new(Cell::new(false));
+    let cs = LinkedCs {
+        held: held.clone(),
+        deadline,
+    };
+    let delay = || SdDelay(esp_hal::delay::Delay::new());
+    let bus = SdMmcBus::new(SdSpi(spi), cs, delay(), identity.clone());
+    // Each wait for core0 is bounded by `deadline`; the card's own waits
+    // are bounded loops. No future here waits for an Embassy timer.
+    let device: HalDevice = embassy_futures::block_on(sdio::DefaultBlockDevice::new(
+        bus,
+        delay(),
+        CARD_FREQUENCY_HZ,
+    ))
+    .map_err(SdInitError::Card)?;
+    // Select the card for the rest of the session while core0 still serves
+    // chip select: once held, commands never ask it again.
+    let mut hold = LinkedCs {
+        held: Rc::new(Cell::new(false)),
+        deadline,
+    };
+    embassy_futures::block_on(hold.set(PinState::Low)).map_err(SdInitError::Card)?;
+    held.set(true);
     let Identity { blocks, card } = identity.get();
     log::info!(
         "microSD capacity: {} blocks ({} MiB)",
@@ -516,6 +610,3 @@ pub use worker::{
     PodcastRequest, SdStorage, append_log, disable, domain, guard, init, mount, provisions_v3,
     report_log_tail,
 };
-
-#[path = "sd_io.rs"]
-mod io;

@@ -74,9 +74,11 @@ the ESP toolchain and target are defined in `rust-toolchain.toml`.
 - Firmware `log` output is silent unless `ESP_LOG` (e.g. `info`) is set at
   build time. `src/device/logging.rs` installs the dual serial/SD logger
   before HAL startup; normal build/flash recipes default to `info`.
-- SD logging uses a bounded queue and a separate async task. Never block on
-  the shared I2C expander to select the card: touch/IMU also use that bus.
-  A cancelled or failed storage operation disables that mount until reboot.
+- SD logging uses a bounded queue and a separate async task. Core1 drives
+  SPI3 itself; only identification asks core0 to set chip select on the
+  shared I2C expander (touch/IMU also use that bus), then the card stays
+  selected (ADR-0023). A failed storage operation disables storage until
+  reboot.
 - `IMU_AXES` is measured, not documented: `just imu-calibrate` keeps the
   view upright and logs raw accelerometer axes once a second. Calibrate from
   positions defined against gravity (vertical with text upright, a quarter

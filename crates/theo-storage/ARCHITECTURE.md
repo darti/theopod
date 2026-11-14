@@ -20,8 +20,6 @@ Used by the firmware (`src/device/sd_worker.rs`) and `theo-podcasts`.
   ranges; `discover` is for host tooling. Layouts are created only by
   `theo_podcasts::provision::provision_v3` (ADR-0021/0022).
 - `scope.rs`: failure scopes, the owner's `after_failure`, `OWNER_MARGIN_MS`.
-- `sector_bus.rs`: owned-buffer mailbox from the synchronous filesystem core
-  to the async SD service; late replies after cancellation are refused.
 - `redb_backend.rs`: `RegionBackend`, redb's `StorageBackend` over the
   database region. Two alternating length-record sectors (magic, generation,
   length, CRC) precede the file; growth is not zero-filled. `format` writes

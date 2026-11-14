@@ -3,7 +3,10 @@
 //! Audio bodies live in raw 1 MiB allocation units (ADR-0020): the private
 //! `units` module persists the bitmap, counter and per-episode extent records
 //! in the catalogue, and `unit_media::UnitMedia` is the `media::MediaStore`
-//! over them, failing with `unit_media::UnitError`.
+//! over them, failing with `unit_media::UnitError`. The catalogue is a redb
+//! database (ADR-0022) whose tables are in the private `tables` module.
+//! `provision::provision_v3` initializes a v3 card (destructive; explicit
+//! provisioning only).
 #![no_std]
 extern crate alloc;
 pub mod catalogue;
@@ -17,10 +20,15 @@ pub mod media;
 #[cfg(test)]
 mod media_test_support;
 pub mod network_policy;
+pub mod provision;
+mod provision_guard;
 pub mod reclaim;
 pub mod recovery;
+#[cfg(test)]
+mod scale_tests;
 pub mod service;
 pub mod sync;
+mod tables;
 #[cfg(test)]
 mod test_support;
 

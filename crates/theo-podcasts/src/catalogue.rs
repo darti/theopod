@@ -1,5 +1,12 @@
-//! Persistent identities and local state on the selected EKV backend.
-use ekv::flash::Flash;
+//! Persistent identities and local state in a redb database (ADR-0022).
+use crate::tables::*;
+use core::{borrow::Borrow, ops::Bound};
+use redb::{
+    Database, Key, ReadTransaction, ReadableDatabase, ReadableTable, StorageBackend,
+    TableDefinition, WriteTransaction,
+};
+use sha2::{Digest, Sha256};
+use theo_storage::{littlefs::SectorIo, redb_backend::RegionBackend};
 
 pub const MAX_RECORD_BYTES: usize = 4096;
 pub const MAX_SCAN_RECORDS: usize = 16;
@@ -65,9 +72,9 @@ pub struct ScanPage {
     pub records: usize,
     pub bytes: usize,
 }
-#[derive(Debug)]
-pub enum Error<E> {
-    Storage(E),
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Error {
+    Storage,
     Corrupt,
     Schema,
     FieldTooLong,
@@ -78,7 +85,6 @@ pub enum Error<E> {
     IdentityCollision,
     InvalidState,
     Full,
-    Cancelled,
     Disabled,
 }
 pub fn mark_read(state: &mut EpisodeState) {
@@ -89,230 +95,343 @@ pub fn should_queue(state: &EpisodeState) -> bool {
     !state.read && state.audio == AudioState::Missing
 }
 
-use embassy_sync_06::blocking_mutex::raw::NoopRawMutex;
-use sha2::{Digest, Sha256};
-const SCHEMA: u32 = 2;
-pub(crate) const NEXT_KEY: &[u8] = b"m/next";
-pub(crate) const SCHEMA_KEY: &[u8] = b"m/schema";
+/// redb page cache; smaller caches cost more writes per commit (ADR-0022).
+pub const CACHE_BYTES: usize = 256 * 1024;
 const AUDIO_OFFSET: usize = 18;
 const READ_OFFSET: usize = 19;
-const _: () =
-    assert!(ekv::config::MAX_KEY_SIZE >= 42 && ekv::config::MAX_VALUE_SIZE >= MAX_RECORD_BYTES);
+/// Encoded size of an episode key in schema 2, kept in scan byte accounting.
+const KEY_BYTES: usize = 9;
+
+/// Map any redb error: region growth refused → `Full`, device failure →
+/// `Storage`, unknown layout → `Schema`, anything else → `Corrupt`.
+pub(crate) fn db_error(error: impl Into<redb::Error>) -> Error {
+    use alloc::string::ToString;
+    match error.into() {
+        redb::Error::Io(e)
+            if e.to_string()
+                .contains(theo_storage::redb_backend::REGION_FULL) =>
+        {
+            Error::Full
+        }
+        redb::Error::Io(_) | redb::Error::PreviousIo | redb::Error::DatabaseClosed => {
+            Error::Storage
+        }
+        redb::Error::TableDoesNotExist(_) | redb::Error::UpgradeRequired(_) => Error::Schema,
+        _ => Error::Corrupt,
+    }
+}
+
+/// redb's open-time refusal of a non-empty file without its magic number.
+/// std builds tag it `InvalidData`, no_std builds keep only this message,
+/// so the message is what both can match (redb is pinned, ADR-0022).
+///
+/// This text is redb `=4.4.0`'s (`page_manager.rs`, `io::invalid_data`). A
+/// redb upgrade must re-check it: `region_without_redb_magic_is_corrupt`
+/// and `redb_refusal_text_matches_not_redb` fail if the message changes.
+pub(crate) const NOT_REDB: &str = "Not a redb database";
+
+/// Map an open error: a region that is not a redb database is `Corrupt`
+/// (not a device failure); everything else as [`db_error`].
+fn open_error(error: redb::DatabaseError) -> Error {
+    use alloc::string::ToString;
+    match &error {
+        redb::DatabaseError::Storage(redb::StorageError::Io(e))
+            if e.to_string().contains(NOT_REDB) =>
+        {
+            Error::Corrupt
+        }
+        _ => db_error(error),
+    }
+}
 
 /// Unique database owner. Metadata views borrow the caller's scratch buffer,
-/// never the database; no record allocation or competing writer is hidden here.
-/// Storage/format/capacity errors and dropped operation futures disable this
-/// owner until it is discarded and reopened. The service must also invalidate
-/// its shared filesystem session, as it does for every failed storage request.
-pub struct Catalogue<F: Flash> {
-    pub(crate) db: ekv::Database<F, NoopRawMutex>,
+/// never the database; no record allocation or competing writer is hidden
+/// here. Storage, format and capacity errors disable this owner until it is
+/// dropped and reopened. The service must also invalidate its shared
+/// filesystem session, as it does for every failed storage request.
+pub struct Catalogue {
+    /// The current operation's write transaction, committed by `done` or
+    /// aborted by `finish`; never held across operations. Declared before
+    /// `db`, so it is dropped (aborted) first.
+    tx: Option<WriteTransaction>,
+    pub(crate) db: Database,
     next: u64,
     enabled: bool,
+    /// Inside [`Self::begin_batch`]: `done` keeps the transaction open, so
+    /// a podcast request makes at most one commit (ADR-0022).
+    batch: bool,
+    /// Commits made so far: a request checks whether a step committed.
+    commits: u64,
 }
-impl<F: Flash> Catalogue<F> {
-    /// Destructive: only for a newly initialized, unpublished backend.
-    pub async fn create(flash: F) -> Result<Self, Error<F::Error>> {
-        let db = ekv::Database::new(flash, ekv::Config::default());
-        db.format()
-            .await
-            .map_err(|ekv::FormatError::Flash(e)| Error::Storage(e))?;
-        let mut tx = db.write_transaction().await;
-        // Lexical order is part of EKV's transaction contract.
-        tx.write(NEXT_KEY, &1u64.to_le_bytes())
-            .await
-            .map_err(write_error)?;
-        tx.write(SCHEMA_KEY, &SCHEMA.to_le_bytes())
-            .await
-            .map_err(write_error)?;
-        // `m/units` sorts after `m/schema`.
-        tx.write(crate::units::UNITS_KEY, &0u32.to_le_bytes())
-            .await
-            .map_err(write_error)?;
-        tx.commit().await.map_err(commit_error)?;
-        Ok(Self {
-            db,
-            next: 1,
-            enabled: true,
-        })
+
+/// Reads see the last committed state, or a batch's held writes.
+pub(crate) enum View<'a> {
+    Read(ReadTransaction),
+    Write(&'a WriteTransaction),
+}
+impl View<'_> {
+    /// Copy a byte value into `scratch`; its length, or `None` if absent.
+    pub(crate) fn bytes<'k, K: Key + 'static>(
+        &self,
+        table: TableDefinition<K, &'static [u8]>,
+        key: impl Borrow<K::SelfType<'k>>,
+        scratch: &mut [u8],
+    ) -> Result<Option<usize>, Error> {
+        match self {
+            Self::Read(tx) => copy(&tx.open_table(table).map_err(db_error)?, key, scratch),
+            Self::Write(tx) => copy(&tx.open_table(table).map_err(db_error)?, key, scratch),
+        }
     }
-    /// Read-only mount/schema validation. Never formats or migrates on failure.
-    pub async fn open(flash: F) -> Result<Self, Error<F::Error>> {
-        let mut slot = None;
-        Self::open_into(&mut slot, flash).await?;
-        slot.ok_or(Error::Corrupt)
+    fn number<'k, K: Key + 'static>(
+        &self,
+        table: TableDefinition<K, u64>,
+        key: impl Borrow<K::SelfType<'k>>,
+    ) -> Result<Option<u64>, Error> {
+        match self {
+            Self::Read(tx) => number(&tx.open_table(table).map_err(db_error)?, key),
+            Self::Write(tx) => number(&tx.open_table(table).map_err(db_error)?, key),
+        }
     }
-    /// [`Self::open`], built in `slot` rather than returned.
+}
+
+/// Copy a byte value into `scratch`; its length, or `None` if absent.
+pub(crate) fn copy<'k, K: Key + 'static>(
+    table: &impl ReadableTable<K, &'static [u8]>,
+    key: impl Borrow<K::SelfType<'k>>,
+    scratch: &mut [u8],
+) -> Result<Option<usize>, Error> {
+    let Some(value) = table.get(key).map_err(db_error)? else {
+        return Ok(None);
+    };
+    let value = value.value();
+    scratch
+        .get_mut(..value.len())
+        .ok_or(Error::Corrupt)?
+        .copy_from_slice(value);
+    Ok(Some(value.len()))
+}
+/// A `u64` value, or `None` if absent.
+pub(crate) fn number<'k, K: Key + 'static>(
+    table: &impl ReadableTable<K, u64>,
+    key: impl Borrow<K::SelfType<'k>>,
+) -> Result<Option<u64>, Error> {
+    Ok(table.get(key).map_err(db_error)?.map(|v| v.value()))
+}
+
+impl Catalogue {
+    /// Open the catalogue; create its tables if the database has none.
     ///
-    /// The catalogue is about 10 KiB: each by-value move costs that much
-    /// stack, which the storage owner's 48 KiB core1 stack cannot spare.
-    /// `slot` is `None` after a failure.
-    pub async fn open_into(slot: &mut Option<Self>, flash: F) -> Result<(), Error<F::Error>> {
-        let catalogue = slot.insert(Self {
-            db: ekv::Database::new(flash, ekv::Config::default()),
+    /// Only an explicitly provisioned region holds a database without
+    /// tables (`RegionBackend` refuses a missing length record), so this
+    /// never formats user data. A database with tables is only validated:
+    /// a missing table or another schema is refused: no catalogue table is
+    /// created or rewritten (redb still writes its own header and allocator
+    /// state).
+    ///
+    /// A fresh region (provisioned, catalogue not yet created) whose redb
+    /// file lacks its magic is a creation cut short: it is reset to empty
+    /// and created again. The fresh flag is cleared once the tables are
+    /// durable, so a region that may hold data is never reset (ADR-0015).
+    pub fn open<D: SectorIo + 'static>(backend: RegionBackend<D>) -> Result<Self, Error> {
+        backend.reset_unfinished_creation().map_err(db_error)?;
+        let fresh_flag = backend.fresh_flag();
+        let catalogue = Self::open_database(backend)?;
+        if let Some(flag) = fresh_flag {
+            flag.clear().map_err(db_error)?;
+        }
+        Ok(catalogue)
+    }
+
+    fn open_database(backend: impl StorageBackend) -> Result<Self, Error> {
+        let db = Database::builder()
+            .set_cache_size(CACHE_BYTES)
+            .create_with_backend(backend)
+            .map_err(open_error)?;
+        let mut catalogue = Self {
+            tx: None,
+            db,
             next: 0,
             enabled: true,
-        });
-        let result = catalogue.validate().await;
-        if result.is_err() {
-            *slot = None;
+            batch: false,
+            commits: 0,
+        };
+        let fresh = {
+            let tx = catalogue.db.begin_read().map_err(db_error)?;
+            tx.list_tables().map_err(db_error)?.next().is_none()
+        };
+        if fresh {
+            catalogue.create_tables()?;
         }
-        result
+        catalogue.validate()?;
+        Ok(catalogue)
     }
-    async fn validate(&mut self) -> Result<(), Error<F::Error>> {
-        let db = &self.db;
-        db.mount().await.map_err(|e| match e {
-            ekv::MountError::Flash(e) => Error::Storage(e),
-            ekv::MountError::Corrupted => Error::Corrupt,
-        })?;
-        let tx = db.read_transaction().await;
-        let mut schema = [0; 4];
-        match tx.read(SCHEMA_KEY, &mut schema).await {
-            Ok(4) if u32::from_le_bytes(schema) == SCHEMA => (),
-            Err(ekv::ReadError::Flash(e)) => return Err(Error::Storage(e)),
-            _ => return Err(Error::Schema),
+
+    fn create_tables(&mut self) -> Result<(), Error> {
+        let mut tx = self.db.begin_write().map_err(db_error)?;
+        tx.set_quick_repair(true);
+        tx.open_table(EPISODES).map_err(db_error)?;
+        tx.open_table(EPISODE_IDENTITY).map_err(db_error)?;
+        tx.open_table(AUDIO).map_err(db_error)?;
+        tx.open_table(SUBSCRIPTIONS).map_err(db_error)?;
+        tx.open_table(SHOWS).map_err(db_error)?;
+        tx.open_table(SYNC).map_err(db_error)?;
+        tx.open_table(UNIT_PAGES).map_err(db_error)?;
+        tx.open_table(UNIT_EXTENTS).map_err(db_error)?;
+        tx.open_table(EVICTABLE).map_err(db_error)?;
+        {
+            let mut counters = tx.open_table(COUNTERS).map_err(db_error)?;
+            for (key, value) in [
+                (SCHEMA_KEY, SCHEMA),
+                (NEXT_EPISODE, 1),
+                (NEXT_SUBSCRIPTION, 1),
+                (UNITS_USED, 0),
+            ] {
+                counters.insert(key, value).map_err(db_error)?;
+            }
         }
-        let mut next = [0; 8];
-        if tx.read(NEXT_KEY, &mut next).await.map_err(read_error)? != 8 {
-            return Err(Error::Corrupt);
+        tx.commit().map_err(db_error)
+    }
+
+    /// Read-only schema check. Never formats or migrates.
+    fn validate(&mut self) -> Result<(), Error> {
+        let tx = self.db.begin_read().map_err(db_error)?;
+        let counters = tx.open_table(COUNTERS).map_err(db_error)?;
+        if number(&counters, SCHEMA_KEY)? != Some(SCHEMA) {
+            return Err(Error::Schema);
         }
-        let next = u64::from_le_bytes(next);
-        if next == 0 {
-            return Err(Error::Corrupt);
-        }
-        drop(tx);
+        let next = number(&counters, NEXT_EPISODE)?
+            .filter(|&n| n != 0)
+            .ok_or(Error::Corrupt)?;
+        number(&counters, NEXT_SUBSCRIPTION)?
+            .filter(|&n| n != 0)
+            .ok_or(Error::Corrupt)?;
+        number(&counters, UNITS_USED)?.ok_or(Error::Corrupt)?;
+        tx.open_table(EPISODES).map_err(db_error)?;
+        tx.open_table(EPISODE_IDENTITY).map_err(db_error)?;
+        tx.open_table(AUDIO).map_err(db_error)?;
+        tx.open_table(SUBSCRIPTIONS).map_err(db_error)?;
+        tx.open_table(SHOWS).map_err(db_error)?;
+        tx.open_table(SYNC).map_err(db_error)?;
+        tx.open_table(UNIT_PAGES).map_err(db_error)?;
+        tx.open_table(UNIT_EXTENTS).map_err(db_error)?;
+        tx.open_table(EVICTABLE).map_err(db_error)?;
         self.next = next;
         Ok(())
     }
-    pub async fn completed_audio_len(
-        &mut self,
-        id: EpisodeId,
-    ) -> Result<Option<u64>, Error<F::Error>> {
-        self.begin()?;
-        let result = async {
-            let tx = self.db.read_transaction().await;
-            let mut value = [0; 8];
-            match tx.read(&audio_key(id), &mut value).await {
-                Ok(8) => {
-                    let bytes = u64::from_le_bytes(value);
-                    if bytes == 0 {
-                        Err(Error::Corrupt)
-                    } else {
-                        Ok(Some(bytes))
-                    }
+
+    /// Make sure a write transaction is open, begun with quick repair.
+    pub(crate) fn write(&mut self) -> Result<&WriteTransaction, Error> {
+        if self.tx.is_none() {
+            let mut tx = self.db.begin_write().map_err(db_error)?;
+            tx.set_quick_repair(true);
+            self.tx = Some(tx);
+        }
+        self.tx.as_ref().ok_or(Error::Corrupt)
+    }
+    /// Commit the open write transaction, if any.
+    fn commit(&mut self) -> Result<(), Error> {
+        match self.tx.take() {
+            Some(tx) => {
+                tx.commit().map_err(db_error)?;
+                self.commits += 1;
+                Ok(())
+            }
+            None => Ok(()),
+        }
+    }
+    /// End an operation's writes: commit its transaction, unless a batch
+    /// holds it until [`Self::end_batch`].
+    pub(crate) fn done(&mut self) -> Result<(), Error> {
+        if self.batch {
+            return Ok(());
+        }
+        self.commit()
+    }
+    /// Commits made since open. A request compares it before and after a
+    /// step to keep to one commit per request (ADR-0022).
+    pub(crate) fn commits(&self) -> u64 {
+        self.commits
+    }
+    /// Hold the writes of the next operations in one write transaction,
+    /// committed by [`Self::end_batch`]: a podcast request makes at most one
+    /// commit. Reads inside the batch see its held writes. A fatal error
+    /// inside the batch drops the held writes and disables the owner (a
+    /// media store may already have applied them in RAM).
+    pub(crate) fn begin_batch(&mut self) -> Result<(), Error> {
+        if !self.enabled {
+            return Err(Error::Disabled);
+        }
+        if self.batch || self.tx.is_some() {
+            return Err(Error::InvalidState);
+        }
+        self.batch = true;
+        Ok(())
+    }
+    /// End a batch: commit its held writes if `commit`. Otherwise drop
+    /// them; held writes then disable the owner and fail as `Storage`, since
+    /// the media store may have applied them in RAM. A batch that wrote
+    /// nothing leaves the owner as the failed operation left it.
+    ///
+    /// Commit after success, and after an error detected before any change
+    /// (the held writes are then exactly the earlier operations').
+    pub(crate) fn end_batch(&mut self, commit: bool) -> Result<(), Error> {
+        if !self.batch {
+            return Err(Error::InvalidState);
+        }
+        self.batch = false;
+        if !self.enabled {
+            self.tx = None;
+            return Err(Error::Disabled);
+        }
+        if !commit {
+            return match self.tx.take() {
+                Some(_) => {
+                    self.enabled = false;
+                    Err(Error::Storage)
                 }
-                Ok(_) => Err(Error::Corrupt),
-                Err(ekv::ReadError::KeyNotFound) => Ok(None),
-                Err(e) => Err(read_error(e)),
-            }
-        }
-        .await;
-        self.finish(result)
-    }
-    /// Called only after durable temporary-file publication by the media owner.
-    pub(crate) async fn finish_download(
-        &mut self,
-        id: EpisodeId,
-        bytes: u64,
-        scratch: &mut [u8],
-    ) -> Result<(), Error<F::Error>> {
-        self.check(scratch)?;
-        if bytes == 0 {
-            return Err(Error::InvalidMetadata);
+                None => Ok(()),
+            };
         }
         self.begin()?;
-        let result = async {
-            let (episode, n) = self.load(id, scratch).await?.ok_or(Error::NotFound)?;
-            if episode.state.audio != AudioState::Downloading {
-                return Err(Error::InvalidState);
-            }
-            scratch[AUDIO_OFFSET] = AudioState::Available as u8;
-            let mut tx = self.db.write_transaction().await;
-            tx.write(&audio_key(id), &bytes.to_le_bytes())
-                .await
-                .map_err(write_error)?;
-            tx.write(&episode_key(id), &scratch[..n])
-                .await
-                .map_err(write_error)?;
-            tx.commit().await.map_err(commit_error)
-        }
-        .await;
+        let result = self.commit();
         self.finish(result)
     }
-    /// Last completely reconciled history. Partial imports never replace this.
-    pub async fn sync_checkpoint(
-        &mut self,
-        id: SubscriptionId,
-        scratch: &mut [u8],
-    ) -> Result<Option<crate::sync::Checkpoint>, Error<F::Error>> {
-        self.check(scratch)?;
-        if id.0 == 0 {
-            return Err(Error::InvalidMetadata);
+    pub(crate) fn view(&self) -> Result<View<'_>, Error> {
+        match &self.tx {
+            Some(tx) => Ok(View::Write(tx)),
+            None => self.db.begin_read().map(View::Read).map_err(db_error),
         }
-        self.begin()?;
-        let result = async {
-            let tx = self.db.read_transaction().await;
-            match tx
-                .read(&sync_key(id), &mut scratch[..MAX_RECORD_BYTES])
-                .await
-            {
-                Ok(n) => crate::sync::Checkpoint::decode(&scratch[..n])
-                    .map(Some)
-                    .ok_or(Error::Corrupt),
-                Err(ekv::ReadError::KeyNotFound) => Ok(None),
-                Err(e) => Err(read_error(e)),
-            }
-        }
-        .await;
-        self.finish(result)
     }
-    pub(crate) async fn save_sync_checkpoint(
-        &mut self,
-        id: SubscriptionId,
-        checkpoint: &crate::sync::Checkpoint,
-        scratch: &mut [u8],
-    ) -> Result<(), Error<F::Error>> {
-        self.check(scratch)?;
-        if id.0 == 0 {
-            return Err(Error::InvalidMetadata);
-        }
-        let n = checkpoint.encode(scratch).ok_or(Error::InvalidMetadata)?;
-        self.begin()?;
-        let result = async {
-            let mut tx = self.db.write_transaction().await;
-            tx.write(&sync_key(id), &scratch[..n])
-                .await
-                .map_err(write_error)?;
-            tx.commit().await.map_err(commit_error)
-        }
-        .await;
-        self.finish(result)
-    }
-    pub(crate) fn begin(&mut self) -> Result<(), Error<F::Error>> {
+
+    /// Enter an operation: the owner is disabled until `finish` re-enables it.
+    pub(crate) fn begin(&mut self) -> Result<(), Error> {
         if !self.enabled {
             return Err(Error::Disabled);
         }
         self.enabled = false;
         Ok(())
     }
-    pub(crate) fn finish<T>(
-        &mut self,
-        result: Result<T, Error<F::Error>>,
-    ) -> Result<T, Error<F::Error>> {
-        if !matches!(
-            &result,
-            Err(Error::Storage(_)
-                | Error::Corrupt
-                | Error::Schema
-                | Error::IdentityCollision
-                | Error::Full
-                | Error::Cancelled
-                | Error::Disabled)
-        ) {
-            self.enabled = true;
+    /// Leave an operation. Fatal errors keep the owner disabled and drop
+    /// (abort) the open transaction. Other errors are detected before any
+    /// write, so the owner stays usable.
+    pub(crate) fn finish<T>(&mut self, result: Result<T, Error>) -> Result<T, Error> {
+        match &result {
+            Err(e) if is_fatal(*e) => {
+                self.tx = None;
+            }
+            Err(_) => {
+                // Detected before any write: a batch keeps the writes of
+                // its earlier operations.
+                if !self.batch {
+                    self.tx = None;
+                }
+                self.enabled = true;
+            }
+            Ok(_) => self.enabled = true,
         }
         result
     }
-    fn check(&self, scratch: &[u8]) -> Result<(), Error<F::Error>> {
+    fn check(&self, scratch: &[u8]) -> Result<(), Error> {
         if !self.enabled {
             return Err(Error::Disabled);
         }
@@ -321,32 +440,125 @@ impl<F: Flash> Catalogue<F> {
         }
         Ok(())
     }
-    pub async fn get<'a>(
+
+    pub fn completed_audio_len(&mut self, id: EpisodeId) -> Result<Option<u64>, Error> {
+        self.begin()?;
+        let result = self
+            .view()
+            .and_then(|view| match view.number(AUDIO, id.0)? {
+                Some(0) => Err(Error::Corrupt),
+                bytes => Ok(bytes),
+            });
+        self.finish(result)
+    }
+    /// Called only after durable temporary-file publication by the media owner.
+    pub(crate) fn finish_download(
+        &mut self,
+        id: EpisodeId,
+        bytes: u64,
+        scratch: &mut [u8],
+    ) -> Result<(), Error> {
+        self.check(scratch)?;
+        if bytes == 0 {
+            return Err(Error::InvalidMetadata);
+        }
+        self.begin()?;
+        let result = self.finish_download_inner(id, bytes, scratch);
+        self.finish(result)
+    }
+    fn finish_download_inner(
+        &mut self,
+        id: EpisodeId,
+        bytes: u64,
+        scratch: &mut [u8],
+    ) -> Result<(), Error> {
+        let (episode, n) = self.load(id, scratch)?.ok_or(Error::NotFound)?;
+        if episode.state.audio != AudioState::Downloading {
+            return Err(Error::InvalidState);
+        }
+        let (before, published) = (episode.state, episode.metadata.published);
+        let after = EpisodeState {
+            audio: AudioState::Available,
+            ..before
+        };
+        scratch[AUDIO_OFFSET] = AudioState::Available as u8;
+        let tx = self.write()?;
+        tx.open_table(AUDIO)
+            .map_err(db_error)?
+            .insert(id.0, bytes)
+            .map_err(db_error)?;
+        tx.open_table(EPISODES)
+            .map_err(db_error)?
+            .insert(id.0, &scratch[..n])
+            .map_err(db_error)?;
+        reindex(tx, id, Some((before, published)), (after, published))?;
+        self.done()
+    }
+    /// Last completely reconciled history. Partial imports never replace this.
+    pub fn sync_checkpoint(
+        &mut self,
+        id: SubscriptionId,
+        scratch: &mut [u8],
+    ) -> Result<Option<crate::sync::Checkpoint>, Error> {
+        self.check(scratch)?;
+        if id.0 == 0 {
+            return Err(Error::InvalidMetadata);
+        }
+        self.begin()?;
+        let result = self.view().and_then(|view| {
+            match view.bytes(SYNC, id.0, &mut scratch[..MAX_RECORD_BYTES])? {
+                Some(n) => crate::sync::Checkpoint::decode(&scratch[..n])
+                    .map(Some)
+                    .ok_or(Error::Corrupt),
+                None => Ok(None),
+            }
+        });
+        self.finish(result)
+    }
+    pub(crate) fn save_sync_checkpoint(
+        &mut self,
+        id: SubscriptionId,
+        checkpoint: &crate::sync::Checkpoint,
+        scratch: &mut [u8],
+    ) -> Result<(), Error> {
+        self.check(scratch)?;
+        if id.0 == 0 {
+            return Err(Error::InvalidMetadata);
+        }
+        let n = checkpoint.encode(scratch).ok_or(Error::InvalidMetadata)?;
+        self.begin()?;
+        let result = self.write().and_then(|tx| {
+            tx.open_table(SYNC)
+                .map_err(db_error)?
+                .insert(id.0, &scratch[..n])
+                .map_err(db_error)?;
+            Ok(())
+        });
+        let result = result.and_then(|()| self.done());
+        self.finish(result)
+    }
+    pub fn get<'a>(
         &mut self,
         id: EpisodeId,
         scratch: &'a mut [u8],
-    ) -> Result<Option<Episode<'a>>, Error<F::Error>> {
+    ) -> Result<Option<Episode<'a>>, Error> {
         self.check(scratch)?;
         self.begin()?;
         let result = self
             .load(id, scratch)
-            .await
             .map(|record| record.map(|(episode, _)| episode));
         self.finish(result)
     }
-    async fn load<'a>(
+    fn load<'a>(
         &self,
         id: EpisodeId,
         scratch: &'a mut [u8],
-    ) -> Result<Option<(Episode<'a>, usize)>, Error<F::Error>> {
-        let tx = self.db.read_transaction().await;
-        let n = match tx
-            .read(&episode_key(id), &mut scratch[..MAX_RECORD_BYTES])
-            .await
-        {
-            Ok(n) => n,
-            Err(ekv::ReadError::KeyNotFound) => return Ok(None),
-            Err(e) => return Err(read_error(e)),
+    ) -> Result<Option<(Episode<'a>, usize)>, Error> {
+        let Some(n) = self
+            .view()?
+            .bytes(EPISODES, id.0, &mut scratch[..MAX_RECORD_BYTES])?
+        else {
+            return Ok(None);
         };
         let episode = decode(&scratch[..n]).ok_or(Error::Corrupt)?;
         if episode.id != id || id.0 >= self.next {
@@ -354,40 +566,33 @@ impl<F: Flash> Catalogue<F> {
         }
         Ok(Some((episode, n)))
     }
-    pub async fn upsert(
+    pub fn upsert(
         &mut self,
         subscription: SubscriptionId,
         metadata: EpisodeMetadata<'_>,
         scratch: &mut [u8],
-    ) -> Result<UpsertOutcome, Error<F::Error>> {
+    ) -> Result<UpsertOutcome, Error> {
         self.check(scratch)?;
         let metadata = normalized(metadata)?;
         if subscription.0 == 0 {
             return Err(Error::InvalidMetadata);
         }
         self.begin()?;
-        let result = self.upsert_inner(subscription, metadata, scratch).await;
+        let result = self.upsert_inner(subscription, metadata, scratch);
         self.finish(result)
     }
-    async fn upsert_inner(
+    fn upsert_inner(
         &mut self,
         subscription: SubscriptionId,
         metadata: EpisodeMetadata<'_>,
         scratch: &mut [u8],
-    ) -> Result<UpsertOutcome, Error<F::Error>> {
-        let index = identity_key(subscription, metadata);
-        let mut value = [0; 8];
-        let existing = {
-            let tx = self.db.read_transaction().await;
-            match tx.read(&index, &mut value).await {
-                Ok(8) => Some(EpisodeId(u64::from_le_bytes(value))),
-                Ok(_) => return Err(Error::Corrupt),
-                Err(ekv::ReadError::KeyNotFound) => None,
-                Err(e) => return Err(read_error(e)),
-            }
-        };
+    ) -> Result<UpsertOutcome, Error> {
+        let index = identity(subscription, metadata);
+        let existing = self.view()?.number(EPISODE_IDENTITY, index)?.map(EpisodeId);
+        let mut old = None;
         let (id, mut state, created) = if let Some(id) = existing {
-            let (episode, _) = self.load(id, scratch).await?.ok_or(Error::Corrupt)?;
+            let (episode, _) = self.load(id, scratch)?.ok_or(Error::Corrupt)?;
+            old = Some((episode.state, episode.metadata.published));
             if episode.subscription != subscription || !same_identity(episode.metadata, metadata) {
                 return Err(Error::IdentityCollision);
             }
@@ -426,19 +631,24 @@ impl<F: Flash> Catalogue<F> {
             scratch,
         )
         .ok_or(Error::BufferTooSmall)?;
-        let mut tx = self.db.write_transaction().await;
-        tx.write(&episode_key(id), &scratch[..n])
-            .await
-            .map_err(write_error)?;
+        let next = self.next;
+        let tx = self.write()?;
+        tx.open_table(EPISODES)
+            .map_err(db_error)?
+            .insert(id.0, &scratch[..n])
+            .map_err(db_error)?;
+        reindex(tx, id, old, (state, metadata.published))?;
         if created {
-            tx.write(&index, &id.0.to_le_bytes())
-                .await
-                .map_err(write_error)?;
-            tx.write(NEXT_KEY, &(self.next + 1).to_le_bytes())
-                .await
-                .map_err(write_error)?;
+            tx.open_table(EPISODE_IDENTITY)
+                .map_err(db_error)?
+                .insert(index, id.0)
+                .map_err(db_error)?;
+            tx.open_table(COUNTERS)
+                .map_err(db_error)?
+                .insert(NEXT_EPISODE, next + 1)
+                .map_err(db_error)?;
         }
-        tx.commit().await.map_err(commit_error)?;
+        self.done()?;
         if created {
             self.next += 1;
         }
@@ -453,63 +663,46 @@ impl<F: Flash> Catalogue<F> {
     /// state, but cannot retain a view into the reused caller buffer. No read
     /// transaction or cursor escapes this operation. One lookahead record may
     /// be read to detect continuation; it is not emitted or skipped on resume.
-    pub async fn scan(
+    pub fn scan(
         &mut self,
         after: Option<EpisodeId>,
         scratch: &mut [u8],
         emit: impl for<'record> FnMut(Episode<'record>),
-    ) -> Result<ScanPage, Error<F::Error>> {
+    ) -> Result<ScanPage, Error> {
         self.check(scratch)?;
         self.begin()?;
-        let result = self.scan_inner(after, scratch, emit).await;
+        let result = self.scan_inner(after, scratch, emit);
         self.finish(result)
     }
-    async fn scan_inner(
+    fn scan_inner(
         &self,
         after: Option<EpisodeId>,
         scratch: &mut [u8],
         mut emit: impl for<'record> FnMut(Episode<'record>),
-    ) -> Result<ScanPage, Error<F::Error>> {
-        use core::ops::Bound;
-        let lower = episode_key(after.unwrap_or(EpisodeId(0)));
-        let start = if after.is_some() {
-            Bound::Excluded(lower.as_slice())
-        } else {
-            Bound::Included(b"e".as_slice())
-        };
-        let tx = self.db.read_transaction().await;
-        let mut cursor = tx
-            .read_range((start, Bound::Excluded(b"f".as_slice())))
-            .await
-            .map_err(|e| match e {
-                ekv::Error::Flash(e) => Error::Storage(e),
-                ekv::Error::Corrupted => Error::Corrupt,
-            })?;
-        let mut key = [0; 9];
+    ) -> Result<ScanPage, Error> {
+        let tx = self.db.begin_read().map_err(db_error)?;
+        let table = tx.open_table(EPISODES).map_err(db_error)?;
+        let lower = after.map_or(Bound::Unbounded, |a| Bound::Excluded(a.0));
+        let range = table.range((lower, Bound::Unbounded)).map_err(db_error)?;
         let mut page = ScanPage {
             resume_after: None,
             has_more: false,
             records: 0,
             bytes: 0,
         };
-        while let Some((k, n)) = cursor
-            .next(&mut key, &mut scratch[..MAX_RECORD_BYTES])
-            .await
-            .map_err(|e| match e {
-                ekv::CursorError::Flash(e) => Error::Storage(e),
-                _ => Error::Corrupt,
-            })?
-        {
-            if page.records == MAX_SCAN_RECORDS || page.bytes + k + n > MAX_SCAN_BYTES {
+        for entry in range {
+            let (key, value) = entry.map_err(db_error)?;
+            let (id, value) = (EpisodeId(key.value()), value.value());
+            let n = value.len();
+            if page.records == MAX_SCAN_RECORDS || page.bytes + KEY_BYTES + n > MAX_SCAN_BYTES {
                 page.has_more = true;
                 break;
             }
-            if k != 9 || key[0] != b'e' {
-                return Err(Error::Corrupt);
-            }
-            let id = EpisodeId(u64::from_be_bytes(
-                key[1..].try_into().map_err(|_| Error::Corrupt)?,
-            ));
+            scratch
+                .get_mut(..n)
+                .filter(|_| n <= MAX_RECORD_BYTES)
+                .ok_or(Error::Corrupt)?
+                .copy_from_slice(value);
             let episode = decode(&scratch[..n]).ok_or(Error::Corrupt)?;
             if episode.id != id || id.0 >= self.next {
                 return Err(Error::Corrupt);
@@ -517,40 +710,36 @@ impl<F: Flash> Catalogue<F> {
             emit(episode);
             page.resume_after = Some(id);
             page.records += 1;
-            page.bytes += k + n;
+            page.bytes += KEY_BYTES + n;
         }
         Ok(page)
     }
-    pub async fn mark_read(
-        &mut self,
-        id: EpisodeId,
-        scratch: &mut [u8],
-    ) -> Result<(), Error<F::Error>> {
+    pub fn mark_read(&mut self, id: EpisodeId, scratch: &mut [u8]) -> Result<(), Error> {
         self.check(scratch)?;
         self.begin()?;
-        let result = self.state_inner(id, None, scratch).await;
+        let result = self.state_inner(id, None, scratch);
         self.finish(result)
     }
-    pub async fn transition_audio(
+    pub fn transition_audio(
         &mut self,
         id: EpisodeId,
         next: AudioState,
         scratch: &mut [u8],
-    ) -> Result<(), Error<F::Error>> {
+    ) -> Result<(), Error> {
         self.check(scratch)?;
         self.begin()?;
-        let result = self.state_inner(id, Some(next), scratch).await;
+        let result = self.state_inner(id, Some(next), scratch);
         self.finish(result)
     }
-    async fn state_inner(
-        &self,
+    fn state_inner(
+        &mut self,
         id: EpisodeId,
         next: Option<AudioState>,
         scratch: &mut [u8],
-    ) -> Result<(), Error<F::Error>> {
-        let (mut state, n) = {
-            let (episode, n) = self.load(id, scratch).await?.ok_or(Error::NotFound)?;
-            (episode.state, n)
+    ) -> Result<(), Error> {
+        let (mut state, n, published) = {
+            let (episode, n) = self.load(id, scratch)?.ok_or(Error::NotFound)?;
+            (episode.state, n, episode.metadata.published)
         };
         let previous = state;
         if let Some(next) = next {
@@ -566,17 +755,95 @@ impl<F: Flash> Catalogue<F> {
         }
         scratch[AUDIO_OFFSET] = state.audio as u8;
         scratch[READ_OFFSET] = u8::from(state.read);
-        let mut tx = self.db.write_transaction().await;
+        let tx = self.write()?;
         if matches!(state.audio, AudioState::Missing | AudioState::Reclaimed) {
-            tx.delete(&audio_key(id)).await.map_err(write_error)?;
+            tx.open_table(AUDIO)
+                .map_err(db_error)?
+                .remove(id.0)
+                .map_err(db_error)?;
         }
-        tx.write(&episode_key(id), &scratch[..n])
-            .await
-            .map_err(write_error)?;
-        tx.commit().await.map_err(commit_error)
+        tx.open_table(EPISODES)
+            .map_err(db_error)?
+            .insert(id.0, &scratch[..n])
+            .map_err(db_error)?;
+        reindex(tx, id, Some((previous, published)), (state, published))?;
+        self.done()
+    }
+    /// The first evictable episode in the reclaim policy's order whose audio
+    /// is not `active`, among the first `MAX_SCAN_RECORDS` index entries:
+    /// one bounded range read, no episode scan (ADR-0022).
+    pub fn first_evictable(
+        &mut self,
+        active: impl Fn(EpisodeId) -> bool,
+    ) -> Result<Option<EpisodeId>, Error> {
+        self.begin()?;
+        let result = self.first_evictable_inner(active);
+        self.finish(result)
+    }
+    fn first_evictable_inner(
+        &self,
+        active: impl Fn(EpisodeId) -> bool,
+    ) -> Result<Option<EpisodeId>, Error> {
+        let tx = self.db.begin_read().map_err(db_error)?;
+        let table = tx.open_table(EVICTABLE).map_err(db_error)?;
+        for entry in table.iter().map_err(db_error)?.take(MAX_SCAN_RECORDS) {
+            let id = EpisodeId(entry.map_err(db_error)?.0.value().2);
+            if id.0 == 0 || id.0 >= self.next {
+                return Err(Error::Corrupt);
+            }
+            if !active(id) {
+                return Ok(Some(id));
+            }
+        }
+        Ok(None)
     }
 }
 
+/// Whether the reclaim policy may evict an episode in `state`.
+pub(crate) fn evictable(state: EpisodeState) -> bool {
+    state.read && state.audio == AudioState::Available
+}
+/// The eviction index key: the reclaim policy's order.
+pub(crate) fn evict_key(id: EpisodeId, published: Option<i64>) -> (u8, i64, u64) {
+    (u8::from(published.is_none()), published.unwrap_or(0), id.0)
+}
+/// Keep `EVICTABLE` in step with an episode write, in its transaction.
+fn reindex(
+    tx: &WriteTransaction,
+    id: EpisodeId,
+    old: Option<(EpisodeState, Option<i64>)>,
+    (state, published): (EpisodeState, Option<i64>),
+) -> Result<(), Error> {
+    let old = old
+        .filter(|&(s, _)| evictable(s))
+        .map(|(_, p)| evict_key(id, p));
+    let new = evictable(state).then(|| evict_key(id, published));
+    if old == new {
+        return Ok(());
+    }
+    let mut table = tx.open_table(EVICTABLE).map_err(db_error)?;
+    if let Some(key) = old {
+        table.remove(key).map_err(db_error)?;
+    }
+    if let Some(key) = new {
+        table.insert(key, ()).map_err(db_error)?;
+    }
+    Ok(())
+}
+
+/// Errors that may follow a write, or that leave the database suspect:
+/// they disable the owner until reopen.
+pub(crate) fn is_fatal(error: Error) -> bool {
+    matches!(
+        error,
+        Error::Storage
+            | Error::Corrupt
+            | Error::Schema
+            | Error::IdentityCollision
+            | Error::Full
+            | Error::Disabled
+    )
+}
 fn valid_transition(state: EpisodeState, next: AudioState) -> bool {
     use AudioState::*;
     if state.audio == next {
@@ -589,7 +856,7 @@ fn valid_transition(state: EpisodeState, next: AudioState) -> bool {
         _ => false,
     }
 }
-fn normalized<E>(mut metadata: EpisodeMetadata<'_>) -> Result<EpisodeMetadata<'_>, Error<E>> {
+fn normalized(mut metadata: EpisodeMetadata<'_>) -> Result<EpisodeMetadata<'_>, Error> {
     metadata.guid = metadata.guid.filter(|guid| !guid.is_empty());
     if metadata.title.is_empty() || metadata.enclosure.is_empty() {
         return Err(Error::InvalidMetadata);
@@ -612,42 +879,12 @@ fn same_identity(a: EpisodeMetadata<'_>, b: EpisodeMetadata<'_>) -> bool {
         _ => false,
     }
 }
-fn episode_key(id: EpisodeId) -> [u8; 9] {
-    let mut key = [0; 9];
-    key[0] = b'e';
-    key[1..].copy_from_slice(&id.0.to_be_bytes());
-    key
-}
-fn identity_key(subscription: SubscriptionId, metadata: EpisodeMetadata<'_>) -> [u8; 42] {
-    let mut key = [0; 42];
-    key[0] = b'i';
-    key[1..9].copy_from_slice(&subscription.0.to_be_bytes());
-    key[9] = if metadata.guid.is_some() { 1 } else { 2 };
-    key[10..].copy_from_slice(&Sha256::digest(
-        metadata.guid.unwrap_or(metadata.enclosure).as_bytes(),
-    ));
-    key
-}
-pub(crate) fn read_error<E>(error: ekv::ReadError<E>) -> Error<E> {
-    match error {
-        ekv::ReadError::Flash(e) => Error::Storage(e),
-        _ => Error::Corrupt,
-    }
-}
-pub(crate) fn write_error<E>(error: ekv::WriteError<E>) -> Error<E> {
-    match error {
-        ekv::WriteError::Flash(e) => Error::Storage(e),
-        ekv::WriteError::Full => Error::Full,
-        ekv::WriteError::TransactionCanceled => Error::Cancelled,
-        _ => Error::Corrupt,
-    }
-}
-pub(crate) fn commit_error<E>(error: ekv::CommitError<E>) -> Error<E> {
-    match error {
-        ekv::CommitError::Flash(e) => Error::Storage(e),
-        ekv::CommitError::TransactionCanceled => Error::Cancelled,
-        _ => Error::Corrupt,
-    }
+fn identity(subscription: SubscriptionId, metadata: EpisodeMetadata<'_>) -> (u64, u8, [u8; 32]) {
+    (
+        subscription.0,
+        if metadata.guid.is_some() { 1 } else { 2 },
+        Sha256::digest(metadata.guid.unwrap_or(metadata.enclosure).as_bytes()).into(),
+    )
 }
 
 struct Writer<'a> {
@@ -806,19 +1043,8 @@ fn decode(bytes: &[u8]) -> Option<Episode<'_>> {
     })
 }
 #[cfg(test)]
+#[path = "catalogue_create_tests.rs"]
+mod create_tests;
+#[cfg(test)]
 #[path = "catalogue_tests.rs"]
 mod tests;
-
-fn sync_key(id: SubscriptionId) -> [u8; 9] {
-    let mut key = [0; 9];
-    key[0] = b's';
-    key[1..].copy_from_slice(&id.0.to_be_bytes());
-    key
-}
-
-fn audio_key(id: EpisodeId) -> [u8; 9] {
-    let mut key = [0; 9];
-    key[0] = b'a';
-    key[1..].copy_from_slice(&id.0.to_be_bytes());
-    key
-}

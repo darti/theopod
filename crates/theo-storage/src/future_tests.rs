@@ -72,3 +72,16 @@ fn allocated_future_retains_its_local_address_across_yields() {
         .unwrap(),
     );
 }
+#[test]
+fn apart_returns_the_output_of_a_yielding_future() {
+    // Regression (t-133): the podcast runtime polls each request arm through
+    // `apart` so its temporaries get a frame of their own on core1's stack.
+    let output = futures::executor::block_on(apart(async {
+        let bytes = [3u8; 1024];
+        let address = bytes.as_ptr();
+        embassy_futures::yield_now().await;
+        assert_eq!(address, bytes.as_ptr());
+        bytes[1023]
+    }));
+    assert_eq!(output, 3);
+}

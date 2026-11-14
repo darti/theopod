@@ -1,6 +1,5 @@
 //! ID-addressed media operations supplied by the unique storage owner.
 use crate::catalogue::{Catalogue, EpisodeId};
-use ekv::flash::Flash;
 pub const FILE_PAGE: usize = 16;
 pub const AUDIO_CHUNK: usize = 4096;
 /// Media capacity and free bytes, as `MediaStore::space` reports them.
@@ -31,7 +30,7 @@ pub fn reserve(capacity: u64) -> u64 {
     async_fn_in_trait,
     reason = "implemented and awaited only inside this firmware's single-threaded storage owner"
 )]
-pub trait MediaStore<F: Flash> {
+pub trait MediaStore {
     /// The store's error.
     type Error;
     /// Whether `error` may have left the store inconsistent, so it is now
@@ -45,53 +44,39 @@ pub trait MediaStore<F: Flash> {
     /// Whether `id`'s audio is leased for playback.
     fn active(&self, id: EpisodeId) -> bool;
     /// Capacity and free bytes.
-    async fn space(&mut self, cat: &mut Catalogue<F>) -> Result<Space, Self::Error>;
+    async fn space(&mut self, cat: &mut Catalogue) -> Result<Space, Self::Error>;
     /// Discard any temporary audio (of `id` or of the previous download) and
     /// start an empty one for `id`. `expected` is the announced length, if
     /// known: a store may reserve that much space up front. Refuses when
     /// published audio of `id` exists.
     async fn reset_temp(
         &mut self,
-        cat: &mut Catalogue<F>,
+        cat: &mut Catalogue,
         id: EpisodeId,
         expected: Option<u64>,
     ) -> Result<(), Self::Error>;
     /// Append at most `AUDIO_CHUNK` bytes to `id`'s temporary audio.
     async fn append_temp(
         &mut self,
-        cat: &mut Catalogue<F>,
+        cat: &mut Catalogue,
         id: EpisodeId,
         bytes: &[u8],
     ) -> Result<(), Self::Error>;
     /// Make the temporary audio durable; returns its length.
-    async fn sync_temp(
-        &mut self,
-        cat: &mut Catalogue<F>,
-        id: EpisodeId,
-    ) -> Result<u64, Self::Error>;
+    async fn sync_temp(&mut self, cat: &mut Catalogue, id: EpisodeId) -> Result<u64, Self::Error>;
     /// Durably turn a previously synced temporary audio into published audio
     /// before returning. Never overwrite published audio.
-    async fn publish_temp(
-        &mut self,
-        cat: &mut Catalogue<F>,
-        id: EpisodeId,
-    ) -> Result<(), Self::Error>;
+    async fn publish_temp(&mut self, cat: &mut Catalogue, id: EpisodeId)
+    -> Result<(), Self::Error>;
     /// Durably delete `id`'s temporary audio; idempotent when absent.
-    async fn unlink_temp(
-        &mut self,
-        cat: &mut Catalogue<F>,
-        id: EpisodeId,
-    ) -> Result<(), Self::Error>;
+    async fn unlink_temp(&mut self, cat: &mut Catalogue, id: EpisodeId) -> Result<(), Self::Error>;
     /// Durably delete `id`'s published audio; idempotent when absent.
-    async fn unlink_audio(
-        &mut self,
-        cat: &mut Catalogue<F>,
-        id: EpisodeId,
-    ) -> Result<(), Self::Error>;
+    async fn unlink_audio(&mut self, cat: &mut Catalogue, id: EpisodeId)
+    -> Result<(), Self::Error>;
     /// Length of `id`'s published audio, if any.
     async fn audio_len(
         &mut self,
-        cat: &mut Catalogue<F>,
+        cat: &mut Catalogue,
         id: EpisodeId,
     ) -> Result<Option<u64>, Self::Error>;
     /// Bounded sorted unique local IDs holding temporary or published audio.
@@ -99,15 +84,35 @@ pub trait MediaStore<F: Flash> {
     /// remote paths.
     async fn list_ids(
         &mut self,
-        cat: &mut Catalogue<F>,
+        cat: &mut Catalogue,
         after: Option<EpisodeId>,
         out: &mut [EpisodeId; FILE_PAGE],
     ) -> Result<usize, Self::Error>;
 }
 #[derive(Debug)]
-pub enum MediaError<C, M> {
-    Catalogue(crate::catalogue::Error<C>),
+pub enum MediaError<M> {
+    Catalogue(crate::catalogue::Error),
     Media(M),
     InvalidState,
     InvalidInput,
+}
+
+/// Close a batch begun with `Catalogue::begin_batch` around `result`: one
+/// commit when it succeeded, or failed with an error detected before any
+/// change (the earlier operations' writes are kept, as without a batch). A
+/// failure to commit, or held writes dropped after a fatal error, is the
+/// error (it disabled the catalogue).
+pub(crate) fn end_batch<M: MediaStore, T>(
+    cat: &mut Catalogue,
+    result: Result<T, MediaError<M::Error>>,
+) -> Result<T, MediaError<M::Error>> {
+    let commit = match &result {
+        Ok(_) | Err(MediaError::InvalidState | MediaError::InvalidInput) => true,
+        Err(MediaError::Catalogue(e)) => !crate::catalogue::is_fatal(*e),
+        Err(MediaError::Media(e)) => !M::is_fatal(e),
+    };
+    match (cat.end_batch(commit), result) {
+        (Ok(()), result) => result,
+        (Err(error), _) => Err(MediaError::Catalogue(error)),
+    }
 }

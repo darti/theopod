@@ -1,7 +1,10 @@
-//! Core 1 owns LittleFS; core 0 keeps the async SD HAL device. Only owned messages cross
-//! cores. Its synchronous callbacks may wait for async I2C while core 0 keeps
-//! running touch/IMU tasks that can release that bus (ADR-0012).
+//! Core 1 owns the card and everything stored on it: it identifies the card
+//! over blocking SPI3, then runs LittleFS, the catalogue and the media units
+//! without waiting for core 0 (ADR-0023). Only identification asks core 0 to
+//! drive chip select over the shared I2C bus; core 0 sends owned requests and
+//! receives owned replies.
 
+use aligned::{A4, Aligned};
 use alloc::{rc::Rc, vec::Vec};
 use allocator_api2::{alloc::AllocError, boxed::Box};
 #[cfg(feature = "sd-check")]
@@ -21,7 +24,8 @@ use esp_hal::{
 use littlefs_rust::{Error, Filesystem};
 use static_cell::{ConstStaticCell, StaticCell};
 use theo_podcasts::{
-    catalogue::Catalogue,
+    catalogue::{Catalogue, Error as CatalogueError},
+    provision::CardId,
     runtime::{self, Runtime},
     unit_media::{UnitError, UnitMedia},
 };
@@ -30,25 +34,39 @@ use theo_storage::{
     littlefs::{self, Geometry, LogTail, RequestGuard, SectorIo, SectorStorage},
 };
 use theo_storage::{
-    card_layout::CardLayout,
-    page_store::{PageError, PageStore},
-    regions::{self, AsyncRegion, RegionIo},
+    card_layout::{CardLayout, LayoutError},
+    redb_backend::{BackendError, RegionBackend},
+    regions::{self, RegionIo},
     scope::{OWNER_MARGIN_MS, ReplyKind, RequestKind, after_failure, failure_scope},
 };
 
-use super::{SdInitError, io};
-use theo_storage::sector_bus::{Operation, Request as SectorRequest, SectorBus, SectorClient};
+use super::{HalDevice, SdInitError};
 
 const IO_BUDGET: Duration = Duration::from_millis(500);
+/// Budget of one podcast (`Domain`) request: at most one catalogue commit
+/// (ADR-0022). User-approved 2026-11-12: cold-cache redb commits measured
+/// ~250 commands (2 ms each), at the 500 ms `IO_BUDGET`; 1 s leaves room.
+/// Log append, tail, rotation and mount keep their budgets.
+pub(in crate::device) const PODCAST_BUDGET: Duration = Duration::from_secs(1);
 /// Budget of the mount request: descriptors, log mount and catalogue open.
 const MOUNT_BUDGET: Duration = Duration::from_secs(2);
 // The owner's margin must leave it time to work within every request budget.
 const _: () = assert!(
     0 < OWNER_MARGIN_MS
         && OWNER_MARGIN_MS < IO_BUDGET.as_millis()
+        && OWNER_MARGIN_MS < PODCAST_BUDGET.as_millis()
         && OWNER_MARGIN_MS < MOUNT_BUDGET.as_millis()
 );
-pub(super) static SECTORS: SectorBus = SectorBus::new();
+/// Set once the card or a request failed: storage stays offline until
+/// reboot (ADR-0010). Shared by core 0's requests and core 1's owner.
+static DISABLED: AtomicBool = AtomicBool::new(false);
+fn is_disabled() -> bool {
+    DISABLED.load(Ordering::Acquire)
+}
+/// Identification's outcome, from core 1 to `init` on core 0.
+static IDENTIFIED: Signal<CriticalSectionRawMutex, Result<(), SdInitError>> = Signal::new();
+/// Identification's own budget; `init`'s caller allows 3 s in all.
+const IDENTIFY_BUDGET: Duration = Duration::from_millis(2500);
 static COMMANDS: Channel<CriticalSectionRawMutex, Request, 1> = Channel::new();
 static REPLY: Signal<CriticalSectionRawMutex, Result<Reply, Error>> = Signal::new();
 const STACK_SIZE: usize = 48 * 1024;
@@ -121,13 +139,13 @@ pub struct SdStorage {
 
 impl Drop for SdStorage {
     fn drop(&mut self) {
-        SECTORS.disable();
+        disable();
     }
 }
 
 impl SdStorage {
     async fn request(&mut self, command: Command, budget: Duration) -> Result<Reply, Error> {
-        let guard = RequestGuard::begin(SECTORS.poison_flag())?;
+        let guard = RequestGuard::begin(&DISABLED)?;
         let deadline = Instant::now() + budget;
         let result = with_deadline(deadline, async {
             COMMANDS.send(Request { command, deadline }).await;
@@ -147,9 +165,12 @@ impl SdStorage {
     }
 }
 
-/// Identify the card on core 0, then start the isolated filesystem owner.
+/// Start core 1, which identifies the card then runs the storage owner.
+///
+/// Core 0 drives chip select over the shared I2C bus while core 1
+/// identifies; afterwards the card stays selected and core 1 drives SPI3
+/// alone (ADR-0023).
 pub async fn init(
-    spawner: embassy_executor::Spawner,
     core: (CPU_CTRL<'static>, FROM_CPU_INTR1<'static>),
     spi: SPI3<'static>,
     clk: GPIO2<'static>,
@@ -157,26 +178,53 @@ pub async fn init(
     miso: GPIO3<'static>,
     expander: &'static crate::device::Expander,
 ) -> Result<SdStorage, SdInitError> {
-    let guard = RequestGuard::begin(SECTORS.poison_flag()).map_err(|_| SdInitError::Host)?;
-    let deadline = Instant::now() + Duration::from_secs(3);
-    let (device, sectors) =
-        with_deadline(deadline, super::init_card(spi, clk, mosi, miso, expander))
-            .await
-            .map_err(|_| SdInitError::Card(sdio::MmcError::Timeout))??;
-    let geometry =
-        Geometry::new(sectors).map_err(|_| SdInitError::Card(sdio::MmcError::BlockSize))?;
-    spawner.spawn(io::serve(device).expect("SD I/O once"));
+    let guard = RequestGuard::begin(&DISABLED).map_err(|_| SdInitError::Host)?;
     let (cpu, interrupt) = core;
     let stack = STACK.take();
     let stack_bottom = stack.bottom() as usize;
     esp_rtos::start_second_core(cpu, interrupt, stack, move || {
+        let deadline = Instant::now() + IDENTIFY_BUDGET;
+        let identified = super::identify(spi, clk, mosi, miso, deadline).and_then(
+            |(device, sectors, card_id)| {
+                Geometry::new(sectors)
+                    .map(|geometry| (device, geometry, sectors, card_id))
+                    .map_err(|_| SdInitError::Card(sdio::MmcError::BlockSize))
+            },
+        );
+        let (device, geometry, sectors, card_id) = match identified {
+            Ok(owner) => owner,
+            Err(error) => {
+                IDENTIFIED.signal(Err(error));
+                return;
+            }
+        };
+        // Core 0 gave up (its caller's timeout): stay offline.
+        if is_disabled() {
+            return;
+        }
+        IDENTIFIED.signal(Ok(()));
         static EXECUTOR: StaticCell<esp_rtos::embassy::Executor> = StaticCell::new();
         EXECUTOR
             .init(esp_rtos::embassy::Executor::new())
             .run(|spawner| {
-                spawner.spawn(worker(geometry, sectors, stack_bottom).expect("SD owner once"));
+                spawner.spawn(
+                    worker(device, geometry, sectors, card_id, stack_bottom)
+                        .expect("SD owner once"),
+                );
             });
     });
+    let deadline = Instant::now() + IDENTIFY_BUDGET + Duration::from_millis(OWNER_MARGIN_MS);
+    let outcome = with_deadline(
+        deadline,
+        embassy_futures::select::select(super::serve_chip_select(expander), IDENTIFIED.wait()),
+    )
+    .await;
+    match outcome {
+        Ok(embassy_futures::select::Either::Second(Ok(()))) => {}
+        Ok(embassy_futures::select::Either::Second(Err(error))) => return Err(error),
+        Ok(embassy_futures::select::Either::First(never)) => match never {},
+        Err(_) => return Err(SdInitError::Card(sdio::MmcError::Timeout)),
+    }
     guard.complete().map_err(|_| SdInitError::Host)?;
     Ok(SdStorage { _private: () })
 }
@@ -212,17 +260,31 @@ pub async fn append_log<const N: usize>(
 }
 
 pub fn disable() {
-    SECTORS.disable();
+    DISABLED.store(true, Ordering::Release);
+}
+
+/// Whether this build provisions layout v3 (ADR-0021).
+///
+/// Core0 must then send no request: the run holds the owner for minutes,
+/// and a timed-out request would poison the bus mid-run.
+pub const fn provisions_v3() -> bool {
+    #[cfg(feature = "sd-provision")]
+    return matches!(provision::REQUEST, provision::Request::V3(_));
+    #[cfg(not(feature = "sd-provision"))]
+    false
 }
 pub fn guard() -> Result<RequestGuard<'static>, Error> {
-    RequestGuard::begin(SECTORS.poison_flag())
+    RequestGuard::begin(&DISABLED)
 }
 
 pub async fn domain(
     storage: &mut SdStorage,
     command: PodcastRequest,
 ) -> Result<runtime::Reply, Error> {
-    match storage.request(Command::Domain(command), IO_BUDGET).await? {
+    match storage
+        .request(Command::Domain(command), PODCAST_BUDGET)
+        .await?
+    {
         Reply::Domain(reply) => Ok(reply),
         _ => Err(Error::Io),
     }
@@ -245,143 +307,19 @@ pub async fn report_log_tail(storage: &mut SdStorage) -> Result<(), Error> {
     Ok(())
 }
 
-/// Distinct sectors traced per request by the `sd-check` read histogram.
-#[cfg(feature = "sd-check")]
-const TRACED_SECTORS: usize = 256;
-
-#[cfg(feature = "sd-check")]
-struct Measurements {
-    stack_bottom: usize,
-    min_sampled_headroom: Cell<usize>,
-    reads: Cell<usize>,
-    writes: Cell<usize>,
-    syncs: Cell<usize>,
-    io_us: Cell<u64>,
-    max_io_us: Cell<u64>,
-    read_sectors: RefCell<Vec<(u32, usize)>>,
-    untracked_reads: Cell<usize>,
-}
-
-#[cfg(feature = "sd-check")]
-impl Measurements {
-    // Sample a synchronous callback's stack address without reading memory
-    // owned by the running stack. This is sampled margin, not a high-water scan.
-    #[inline(never)]
-    fn sample(&self) {
-        let marker = 0u8;
-        let address = core::hint::black_box(&marker) as *const u8 as usize;
-        let margin = address
-            .checked_sub(self.stack_bottom)
-            .filter(|margin| *margin <= STACK_SIZE)
-            .unwrap_or(0);
-        self.min_sampled_headroom
-            .set(self.min_sampled_headroom.get().min(margin));
-    }
-}
-
-struct CardIo {
-    sectors: u64,
-    client: SectorClient<'static>,
-    #[cfg(feature = "sd-check")]
-    measurements: Rc<Measurements>,
-    /// The request's (hard) deadline: bounds and aborts in-flight sector RPCs.
-    deadline: Rc<Cell<Instant>>,
-    /// `deadline - OWNER_MARGIN_MS`: no new sector RPC starts after it.
-    soft: Rc<Cell<Instant>>,
-}
-
-impl CardIo {
-    /// Runs between sector RPCs, when none is in flight, so passing the soft
-    /// deadline fails only the current scope: no late reply can exist and
-    /// the bus stays live (t-121). A disabled bus fails everything.
-    fn ensure_live(&self) -> Result<(), Error> {
-        #[cfg(feature = "sd-check")]
-        self.measurements.sample();
-        if SECTORS.is_disabled() || Instant::now() >= self.soft.get() {
-            Err(Error::Io)
-        } else {
-            Ok(())
-        }
-    }
-}
-
-impl CardIo {
-    fn request(&mut self, operation: Operation) -> Result<[u8; 512], Error> {
-        self.ensure_live()?;
-        #[cfg(feature = "sd-check")]
-        let started = {
-            let count = match &operation {
-                Operation::Read(_) => &self.measurements.reads,
-                Operation::Write(..) => &self.measurements.writes,
-                Operation::Sync => &self.measurements.syncs,
-            };
-            count.set(count.get() + 1);
-            if let Operation::Read(sector) = &operation {
-                let mut trace = self.measurements.read_sectors.borrow_mut();
-                if let Some((_, hits)) = trace.iter_mut().find(|(key, _)| key == sector) {
-                    *hits += 1;
-                } else if trace.len() < TRACED_SECTORS {
-                    trace.push((*sector, 1));
-                } else {
-                    self.measurements
-                        .untracked_reads
-                        .set(self.measurements.untracked_reads.get() + 1);
-                }
-            }
-            Instant::now()
-        };
-        let deadline = self.deadline.get();
-        // Core 0's executor runs the async SD/I2C service while this core
-        // waits. Its channels carry owned buffers only.
-        let result = self.client.exchange_blocking(
-            SectorRequest {
-                operation,
-                deadline_ticks: deadline.as_ticks(),
-            },
-            || SECTORS.is_disabled() || Instant::now() >= deadline,
-        );
-        #[cfg(feature = "sd-check")]
-        {
-            let elapsed = started.elapsed().as_micros();
-            self.measurements
-                .io_us
-                .set(self.measurements.io_us.get() + elapsed);
-            self.measurements
-                .max_io_us
-                .set(self.measurements.max_io_us.get().max(elapsed));
-        }
-        result
-    }
-}
-
-impl SectorIo for CardIo {
-    fn read_sector(&mut self, sector: u32, out: &mut [u8; 512]) -> Result<(), Error> {
-        out.copy_from_slice(&self.request(Operation::Read(sector))?);
-        Ok(())
-    }
-    fn write_sector(&mut self, sector: u32, data: &[u8; 512]) -> Result<(), Error> {
-        self.request(Operation::Write(sector, *data)).map(|_| ())
-    }
-    fn sync(&mut self) -> Result<(), Error> {
-        self.request(Operation::Sync).map(|_| ())
-    }
-    fn check(&mut self) -> Result<(), Error> {
-        self.ensure_live()
-    }
-    /// Card/HAL errors and aborted exchanges disable the bus; a passed soft
-    /// deadline does not.
-    fn device_failed(&self) -> bool {
-        SECTORS.is_disabled()
-    }
-}
-
 #[embassy_executor::task]
-async fn worker(geometry: Geometry, sectors: u64, stack_bottom: usize) {
+async fn worker(
+    device: HalDevice,
+    geometry: Geometry,
+    sectors: u64,
+    card_id: Option<CardId>,
+    stack_bottom: usize,
+) {
     // Keep Embassy's task header/atomic wake state in internal memory. Only
     // the large, pinned domain future is placed externally; cache-sensitive
     // HAL and sector I/O tasks retain their existing internal storage.
     match theo_storage::future::try_pin_in(
-        move || owner(geometry, sectors, stack_bottom),
+        move || owner(device, geometry, sectors, card_id, stack_bottom),
         &esp_alloc::ExternalMemory,
         114000,
     ) {
@@ -393,12 +331,18 @@ async fn worker(geometry: Geometry, sectors: u64, stack_bottom: usize) {
             future.await;
         }
         Err(_) => {
-            SECTORS.disable();
+            disable();
             log::warn!("storage offline: PSRAM owner allocation failed");
         }
     }
 }
-async fn owner(geometry: Geometry, sectors: u64, _stack_bottom: usize) {
+async fn owner(
+    device: HalDevice,
+    geometry: Geometry,
+    sectors: u64,
+    card_id: Option<CardId>,
+    _stack_bottom: usize,
+) {
     #[cfg(feature = "sd-check")]
     let measurements = Rc::new(Measurements {
         stack_bottom: _stack_bottom,
@@ -413,11 +357,20 @@ async fn owner(geometry: Geometry, sectors: u64, _stack_bottom: usize) {
     });
     let deadline = Rc::new(Cell::new(Instant::now()));
     let soft = Rc::new(Cell::new(Instant::now()));
+    let Ok(staged) = Box::try_new_in(
+        [Aligned::<A4, _>([0u8; 512]); STAGED_SECTORS],
+        &esp_alloc::ExternalMemory,
+    ) else {
+        disable();
+        log::warn!("storage offline: PSRAM staging allocation failed");
+        return;
+    };
     let mut card = Some(CardIo {
         sectors,
+        device,
+        staged,
         #[cfg(feature = "sd-check")]
         measurements: measurements.clone(),
-        client: SECTORS.take_client().expect("one sector client"),
         deadline: deadline.clone(),
         soft: soft.clone(),
     });
@@ -427,6 +380,17 @@ async fn owner(geometry: Geometry, sectors: u64, _stack_bottom: usize) {
     if scratch.try_reserve_exact(4096).is_ok() {
         scratch.resize(4096, 0);
     }
+    // Explicit provisioning build only: runs before any request is served.
+    #[cfg(feature = "sd-provision")]
+    if let Some(io) = card.as_mut()
+        && provision::run(io, card_id).await
+    {
+        // The card was being erased: keep it offline for this boot; the
+        // normal firmware mounts the new layout.
+        card = None;
+    }
+    #[cfg(not(feature = "sd-provision"))]
+    let _ = card_id;
 
     loop {
         let request = COMMANDS.receive().await;
@@ -459,14 +423,14 @@ async fn owner(geometry: Geometry, sectors: u64, _stack_bottom: usize) {
             measurements.untracked_reads.set(0);
             Instant::now()
         };
-        let result = if SECTORS.is_disabled() || Instant::now() >= soft.get() {
+        let result = if is_disabled() || Instant::now() >= soft.get() {
             Err(Error::Io)
         } else {
             match request.command {
                 Command::Mount => match card.take() {
                     Some(card) => {
                         let allocated = !scratch.is_empty();
-                        match apart(|| mount_owner(card, geometry, &mut podcasts, allocated))
+                        match in_psram(|| mount_owner(card, geometry, &mut podcasts, allocated))
                             .await
                             .unwrap_or(Err(Error::Io))
                         {
@@ -481,7 +445,7 @@ async fn owner(geometry: Geometry, sectors: u64, _stack_bottom: usize) {
                 },
                 Command::Domain(command) => match podcasts.as_mut() {
                     Some(owner) => {
-                        match apart(|| owner.handle(Box::into_inner(command), &mut scratch))
+                        match in_psram(|| owner.handle(Box::into_inner(command), &mut scratch))
                             .await
                             // No PSRAM for this request's state: refuse it, the runtime is intact.
                             .unwrap_or(Err(runtime::Error::Invalid))
@@ -531,7 +495,7 @@ async fn owner(geometry: Geometry, sectors: u64, _stack_bottom: usize) {
                 },
             }
         };
-        let poisoned = SECTORS.is_disabled();
+        let poisoned = is_disabled();
         let result = if result.is_ok() && !poisoned {
             result
         } else {
@@ -539,14 +503,13 @@ async fn owner(geometry: Geometry, sectors: u64, _stack_bottom: usize) {
             // completes and only a bus failure poisons the session.
             let effect = after_failure(failure_scope(poisoned, kind));
             if effect.disable_bus {
-                SECTORS.disable();
+                disable();
                 card = None;
             }
             if effect.drop_logs {
                 // On a legacy whole-card mount the log volume holds the only
-                // `CardIo`: dropping it drops the `SectorClient`, which
-                // disables the bus, as losing the last live scope does on a
-                // v2 card.
+                // `CardIo`: dropping it disables the card, as losing the last live scope does on a
+                // region card.
                 volume = None;
             }
             if effect.drop_podcasts {
@@ -634,11 +597,10 @@ pub async fn test_rotation(storage: &mut SdStorage) -> Result<(), Error> {
     Ok(())
 }
 
-type DbFlash = PageStore<AsyncRegion<CardIo>, &'static esp_alloc::ExternalMemory>;
 type MediaStorage = SectorStorage<MediaIo, &'static esp_alloc::ExternalMemory>;
 type MediaFs = Filesystem<MediaStorage>;
 type UnitStore = UnitMedia<RegionIo<CardIo>, &'static esp_alloc::ExternalMemory>;
-type PodcastOwner = Runtime<DbFlash, UnitStore>;
+type PodcastOwner = Runtime<UnitStore>;
 type Psram<T> = Box<T, &'static esp_alloc::ExternalMemory>;
 /// Largest one-shot future the owner places in PSRAM (`handle`'s is ~76 KB).
 const STEP_FUTURE_BYTES: usize = 96 * 1024;
@@ -683,8 +645,8 @@ impl SectorIo for MediaIo {
 /// mounted; the mount fails only on a descriptor error or a poisoned bus.
 ///
 /// Core1's 48 KiB stack cannot hold the podcast state (t-121): the runtime
-/// (33 KB) and the catalogue (10 KB) are built in PSRAM, never moved by
-/// value, and each large step runs through [`apart`].
+/// is built in PSRAM, never moved by value, and each large step runs
+/// through [`in_psram`].
 async fn mount_owner(
     mut card: CardIo,
     legacy: Geometry,
@@ -696,7 +658,21 @@ async fn mount_owner(
     card.read_sector(0, &mut first)?;
     card.read_sector(8, &mut second)?;
     // Actual capacity is retained, not rounded geometry, for descriptor checks.
-    let layout = CardLayout::select(&first, &second, card.sectors).map_err(|_| Error::Corrupt)?;
+    let layout = match CardLayout::select(&first, &second, card.sectors) {
+        Ok(layout) => layout,
+        Err(error) => {
+            match error {
+                LayoutError::Obsolete => log::warn!(
+                    "microSD layout is older than v3: re-provision with `just sd-provision-v3`"
+                ),
+                LayoutError::Version => {
+                    log::warn!("microSD layout version is unknown to this firmware")
+                }
+                _ => log::warn!("microSD layout refused: {error:?}"),
+            }
+            return Err(Error::Corrupt);
+        }
+    };
     let (io, geometry, database) = match layout {
         None => (MediaIo::Legacy(card), Ok(legacy), None),
         Some(layout) => {
@@ -722,7 +698,7 @@ async fn mount_owner(
         Some(_) => log::warn!("podcasts offline: PSRAM scratch allocation failed"),
         None => log::info!("podcasts offline: existing whole-card LittleFS preserved"),
     }
-    if SECTORS.is_disabled() {
+    if is_disabled() {
         return Err(Error::Io);
     }
     Ok(logs)
@@ -744,7 +720,7 @@ fn mount_logs(
     let storage = SectorStorage::try_new_in(io, geometry, &esp_alloc::ExternalMemory)?;
     // Explicit provisioning remains legacy-only; normal boot never formats.
     #[cfg(feature = "sd-provision")]
-    if option_env!("THEO_SD_PROVISION") == Some("format") && legacy_card {
+    if provision::REQUEST == provision::Request::Format && legacy_card {
         let (fs, _) = littlefs::provision_once(storage, geometry)?;
         littlefs::prepare_for_writes(&fs)?;
         return Ok(fs);
@@ -753,47 +729,27 @@ fn mount_logs(
 }
 
 /// Open the catalogue and media units; a failure leaves podcasts offline.
+///
+/// The catalogue (redb, its page cache in PSRAM) and the unit table open
+/// synchronously, each through [`in_psram`] so their frames stay off the
+/// owner's; the runtime is then built in PSRAM by [`install`].
 async fn open_podcasts(
     db: RegionIo<CardIo>,
     media: RegionIo<CardIo>,
     layout: CardLayout,
     slot: &mut Option<Psram<PodcastOwner>>,
 ) {
-    let Ok(mut catalogue) = Box::try_new_in(None, &esp_alloc::ExternalMemory) else {
-        log::warn!("podcasts offline: PSRAM catalogue allocation failed");
+    let started = Instant::now();
+    let Ok(opened) = in_psram(|| async { open_catalogue(db, layout) }).await else {
+        log::warn!("podcasts offline: PSRAM open state allocation failed");
         return;
     };
-    let opened = apart(|| async {
-        let store = PageStore::open_in(
-            AsyncRegion::new(db),
-            layout.pages(),
-            &esp_alloc::ExternalMemory,
-        )
-        .await;
-        match store {
-            Ok(store) => Catalogue::open_into(&mut catalogue, store)
-                .await
-                .map_err(|error| log::warn!("podcasts offline: catalogue open failed: {error:?}")),
-            Err(PageError::Allocation) => {
-                log::warn!("podcasts offline: PSRAM page store allocation failed");
-                Err(())
-            }
-            Err(error) => {
-                log::warn!("podcasts offline: page store open failed: {error:?}");
-                Err(())
-            }
-        }
-    })
-    .await;
-    let Some(open) = catalogue.as_mut() else {
-        if opened.is_err() {
-            log::warn!("podcasts offline: PSRAM open state allocation failed");
-        }
+    let Some(mut catalogue) = opened else {
         return;
     };
-    let units = apart(|| {
+    let units = in_psram(|| async {
         UnitMedia::open_in(
-            open,
+            &mut catalogue,
             media,
             layout.media_units(),
             &esp_alloc::ExternalMemory,
@@ -801,7 +757,14 @@ async fn open_podcasts(
     })
     .await;
     match units {
-        Ok(Ok(units)) => install(slot, &mut catalogue, units),
+        Ok(Ok(units)) => {
+            if install(slot, catalogue, units) {
+                log::info!(
+                    "podcasts online: catalogue opened in {} ms",
+                    started.elapsed().as_millis()
+                );
+            }
+        }
         Ok(Err(UnitError::Alloc)) | Err(_) => {
             log::warn!("podcasts offline: PSRAM media unit allocation failed")
         }
@@ -809,26 +772,73 @@ async fn open_podcasts(
     }
 }
 
-/// Build the runtime in PSRAM; out of line so its temporaries stay off the
-/// owner's frame.
+/// A corrupt catalogue is never repaired at boot (ADR-0015); the explicit
+/// provisioning build accepts such a v3 card.
+const CORRUPT_HINT: &str = "Corrupt; re-provision (erases the card) with `just sd-provision-v3`";
+
+/// Open the redb catalogue on the database region; `None` (logged) leaves
+/// podcasts offline.
 #[inline(never)]
-fn install(
-    slot: &mut Option<Psram<PodcastOwner>>,
-    catalogue: &mut Option<Catalogue<DbFlash>>,
-    units: UnitStore,
-) {
-    let Some(catalogue) = catalogue.take() else {
-        return;
+fn open_catalogue(db: RegionIo<CardIo>, layout: CardLayout) -> Option<Catalogue> {
+    let sectors = layout.database().sectors();
+    // SAFETY: the storage owner creates, uses and drops the catalogue and
+    // this backend on core1 only; `PodcastOwner` holds `Rc`s, so it is
+    // `!Send` and the compiler keeps the database on this core.
+    let backend = match unsafe { RegionBackend::new(db, sectors) } {
+        Ok(backend) => backend,
+        Err(BackendError::Corrupt) => {
+            log::warn!("podcasts offline: database region unusable: {CORRUPT_HINT}");
+            return None;
+        }
+        Err(error) => {
+            log::warn!("podcasts offline: database region unusable: {error:?}");
+            return None;
+        }
     };
+    match Catalogue::open(backend) {
+        Ok(catalogue) => Some(catalogue),
+        Err(CatalogueError::Corrupt) => {
+            log::warn!("podcasts offline: catalogue open failed: {CORRUPT_HINT}");
+            None
+        }
+        Err(error) => {
+            log::warn!("podcasts offline: catalogue open failed: {error:?}");
+            None
+        }
+    }
+}
+
+/// Build the runtime in PSRAM; out of line so its temporaries stay off the
+/// owner's frame. Whether the runtime was installed.
+#[inline(never)]
+fn install(slot: &mut Option<Psram<PodcastOwner>>, catalogue: Catalogue, units: UnitStore) -> bool {
     match Box::try_new_uninit_in(&esp_alloc::ExternalMemory) {
-        Ok(memory) => *slot = Some(Box::write(memory, Runtime::new(catalogue, units))),
-        Err(_) => log::warn!("podcasts offline: PSRAM runtime allocation failed"),
+        Ok(memory) => {
+            *slot = Some(Box::write(memory, Runtime::new(catalogue, units)));
+            true
+        }
+        Err(_) => {
+            log::warn!("podcasts offline: PSRAM runtime allocation failed");
+            false
+        }
     }
 }
 
 /// Await `make()`'s future from PSRAM, polled in a frame of its own: built
 /// in place it is neither moved through core1's stack nor inlined into the
 /// owner's frame. `Err` when PSRAM cannot hold it.
-async fn apart<F: core::future::Future>(make: impl FnOnce() -> F) -> Result<F::Output, AllocError> {
+async fn in_psram<F: core::future::Future>(
+    make: impl FnOnce() -> F,
+) -> Result<F::Output, AllocError> {
     theo_storage::future::run_in(make, &esp_alloc::ExternalMemory, STEP_FUTURE_BYTES).await
 }
+
+#[path = "sd_card_io.rs"]
+mod card_io;
+use card_io::{CardIo, STAGED_SECTORS};
+#[cfg(feature = "sd-check")]
+use card_io::{Measurements, TRACED_SECTORS};
+
+#[cfg(feature = "sd-provision")]
+#[path = "sd_provision.rs"]
+mod provision;

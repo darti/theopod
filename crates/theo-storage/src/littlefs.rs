@@ -133,6 +133,19 @@ impl Geometry {
 pub trait SectorIo {
     fn read_sector(&mut self, sector: u32, out: &mut [u8; SECTOR_SIZE]) -> Result<(), Error>;
     fn write_sector(&mut self, sector: u32, data: &[u8; SECTOR_SIZE]) -> Result<(), Error>;
+    /// Writes whole consecutive sectors from `first`, in order.
+    ///
+    /// `data` must be a nonzero number of whole sectors, else `Invalid`
+    /// before any I/O. The default writes them one by one; a device that
+    /// can write several sectors in one command (SD CMD25) overrides it.
+    /// A failure may leave any prefix of the batch written.
+    fn write_sectors(&mut self, first: u32, data: &[u8]) -> Result<(), Error> {
+        whole_sectors(data)?;
+        for (i, sector) in data.as_chunks::<SECTOR_SIZE>().0.iter().enumerate() {
+            self.write_sector(first.checked_add(i as u32).ok_or(Error::Invalid)?, sector)?;
+        }
+        Ok(())
+    }
     fn sync(&mut self) -> Result<(), Error>;
     /// Fail without device I/O once the current operation may not proceed.
     ///
@@ -145,6 +158,14 @@ pub trait SectorIo {
     fn device_failed(&self) -> bool {
         true
     }
+}
+
+/// Sectors in `data`, which must be a nonzero number of whole sectors.
+pub fn whole_sectors(data: &[u8]) -> Result<u32, Error> {
+    if data.is_empty() || !data.len().is_multiple_of(SECTOR_SIZE) {
+        return Err(Error::Invalid);
+    }
+    u32::try_from(data.len() / SECTOR_SIZE).map_err(|_| Error::Invalid)
 }
 
 // Enough for two metadata blocks plus a file tail and verification reads.

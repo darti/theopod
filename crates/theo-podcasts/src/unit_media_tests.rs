@@ -1,31 +1,23 @@
 use super::*;
 use crate::{
     catalogue::*,
-    download::{DownloadJob, DownloadSession, Start},
+    download::{DownloadJob, Start},
     media_test_support::Disk,
-    test_support::{HostFile, Image},
+    media_test_support::start_all,
+    test_support::Image,
     units::{MAX_EXTENTS, UNIT_BYTES},
 };
 use allocator_api2::alloc::Global;
-use core::cell::Cell;
 use futures::executor::block_on;
 use std::{collections::BTreeSet, vec::Vec};
-use theo_storage::page_store::PageStore;
+use theo_storage::test_disk::TestDisk;
 
-type Cat = Catalogue<PageStore<HostFile>>;
+type Cat = Catalogue;
 
 const SECTORS: u32 = UNIT_SECTORS;
 
-/// A catalogue image without `fsync`: writes still reach the file for reopen,
-/// and these tests issue thousands of commits.
-fn image(pages: usize) -> Image {
-    let image = Image::with_pages(pages);
-    image.sync_to_disk.set(false);
-    image
-}
-
-async fn open<D: SectorIo>(cat: &mut Cat, disk: D, units: u32) -> UnitMedia<D, Global> {
-    UnitMedia::open_in(cat, disk, units, Global).await.unwrap()
+fn open<D: SectorIo>(cat: &mut Cat, disk: D, units: u32) -> UnitMedia<D, Global> {
+    UnitMedia::open_in(cat, disk, units, Global).unwrap()
 }
 
 async fn append_all<D: SectorIo>(
@@ -67,9 +59,9 @@ async fn fill<D: SectorIo>(
     fill_as(cat, media, id, len, None).await;
 }
 
-async fn used(cat: &mut Cat, units: u32) -> u32 {
+fn used(cat: &mut Cat, units: u32) -> u32 {
     let mut table = UnitTable::new_in(units, Global).unwrap();
-    cat.load_units(&mut table).await.unwrap();
+    cat.load_units(&mut table).unwrap();
     table.used()
 }
 
@@ -93,7 +85,7 @@ async fn assert_bitmap_matches_records<D: SectorIo>(
             break;
         }
         for &id in &ids[..n] {
-            let record = cat.unit_record(id, &mut buf).await.unwrap().unwrap();
+            let record = cat.unit_record(id, &mut buf).unwrap().unwrap();
             for extent in record.extents() {
                 for unit in extent.start..extent.end().unwrap() {
                     assert!(owned.insert(unit), "unit {unit} owned twice");
@@ -104,7 +96,7 @@ async fn assert_bitmap_matches_records<D: SectorIo>(
     }
     let units = media.table.units();
     let mut loaded = UnitTable::new_in(units, Global).unwrap();
-    cat.load_units(&mut loaded).await.unwrap();
+    cat.load_units(&mut loaded).unwrap();
     let persisted: BTreeSet<u32> = (0..units).filter(|&u| loaded.is_allocated(u)).collect();
     let ram: BTreeSet<u32> = (0..units)
         .filter(|&u| media.table.is_allocated(u))
@@ -122,13 +114,11 @@ fn counters<D: SectorIo>(
     media: &UnitMedia<D, Global>,
     disk: (usize, usize),
 ) -> [usize; 5] {
-    [
-        image.reads.get(),
-        image.writes.get(),
-        media.commits,
-        disk.0,
-        disk.1,
-    ]
+    let (reads, writes) = {
+        let state = image.disk.state();
+        (state.reads, state.writes)
+    };
+    [reads, writes, media.commits, disk.0, disk.1]
 }
 
 fn delta(before: [usize; 5], after: [usize; 5]) -> [usize; 5] {
@@ -146,9 +136,9 @@ fn space_and_append_cost_is_independent_of_stored_media() {
     let mut costs = Vec::new();
     for episodes in [1u64, 16, 64] {
         block_on(async {
-            let image = image(256);
-            let mut cat = image.create().await;
-            let mut media = open(&mut cat, Disk::counting(UNITS * SECTORS), UNITS).await;
+            let image = Image::new();
+            let mut cat = image.create();
+            let mut media = open(&mut cat, Disk::counting(UNITS * SECTORS), UNITS);
             assert_eq!(media.table.pages(), 2);
             for id in 1..=episodes {
                 fill_as(&mut cat, &mut media, EpisodeId(id), 5000, Some(5000)).await;
@@ -183,21 +173,21 @@ fn space_and_append_cost_is_independent_of_stored_media() {
 #[test]
 fn known_length_reserves_up_front() {
     block_on(async {
-        let image = image(32);
-        let mut cat = image.create().await;
-        let mut media = open(&mut cat, Disk::counting(8 * SECTORS), 8).await;
+        let image = Image::new();
+        let mut cat = image.create();
+        let mut media = open(&mut cat, Disk::counting(8 * SECTORS), 8);
         let id = EpisodeId(1);
         let len = 3 * UNIT_BYTES + 5;
         media.reset_temp(&mut cat, id, Some(len)).await.unwrap();
         assert_eq!(media.commits, 1);
-        assert_eq!(used(&mut cat, 8).await, 4);
+        assert_eq!(used(&mut cat, 8), 4);
         // Reserved units still count as free for this download.
         assert_eq!(space(&mut cat, &mut media).await.free, 8 * UNIT_BYTES);
         append_all(&mut cat, &mut media, id, len).await;
         assert_eq!(media.commits, 1);
         media.publish_temp(&mut cat, id).await.unwrap();
         assert_eq!(media.commits, 2);
-        assert_eq!(used(&mut cat, 8).await, 4);
+        assert_eq!(used(&mut cat, 8), 4);
         assert_bitmap_matches_records(&mut cat, &mut media).await;
     });
 }
@@ -207,9 +197,9 @@ fn known_length_reserves_up_front() {
 #[test]
 fn unknown_length_grows_in_doubling_batches() {
     block_on(async {
-        let image = image(64);
-        let mut cat = image.create().await;
-        let mut media = open(&mut cat, Disk::counting(200 * SECTORS), 200).await;
+        let image = Image::new();
+        let mut cat = image.create();
+        let mut media = open(&mut cat, Disk::counting(200 * SECTORS), 200);
         let id = EpisodeId(1);
         media.reset_temp(&mut cat, id, None).await.unwrap();
         assert_eq!(media.commits, 0);
@@ -226,7 +216,7 @@ fn unknown_length_grows_in_doubling_batches() {
             }
         }
         assert_eq!(owned, [1, 2, 4, 8, 16, 32, 64, 128, 192]);
-        assert_eq!(used(&mut cat, 200).await, 192);
+        assert_eq!(used(&mut cat, 200), 192);
         assert_eq!(media.temp.extents.len(), 1);
         // The unused tail of the batch counts as free.
         assert_eq!(space(&mut cat, &mut media).await.free, 71 * UNIT_BYTES);
@@ -238,21 +228,21 @@ fn unknown_length_grows_in_doubling_batches() {
 #[test]
 fn publish_trims_unused_units() {
     block_on(async {
-        let image = image(32);
-        let mut cat = image.create().await;
-        let mut media = open(&mut cat, Disk::counting(8 * SECTORS), 8).await;
+        let image = Image::new();
+        let mut cat = image.create();
+        let mut media = open(&mut cat, Disk::counting(8 * SECTORS), 8);
         let id = EpisodeId(1);
         media
             .reset_temp(&mut cat, id, Some(5 * UNIT_BYTES))
             .await
             .unwrap();
         append_all(&mut cat, &mut media, id, 2 * UNIT_BYTES + 1).await;
-        assert_eq!(used(&mut cat, 8).await, 5);
+        assert_eq!(used(&mut cat, 8), 5);
         media.publish_temp(&mut cat, id).await.unwrap();
         assert_eq!(media.commits, 2);
-        assert_eq!(used(&mut cat, 8).await, 3);
+        assert_eq!(used(&mut cat, 8), 3);
         let mut buf = [0; 4096];
-        let record = cat.unit_record(id, &mut buf).await.unwrap().unwrap();
+        let record = cat.unit_record(id, &mut buf).unwrap().unwrap();
         assert_eq!((record.total_units(), record.len), (3, 2 * UNIT_BYTES + 1));
         assert_eq!(space(&mut cat, &mut media).await.free, 5 * UNIT_BYTES);
         assert_bitmap_matches_records(&mut cat, &mut media).await;
@@ -263,9 +253,9 @@ fn publish_trims_unused_units() {
 #[test]
 fn publish_skips_a_redundant_sync() {
     block_on(async {
-        let image = image(32);
-        let mut cat = image.create().await;
-        let mut media = open(&mut cat, Disk::counting(4 * SECTORS), 4).await;
+        let image = Image::new();
+        let mut cat = image.create();
+        let mut media = open(&mut cat, Disk::counting(4 * SECTORS), 4);
         let id = EpisodeId(1);
         media.reset_temp(&mut cat, id, Some(100)).await.unwrap();
         append_all(&mut cat, &mut media, id, 100).await;
@@ -282,9 +272,9 @@ fn publish_skips_a_redundant_sync() {
 #[test]
 fn record_size_is_independent_of_episode_length() {
     block_on(async {
-        let image = image(64);
-        let mut cat = image.create().await;
-        let mut media = open(&mut cat, Disk::counting(32 * SECTORS), 32).await;
+        let image = Image::new();
+        let mut cat = image.create();
+        let mut media = open(&mut cat, Disk::counting(32 * SECTORS), 32);
         fill(&mut cat, &mut media, EpisodeId(1), 1).await;
         fill(&mut cat, &mut media, EpisodeId(2), 20 * UNIT_BYTES).await;
         fill_as(
@@ -297,11 +287,7 @@ fn record_size_is_independent_of_episode_length() {
         .await;
         let mut buf = [0; 4096];
         for (id, units) in [(1, 1), (2, 20), (3, 5)] {
-            let record = cat
-                .unit_record(EpisodeId(id), &mut buf)
-                .await
-                .unwrap()
-                .unwrap();
+            let record = cat.unit_record(EpisodeId(id), &mut buf).unwrap().unwrap();
             assert_eq!((record.extent_count(), record.total_units()), (1, units));
         }
         assert_bitmap_matches_records(&mut cat, &mut media).await;
@@ -311,13 +297,13 @@ fn record_size_is_independent_of_episode_length() {
 #[test]
 fn bytes_round_trip_across_unit_and_sector_boundaries() {
     block_on(async {
-        let image = image(32);
-        let mut cat = image.create().await;
+        let image = Image::new();
+        let mut cat = image.create();
         let mut disk = Disk::storing(4 * SECTORS);
         let id = EpisodeId(9);
         let mut expected = Vec::new();
         {
-            let mut media = open(&mut cat, &mut disk, 4).await;
+            let mut media = open(&mut cat, &mut disk, 4);
             media.reset_temp(&mut cat, id, None).await.unwrap();
             let mut sizes = [1000usize, 4096, 3, 511, 1, 512, 4095].iter().cycle();
             let mut next = 0u8;
@@ -343,7 +329,7 @@ fn bytes_round_trip_across_unit_and_sector_boundaries() {
             );
         }
         let mut buf = [0; 4096];
-        let record = cat.unit_record(id, &mut buf).await.unwrap().unwrap();
+        let record = cat.unit_record(id, &mut buf).unwrap().unwrap();
         assert_eq!(record.state, RecordState::Published);
         assert_eq!(record.total_units(), 2);
         let mut actual = Vec::new();
@@ -360,14 +346,47 @@ fn bytes_round_trip_across_unit_and_sector_boundaries() {
     });
 }
 
+// Regression (t-153): a sector-aligned chunk reaches the device as one batch
+// (one CMD25 on the card) instead of eight single-sector writes; an
+// unaligned chunk batches the whole sectors after its first partial one.
+#[test]
+fn appended_whole_sectors_are_written_as_one_batch() {
+    block_on(async {
+        let image = Image::new();
+        let mut cat = image.create();
+        let mut media = open(&mut cat, Disk::counting(4 * SECTORS), 4);
+        let id = EpisodeId(3);
+        media.reset_temp(&mut cat, id, None).await.unwrap();
+        media
+            .append_temp(&mut cat, id, &[1; AUDIO_CHUNK])
+            .await
+            .unwrap();
+        let first = media.device().batches.clone();
+        assert_eq!(first.len(), 1, "{first:?}");
+        assert_eq!(first[0].1, AUDIO_CHUNK / 512);
+        assert_eq!(media.device().writes, AUDIO_CHUNK / 512);
+        media.append_temp(&mut cat, id, &[2; 1000]).await.unwrap();
+        media
+            .append_temp(&mut cat, id, &[3; AUDIO_CHUNK])
+            .await
+            .unwrap();
+        let batches = &media.device().batches;
+        // 1000 bytes: one whole sector; then 24 bytes complete the next
+        // sector and the remaining 4072 hold 7 whole sectors.
+        assert_eq!(batches.len(), 3, "{batches:?}");
+        assert_eq!(batches[1], (first[0].0 + 8, 1));
+        assert_eq!(batches[2], (first[0].0 + 10, 7));
+    });
+}
+
 // Regression (t-121): the bitmap equals the union of records after any history.
 #[test]
 fn invariant_holds_after_mixed_history() {
     block_on(async {
-        let image = image(32);
-        let mut cat = image.create().await;
+        let image = Image::new();
+        let mut cat = image.create();
         {
-            let mut media = open(&mut cat, Disk::counting(16 * SECTORS), 16).await;
+            let mut media = open(&mut cat, Disk::counting(16 * SECTORS), 16);
             fill(&mut cat, &mut media, EpisodeId(1), 2 * UNIT_BYTES).await;
             fill(&mut cat, &mut media, EpisodeId(2), 3 * UNIT_BYTES + 1).await;
             fill_as(&mut cat, &mut media, EpisodeId(3), 1, Some(4 * UNIT_BYTES)).await;
@@ -389,8 +408,8 @@ fn invariant_holds_after_mixed_history() {
             assert_bitmap_matches_records(&mut cat, &mut media).await;
         }
         drop(cat);
-        let mut cat = image.reopen().await;
-        let mut media = open(&mut cat, Disk::counting(16 * SECTORS), 16).await;
+        let mut cat = image.reopen();
+        let mut media = open(&mut cat, Disk::counting(16 * SECTORS), 16);
         let mut ids = [EpisodeId(0); FILE_PAGE];
         let n = media.list_ids(&mut cat, None, &mut ids).await.unwrap();
         assert_eq!(&ids[..n], &[EpisodeId(1), EpisodeId(3), EpisodeId(5)]);
@@ -403,12 +422,7 @@ fn invariant_holds_after_mixed_history() {
     });
 }
 
-async fn queued(
-    cat: &mut Cat,
-    guid: &str,
-    expected: Option<u64>,
-    scratch: &mut [u8],
-) -> DownloadJob {
+fn queued(cat: &mut Cat, guid: &str, expected: Option<u64>, scratch: &mut [u8]) -> DownloadJob {
     let id = cat
         .upsert(
             SubscriptionId(1),
@@ -423,10 +437,9 @@ async fn queued(
             },
             scratch,
         )
-        .await
         .unwrap()
         .id;
-    DownloadJob::from_episode(cat.get(id, scratch).await.unwrap().unwrap()).unwrap()
+    DownloadJob::from_episode(cat.get(id, scratch).unwrap().unwrap()).unwrap()
 }
 
 const CUT_UNITS: u32 = 32; // capacity above `reserve`'s 16 MiB minimum
@@ -436,12 +449,13 @@ const CUT_LEN: u64 = UNIT_BYTES + 3 * AUDIO_CHUNK as u64; // two units
 /// test can tear the first and last writes of every operation's commit.
 struct Probe<'a, M> {
     inner: M,
-    writes: &'a Cell<usize>,
+    disk: &'a TestDisk,
     marks: BTreeSet<usize>,
 }
 impl<M> Probe<'_, M> {
     fn mark(&mut self) {
-        self.marks.insert(self.writes.get());
+        let writes = self.disk.state().writes;
+        self.marks.insert(writes);
     }
 }
 macro_rules! probed {
@@ -452,7 +466,7 @@ macro_rules! probed {
         result
     }};
 }
-impl<M: MediaStore<PageStore<HostFile>>> MediaStore<PageStore<HostFile>> for Probe<'_, M> {
+impl<M: MediaStore> MediaStore for Probe<'_, M> {
     type Error = M::Error;
     fn active(&self, id: EpisodeId) -> bool {
         self.inner.active(id)
@@ -503,16 +517,14 @@ impl<M: MediaStore<PageStore<HostFile>>> MediaStore<PageStore<HostFile>> for Pro
 
 /// Download (reset, append into two units, sync, publish, `finish_download`),
 /// then unlink the audio; stops at the first error.
-async fn cut_history<M: MediaStore<PageStore<HostFile>>>(
+async fn cut_history<M: MediaStore>(
     cat: &mut Cat,
     media: &mut M,
     job: DownloadJob,
     scratch: &mut [u8],
 ) -> Result<(), ()> {
     let id = job.id;
-    let Start::Ready(mut session) = DownloadSession::start(cat, media, job, scratch)
-        .await
-        .map_err(|_| ())?
+    let Start::Ready(mut session) = start_all(cat, media, job, scratch).await.map_err(|_| ())?
     else {
         return Err(());
     };
@@ -521,7 +533,13 @@ async fn cut_history<M: MediaStore<PageStore<HostFile>>>(
     while left > 0 {
         let n = left.min(AUDIO_CHUNK as u64) as usize;
         session
-            .push(cat, media, &[5; AUDIO_CHUNK][..n], scratch)
+            .push(
+                cat,
+                media,
+                &mut crate::reclaim::Reclaim::new(),
+                &[5; AUDIO_CHUNK][..n],
+                scratch,
+            )
             .await
             .map_err(|_| ())?;
         left -= n as u64;
@@ -540,21 +558,21 @@ fn cut_after_each_step_leaks_no_unit() {
     let mut scratch = [0; MAX_RECORD_BYTES];
     // An uncut history marks every operation boundary in catalogue writes.
     let (base, total, marks) = block_on(async {
-        let image = image(64);
-        let mut cat = image.create().await;
-        let job = queued(&mut cat, "cut", Some(CUT_LEN), &mut scratch).await;
-        let base = image.writes.get();
+        let image = Image::new();
+        let mut cat = image.create();
+        let job = queued(&mut cat, "cut", Some(CUT_LEN), &mut scratch);
+        let base = image.disk.state().writes;
         let disk = Disk::counting(CUT_UNITS * SECTORS);
         let mut media = Probe {
-            inner: open(&mut cat, disk, CUT_UNITS).await,
-            writes: &image.writes,
+            inner: open(&mut cat, disk, CUT_UNITS),
+            disk: &image.disk,
             marks: BTreeSet::new(),
         };
         cut_history(&mut cat, &mut media, job, &mut scratch)
             .await
             .unwrap();
-        assert_eq!(used(&mut cat, CUT_UNITS).await, 0);
-        (base, image.writes.get(), media.marks)
+        assert_eq!(used(&mut cat, CUT_UNITS), 0);
+        (base, image.disk.state().writes, media.marks)
     });
     // Tear the last two writes before and the first two after every boundary
     // (between media calls, catalogue operations run back to back), the
@@ -572,7 +590,8 @@ fn cut_after_each_step_leaks_no_unit() {
         .into_iter()
         .filter(|c| (base..total).contains(c))
         .collect();
-    assert!(cuts.len() > 20, "{cuts:?}");
+    // Batched requests (t-133) commit less often: fewer boundaries.
+    assert!(cuts.len() > 12, "{cuts:?}");
     let threads = std::thread::available_parallelism().map_or(4, |n| n.get().min(8));
     let kept: usize = std::thread::scope(|scope| {
         let workers: Vec<_> = (0..threads)
@@ -598,21 +617,22 @@ fn cut_after_each_step_leaks_no_unit() {
 fn cut_once(base: usize, cut: usize) -> bool {
     let mut scratch = [0; MAX_RECORD_BYTES];
     block_on(async {
-        let image = image(64);
-        let mut cat = image.create().await;
-        let job = queued(&mut cat, "cut", Some(CUT_LEN), &mut scratch).await;
-        assert_eq!(image.writes.get(), base);
-        image.cut.set(Some(cut));
+        let image = Image::new();
+        let mut cat = image.create();
+        let job = queued(&mut cat, "cut", Some(CUT_LEN), &mut scratch);
+        assert_eq!(image.disk.state().writes, base);
+        image.disk.state().cut = Some((cut, 0));
         let mut disk = Disk::counting(CUT_UNITS * SECTORS);
         {
-            let mut media = open(&mut cat, &mut disk, CUT_UNITS).await;
+            let mut media = open(&mut cat, &mut disk, CUT_UNITS);
             let history = cut_history(&mut cat, &mut media, job, &mut scratch).await;
             assert!(history.is_err(), "cut {cut}");
         }
-        image.cut.set(None);
+        // Power loss: writes after the last sync are lost.
+        image.crash();
         drop(cat);
-        let mut cat = image.reopen().await;
-        let mut media = open(&mut cat, &mut disk, CUT_UNITS).await;
+        let mut cat = image.reopen();
+        let mut media = open(&mut cat, &mut disk, CUT_UNITS);
         crate::recovery::recover_all(&mut cat, &mut media, &mut scratch)
             .await
             .unwrap();
@@ -626,16 +646,10 @@ fn cut_once(base: usize, cut: usize) -> bool {
         }
         // Only a published record of an Available episode may stay.
         assert_eq!(media.list_ids(&mut cat, None, &mut ids).await.unwrap(), 1);
-        let audio = cat
-            .get(ids[0], &mut scratch)
-            .await
-            .unwrap()
-            .unwrap()
-            .state
-            .audio;
+        let audio = cat.get(ids[0], &mut scratch).unwrap().unwrap().state.audio;
         assert_eq!(audio, AudioState::Available, "cut {cut}");
         let mut buf = [0; 4096];
-        let record = cat.unit_record(ids[0], &mut buf).await.unwrap().unwrap();
+        let record = cat.unit_record(ids[0], &mut buf).unwrap().unwrap();
         assert_eq!(record.state, RecordState::Published);
         assert_eq!(record.total_units(), used, "cut {cut}");
         true
@@ -648,9 +662,9 @@ fn cut_once(base: usize, cut: usize) -> bool {
 fn full_card_reports_full_and_download_waits() {
     block_on(async {
         // A 2-unit store: the third unit cannot be allocated.
-        let image = image(32);
-        let mut cat = image.create().await;
-        let mut media = open(&mut cat, Disk::counting(2 * SECTORS), 2).await;
+        let image = Image::new();
+        let mut cat = image.create();
+        let mut media = open(&mut cat, Disk::counting(2 * SECTORS), 2);
         let id = EpisodeId(1);
         media.reset_temp(&mut cat, id, None).await.unwrap();
         append_all(&mut cat, &mut media, id, 2 * UNIT_BYTES).await;
@@ -670,7 +684,7 @@ fn full_card_reports_full_and_download_waits() {
             Err(UnitError::Full)
         ));
         assert_eq!((media.commits, media.temp.id), (commits, Some(id)));
-        assert_eq!(used(&mut cat, 2).await, 2);
+        assert_eq!(used(&mut cat, 2), 2);
         // Still enabled: the temp publishes.
         media.publish_temp(&mut cat, id).await.unwrap();
         assert_bitmap_matches_records(&mut cat, &mut media).await;
@@ -678,14 +692,14 @@ fn full_card_reports_full_and_download_waits() {
     block_on(async {
         // Above the 16 MiB reserve: an unreclaimable published record leaves
         // too little room for a 3 MiB episode, so the download waits.
-        let image = image(32);
-        let mut cat = image.create().await;
-        let mut media = open(&mut cat, Disk::counting(20 * SECTORS), 20).await;
+        let image = Image::new();
+        let mut cat = image.create();
+        let mut media = open(&mut cat, Disk::counting(20 * SECTORS), 20);
         fill(&mut cat, &mut media, EpisodeId(1000), 2 * UNIT_BYTES).await;
         let mut scratch = [0; MAX_RECORD_BYTES];
-        let job = queued(&mut cat, "big", Some(3 * UNIT_BYTES), &mut scratch).await;
+        let job = queued(&mut cat, "big", Some(3 * UNIT_BYTES), &mut scratch);
         assert!(matches!(
-            DownloadSession::start(&mut cat, &mut media, job, &mut scratch)
+            start_all(&mut cat, &mut media, job, &mut scratch)
                 .await
                 .unwrap(),
             Start::WaitingForSpace
@@ -695,9 +709,9 @@ fn full_card_reports_full_and_download_waits() {
 
 /// A store whose odd units are owned by two published records, so every
 /// free unit is its own extent.
-async fn fragmented(cat: &mut Cat, units: u32) -> UnitMedia<Disk, Global> {
+fn fragmented(cat: &mut Cat, units: u32) -> UnitMedia<Disk, Global> {
     let mut table = UnitTable::new_in(units, Global).unwrap();
-    cat.load_units(&mut table).await.unwrap();
+    cat.load_units(&mut table).unwrap();
     let odd: Vec<Extent> = (0..units / 2)
         .map(|i| Extent {
             start: 2 * i + 1,
@@ -711,10 +725,9 @@ async fn fragmented(cat: &mut Cat, units: u32) -> UnitMedia<Disk, Global> {
     for (id, half) in odd.chunks(odd.len().div_ceil(2)).enumerate() {
         let n = encode_record(RecordState::Published, 1, half, &mut rec).unwrap();
         cat.commit_units(&table, &[0], EpisodeId(1000 + id as u64), Some(&rec[..n]))
-            .await
             .unwrap();
     }
-    open(cat, Disk::counting(units * SECTORS), units).await
+    open(cat, Disk::counting(units * SECTORS), units)
 }
 
 // Regression (t-121): an episode needing more than `MAX_EXTENTS` extents is
@@ -723,9 +736,9 @@ async fn fragmented(cat: &mut Cat, units: u32) -> UnitMedia<Disk, Global> {
 fn extent_overflow_is_refused_and_store_stays_enabled() {
     block_on(async {
         let units = 2 * (MAX_EXTENTS as u32 + 40);
-        let image = image(64);
-        let mut cat = image.create().await;
-        let mut media = fragmented(&mut cat, units).await;
+        let image = Image::new();
+        let mut cat = image.create();
+        let mut media = fragmented(&mut cat, units);
         let free = media.table.free();
         assert!(free > MAX_EXTENTS as u32);
         assert_bitmap_matches_records(&mut cat, &mut media).await;
@@ -768,9 +781,9 @@ fn extent_overflow_is_refused_and_store_stays_enabled() {
 #[test]
 fn invalid_input_leaves_the_store_enabled() {
     block_on(async {
-        let image = image(32);
-        let mut cat = image.create().await;
-        let mut media = open(&mut cat, Disk::counting(4 * SECTORS), 4).await;
+        let image = Image::new();
+        let mut cat = image.create();
+        let mut media = open(&mut cat, Disk::counting(4 * SECTORS), 4);
         let id = EpisodeId(1);
         assert!(matches!(
             media.reset_temp(&mut cat, EpisodeId(0), None).await,
@@ -799,28 +812,26 @@ fn invalid_input_leaves_the_store_enabled() {
 // Regression (t-121): a store larger than u32 sectors can address is refused.
 #[test]
 fn oversize_region_is_refused() {
-    block_on(async {
-        let image = image(32);
-        let mut cat = image.create().await;
-        assert!(matches!(
-            UnitMedia::open_in(&mut cat, Disk::counting(0), MAX_UNITS + 1, Global).await,
-            Err(UnitError::Invalid)
-        ));
-    });
+    let image = Image::new();
+    let mut cat = image.create();
+    assert!(matches!(
+        UnitMedia::open_in(&mut cat, Disk::counting(0), MAX_UNITS + 1, Global),
+        Err(UnitError::Invalid)
+    ));
 }
 
 #[test]
 fn publish_refuses_existing_audio() {
     block_on(async {
-        let image = image(32);
-        let mut cat = image.create().await;
-        let mut media = open(&mut cat, Disk::counting(4 * SECTORS), 4).await;
+        let image = Image::new();
+        let mut cat = image.create();
+        let mut media = open(&mut cat, Disk::counting(4 * SECTORS), 4);
         fill(&mut cat, &mut media, EpisodeId(1), 10).await;
         assert!(matches!(
             media.publish_temp(&mut cat, EpisodeId(1)).await,
             Err(UnitError::Exists)
         ));
-        assert_eq!(used(&mut cat, 4).await, 1);
+        assert_eq!(used(&mut cat, 4), 1);
         assert_eq!(space(&mut cat, &mut media).await.free, 3 * UNIT_BYTES);
     });
 }
@@ -828,9 +839,9 @@ fn publish_refuses_existing_audio() {
 #[test]
 fn reset_of_published_id_is_exists() {
     block_on(async {
-        let image = image(32);
-        let mut cat = image.create().await;
-        let mut media = open(&mut cat, Disk::counting(4 * SECTORS), 4).await;
+        let image = Image::new();
+        let mut cat = image.create();
+        let mut media = open(&mut cat, Disk::counting(4 * SECTORS), 4);
         fill(&mut cat, &mut media, EpisodeId(1), 10).await;
         media
             .reset_temp(&mut cat, EpisodeId(2), None)
@@ -847,7 +858,7 @@ fn reset_of_published_id_is_exists() {
             (media.commits, media.temp.id),
             (commits, Some(EpisodeId(2)))
         );
-        assert_eq!(used(&mut cat, 4).await, 2);
+        assert_eq!(used(&mut cat, 4), 2);
         assert_eq!(
             space(&mut cat, &mut media).await.free,
             2 * UNIT_BYTES + UNIT_BYTES - 1
@@ -858,9 +869,9 @@ fn reset_of_published_id_is_exists() {
 #[test]
 fn reset_frees_a_previous_temp() {
     block_on(async {
-        let image = image(32);
-        let mut cat = image.create().await;
-        let mut media = open(&mut cat, Disk::counting(4 * SECTORS), 4).await;
+        let image = Image::new();
+        let mut cat = image.create();
+        let mut media = open(&mut cat, Disk::counting(4 * SECTORS), 4);
         media
             .reset_temp(&mut cat, EpisodeId(1), None)
             .await
@@ -870,13 +881,13 @@ fn reset_frees_a_previous_temp() {
             .reset_temp(&mut cat, EpisodeId(2), None)
             .await
             .unwrap(); // other id
-        assert_eq!(used(&mut cat, 4).await, 0);
+        assert_eq!(used(&mut cat, 4), 0);
         append_all(&mut cat, &mut media, EpisodeId(2), 1).await;
         media
             .reset_temp(&mut cat, EpisodeId(2), None)
             .await
             .unwrap(); // same id
-        assert_eq!(used(&mut cat, 4).await, 0);
+        assert_eq!(used(&mut cat, 4), 0);
         assert_eq!(space(&mut cat, &mut media).await.free, 4 * UNIT_BYTES);
         // Freed units count toward a reservation.
         append_all(&mut cat, &mut media, EpisodeId(2), 1).await;
@@ -884,7 +895,7 @@ fn reset_frees_a_previous_temp() {
             .reset_temp(&mut cat, EpisodeId(3), Some(4 * UNIT_BYTES))
             .await
             .unwrap();
-        assert_eq!(used(&mut cat, 4).await, 4);
+        assert_eq!(used(&mut cat, 4), 4);
         assert_bitmap_matches_records(&mut cat, &mut media).await;
     });
 }
@@ -893,8 +904,8 @@ fn reset_frees_a_previous_temp() {
 #[test]
 fn only_inconsistent_state_errors_are_fatal() {
     type M = UnitMedia<Disk, Global>;
-    type E = UnitError<theo_storage::page_store::PageError<std::io::Error>>;
-    let fatal = |e: &E| <M as MediaStore<PageStore<HostFile>>>::is_fatal(e);
+    type E = UnitError;
+    let fatal = |e: &E| <M as MediaStore>::is_fatal(e);
     for e in [UnitError::Invalid, UnitError::Exists, UnitError::Full] {
         assert!(!fatal(&e), "{e:?}");
     }
@@ -916,25 +927,23 @@ fn only_inconsistent_state_errors_are_fatal() {
 fn store_futures_hold_no_extent_sized_state() {
     // Below one extent plan (510 x 8 bytes), so holding one fails the test.
     const MAX_FUTURE: usize = 4096;
-    block_on(async {
-        let image = image(32);
-        let mut cat = image.create().await;
-        let mut media = open(&mut cat, Disk::counting(8 * SECTORS), 8).await;
-        let id = EpisodeId(1);
-        let reset = size_of_val(&media.reset_temp(&mut cat, id, Some(1)));
-        let append = size_of_val(&media.append_temp(&mut cat, id, &[0]));
-        let publish = size_of_val(&media.publish_temp(&mut cat, id));
-        let unlink = size_of_val(&media.unlink_temp(&mut cat, id));
-        let unlink_audio = size_of_val(&media.unlink_audio(&mut cat, id));
-        let sizes = [
-            ("reset_temp", reset),
-            ("append_temp", append),
-            ("publish_temp", publish),
-            ("unlink_temp", unlink),
-            ("unlink_audio", unlink_audio),
-        ];
-        for (name, size) in sizes {
-            assert!(size <= MAX_FUTURE, "{name} future is {size} bytes");
-        }
-    });
+    let image = Image::new();
+    let mut cat = image.create();
+    let mut media = open(&mut cat, Disk::counting(8 * SECTORS), 8);
+    let id = EpisodeId(1);
+    let reset = size_of_val(&media.reset_temp(&mut cat, id, Some(1)));
+    let append = size_of_val(&media.append_temp(&mut cat, id, &[0]));
+    let publish = size_of_val(&media.publish_temp(&mut cat, id));
+    let unlink = size_of_val(&media.unlink_temp(&mut cat, id));
+    let unlink_audio = size_of_val(&media.unlink_audio(&mut cat, id));
+    let sizes = [
+        ("reset_temp", reset),
+        ("append_temp", append),
+        ("publish_temp", publish),
+        ("unlink_temp", unlink),
+        ("unlink_audio", unlink_audio),
+    ];
+    for (name, size) in sizes {
+        assert!(size <= MAX_FUTURE, "{name} future is {size} bytes");
+    }
 }

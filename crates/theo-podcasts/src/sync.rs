@@ -3,7 +3,6 @@ use crate::{
     catalogue::{Catalogue, Error, MAX_URL_BYTES, SubscriptionId},
     radio_france::{FeedError, RadioFranceFeed},
 };
-use ekv::flash::Flash;
 use heapless::String;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Checkpoint {
@@ -19,9 +18,9 @@ pub struct Validators<'a> {
     pub last_modified: Option<&'a str>,
 }
 #[derive(Debug)]
-pub enum SyncError<E> {
+pub enum SyncError {
     Feed(FeedError),
-    Catalogue(Error<E>),
+    Catalogue(Error),
     Protocol,
     Incomplete,
 }
@@ -36,6 +35,9 @@ use crate::radio_france::FeedUrl;
 /// bounded record. Multi-page responses are always fetched unconditionally:
 /// an unchanged first page does not certify older pages are unchanged.
 pub const MAX_CHUNK_BYTES: usize = 4096;
+/// Most episodes one [`SyncSession::push`] upserts. Only the last may commit;
+/// the others are known and unchanged, so they only read (ADR-0022).
+pub const MAX_CHUNK_ITEMS: usize = 4;
 pub const MAX_HISTORY_PAGES: u32 = 4096;
 #[derive(PartialEq, Eq)]
 enum Phase {
@@ -62,6 +64,39 @@ impl SyncSession {
         url: &str,
         prior: Option<Checkpoint>,
     ) -> Result<Self, FeedError> {
+        let mut session = Self::idle();
+        session.restart(id, url, prior)?;
+        Ok(session)
+    }
+    /// A session holding no sync; [`Self::restart`] starts one.
+    pub fn idle() -> Self {
+        Self {
+            id: SubscriptionId(0),
+            url: String::new(),
+            checkpoint: Checkpoint {
+                feed: String::new(),
+                etag: String::new(),
+                last_modified: String::new(),
+                pages: 0,
+                generation: 0,
+            },
+            prior: None,
+            parser: RadioFranceFeed::new(),
+            phase: Phase::Failed,
+            page: 0,
+            progress: Progress::default(),
+            unchanged: false,
+        }
+    }
+    /// Starts a sync in place, as [`Self::new`] would; on error `self` is
+    /// unchanged. Building a new session is a 20 KB stack temporary, which
+    /// core1's SD owner cannot afford (t-133).
+    pub fn restart(
+        &mut self,
+        id: SubscriptionId,
+        url: &str,
+        prior: Option<Checkpoint>,
+    ) -> Result<(), FeedError> {
         if id.0 == 0
             || FeedUrl::parse(url)?.page != 0
             || prior
@@ -70,27 +105,44 @@ impl SyncSession {
         {
             return Err(FeedError::Source);
         }
-        let checkpoint = Checkpoint {
-            feed: String::try_from(url).map_err(|_| FeedError::Limit)?,
-            etag: String::new(),
-            last_modified: String::new(),
-            pages: 0,
-            generation: prior
-                .as_ref()
-                .map_or(Some(1), |p| p.generation.checked_add(1))
-                .ok_or(FeedError::Limit)?,
-        };
-        Ok(Self {
-            id,
-            url: String::try_from(url).map_err(|_| FeedError::Limit)?,
+        let feed = String::try_from(url).map_err(|_| FeedError::Limit)?;
+        let url = String::try_from(url).map_err(|_| FeedError::Limit)?;
+        let generation = prior
+            .as_ref()
+            .map_or(Some(1), |p| p.generation.checked_add(1))
+            .ok_or(FeedError::Limit)?;
+        let Self {
+            id: session_id,
+            url: session_url,
             checkpoint,
-            prior,
-            parser: RadioFranceFeed::new(),
-            phase: Phase::Response,
-            page: 0,
-            progress: Progress::default(),
-            unchanged: false,
-        })
+            prior: session_prior,
+            parser,
+            phase,
+            page,
+            progress,
+            unchanged,
+        } = self;
+        *session_id = id;
+        *session_url = url;
+        let Checkpoint {
+            feed: checkpoint_feed,
+            etag,
+            last_modified,
+            pages,
+            generation: checkpoint_generation,
+        } = checkpoint;
+        *checkpoint_feed = feed;
+        etag.clear();
+        last_modified.clear();
+        *pages = 0;
+        *checkpoint_generation = generation;
+        *session_prior = prior;
+        parser.reset();
+        *phase = Phase::Response;
+        *page = 0;
+        *progress = Progress::default();
+        *unchanged = false;
+        Ok(())
     }
     pub fn url(&self) -> &str {
         &self.url
@@ -109,11 +161,7 @@ impl SyncSession {
         }
         Validators::default()
     }
-    pub fn response<E>(
-        &mut self,
-        status: u16,
-        validators: Validators<'_>,
-    ) -> Result<(), SyncError<E>> {
+    pub fn response(&mut self, status: u16, validators: Validators<'_>) -> Result<(), SyncError> {
         let valid = self.phase == Phase::Response;
         let conditional = self.conditional();
         let can_304 = conditional.etag.is_some() || conditional.last_modified.is_some();
@@ -139,34 +187,50 @@ impl SyncSession {
         self.phase = Phase::Body;
         Ok(())
     }
-    pub async fn push<F: Flash>(
+    /// Feed body bytes; returns how many were consumed. The caller sends
+    /// the rest again (a non-empty input always consumes at least one byte).
+    ///
+    /// Each upsert commits on its own (episode, identity and counter
+    /// together), and one call makes at most one commit, so a request stays
+    /// within its IO budget: it stops after the first episode whose upsert
+    /// committed, or after [`MAX_CHUNK_ITEMS`] episodes. A failure mid-page
+    /// keeps the earlier episodes; the checkpoint is only saved by
+    /// [`Self::complete`], so a resync re-upserts the page and the identity
+    /// table makes that idempotent (ADR-0022).
+    pub fn push(
         &mut self,
-        cat: &mut Catalogue<F>,
+        cat: &mut Catalogue,
         bytes: &[u8],
         scratch: &mut [u8],
-    ) -> Result<(), SyncError<F::Error>> {
+    ) -> Result<usize, SyncError> {
         let valid = self.phase == Phase::Body;
         self.phase = Phase::Failed;
         if !valid || bytes.len() > MAX_CHUNK_BYTES {
             return Err(SyncError::Protocol);
         }
-        for &byte in bytes {
+        let mut items = 0;
+        for (at, &byte) in bytes.iter().enumerate() {
             if let Some(item) = self.parser.push(byte).map_err(SyncError::Feed)? {
+                let commits = cat.commits();
                 let outcome = cat
                     .upsert(self.id, item.metadata(), scratch)
-                    .await
                     .map_err(SyncError::Catalogue)?;
                 self.progress.entries += 1;
                 self.progress.created += u64::from(outcome.created);
                 self.progress.queued += u64::from(outcome.queued);
+                items += 1;
+                if cat.commits() != commits || items == MAX_CHUNK_ITEMS {
+                    self.phase = Phase::Body;
+                    return Ok(at + 1);
+                }
             }
         }
         self.phase = Phase::Body;
-        Ok(())
+        Ok(bytes.len())
     }
     /// Returns true when `url()` names the next required page. False means the
     /// session can commit. End-of-document alone never publishes a checkpoint.
-    pub fn end_page<E>(&mut self) -> Result<bool, SyncError<E>> {
+    pub fn end_page(&mut self) -> Result<bool, SyncError> {
         let old = core::mem::replace(&mut self.phase, Phase::Failed);
         if old == Phase::NotModified {
             self.phase = Phase::Ready;
@@ -185,7 +249,7 @@ impl SyncSession {
                     .map_err(SyncError::Feed)?;
                 self.url = String::try_from(next).map_err(|_| SyncError::Feed(FeedError::Limit))?;
                 self.page += 1;
-                self.parser = RadioFranceFeed::new();
+                self.parser.reset();
                 self.phase = Phase::Response;
                 Ok(true)
             }
@@ -196,19 +260,21 @@ impl SyncSession {
             }
         }
     }
-    pub async fn complete<F: Flash>(
-        self,
-        cat: &mut Catalogue<F>,
+    /// Saves the checkpoint.
+    /// Saves the checkpoint once: the session is then spent until `restart`.
+    pub fn complete(
+        &mut self,
+        cat: &mut Catalogue,
         scratch: &mut [u8],
-    ) -> Result<Progress, SyncError<F::Error>> {
+    ) -> Result<Progress, SyncError> {
         if self.phase != Phase::Ready {
             return Err(SyncError::Incomplete);
         }
         if !self.unchanged {
             cat.save_sync_checkpoint(self.id, &self.checkpoint, scratch)
-                .await
                 .map_err(SyncError::Catalogue)?;
         }
+        self.phase = Phase::Failed;
         Ok(self.progress)
     }
 }

@@ -1,8 +1,9 @@
 # theo-drivers
 
 HAL-independent drivers for the Theo Pod hardware, plus HAL-free logic
-(orientation, flush bands and retries, DMA arithmetic). `no_std`, depends
-only on `embedded-hal` / `embedded-hal-async`, unit-tested on the host
+(orientation, flush bands and retries, DMA arithmetic, AES-GCM on a block
+cipher). `no_std`, depends only on `embedded-hal` / `embedded-hal-async`
+and RustCrypto `ghash`, unit-tested on the host
 (`just test`). See `docs/adr/0001` and `0002` for why. Dependencies: no
 sibling crates; the firmware crate (`theo-pod`) depends on this one.
 
@@ -35,8 +36,14 @@ sibling crates; the firmware crate (`theo-pod`) depends on this one.
   press/release; `LongPress`, short vs long presses, and `LongPressButton`,
   a button raced against the long-press deadline (ADR-0008).
 
+- `gcm.rs`: AES-GCM `seal`/`open` on any `GcmCipher` (ECB blocks, CTR
+  keystream; software GHASH); `ctr_in_pieces` for stateless DMA engines
+  (ADR-0024).
+
 ## Extension points
 
+- Implement `GcmCipher` to run TLS AES-GCM on an AES engine
+  (ESP32-S3: `src/device/tls_aes.rs`).
 - Implement `QspiBus` and `FrameBus` to run the CO5300 on another HAL
   (ESP32-S3: `src/device/esp_qspi.rs`).
 - Implement `Panel` to support another display controller.

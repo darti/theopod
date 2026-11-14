@@ -38,6 +38,7 @@ mod restart;
 mod sd;
 mod sleep;
 pub(crate) mod storage;
+mod tls_aes;
 
 use core::fmt;
 
@@ -245,6 +246,8 @@ impl Board {
         esp_alloc::psram_allocator!(peripherals.PSRAM, esp_hal::psram, psram_config);
         esp_alloc::heap_allocator!(size: HEAP_SIZE);
         esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 64 * 1024);
+        // TLS record encryption runs on the AES peripheral (t-154).
+        tls_aes::install(peripherals.AES, peripherals.DMA_CH1);
         let timg0 = TimerGroup::new(peripherals.TIMG0);
         // Armed as soon as it exists: the display bring-up waits on DMA
         // with no timeout of its own, and a panic from here on reboots.

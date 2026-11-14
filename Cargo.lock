@@ -1453,10 +1453,6 @@ name = "embassy-crypto-rustcrypto"
 version = "0.1.0"
 source = "git+https://github.com/embassy-rs/embassy?rev=822a76ea91f2c0885c6eb0c65fe91181e31133e1#822a76ea91f2c0885c6eb0c65fe91181e31133e1"
 dependencies = [
- "aead",
- "aes",
- "aes-gcm",
- "cipher",
  "digest 0.11.3",
  "ecdsa 0.17.0",
  "ed25519-dalek",
@@ -6181,8 +6177,11 @@ checksum = "f18aa187839b2bdb1ad2fa35ead8c4c2976b64e4363c386d45ac0f7ee85c9233"
 name = "theo-drivers"
 version = "0.1.1"
 dependencies = [
+ "aes",
+ "aes-gcm",
  "embedded-hal 1.0.0",
  "embedded-hal-async",
+ "ghash",
  "speculoos",
 ]
 

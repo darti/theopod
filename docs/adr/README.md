@@ -24,3 +24,4 @@
 | [0020](0020-store-media-in-raw-allocation-units.md) | Store media in raw allocation units and isolate failures per scope | Implemented in software; hardware validation pending |
 | [0021](0021-provision-layout-v2-on-the-device.md) | Provision layout v2 on the device | Amended by ADR-0022 (layout v3) |
 | [0022](0022-store-the-podcast-catalogue-in-redb.md) | Store the podcast catalogue in redb | Accepted |
+| [0024](0024-run-tls-aes-gcm-on-the-aes-peripheral.md) | Run TLS AES-GCM on the AES peripheral | Accepted |

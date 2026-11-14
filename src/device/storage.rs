@@ -18,6 +18,16 @@ static REQUESTS: Channel<CriticalSectionRawMutex, sd::PodcastRequest, 1> = Chann
 static RESPONSE: Signal<CriticalSectionRawMutex, Result<Reply, ()>> = Signal::new();
 static CLIENT: Mutex<CriticalSectionRawMutex, ()> = Mutex::new(());
 static STOPPED: AtomicBool = AtomicBool::new(false);
+/// A podcast request waits in `persist`, not yet relayed to core1.
+static RELAYING: AtomicBool = AtomicBool::new(false);
+/// Whether the last podcast request has left core0 for the storage owner.
+///
+/// `persist` relays requests on core0, where a network read can hold the
+/// core for a whole TLS record: the network task reads only once this holds
+/// (`theo_podcasts::body::pump`, t-163).
+pub fn handed_off() -> bool {
+    !RELAYING.load(Ordering::Acquire)
+}
 /// All clients share this one serialized owned-message exchange. Cancelling
 /// after admission invalidates the shared sector owner rather than reusing a late reply.
 pub async fn command(command: Command) -> Result<Reply, ()> {
@@ -30,6 +40,7 @@ pub async fn command(command: Command) -> Result<Reply, ()> {
             .map_err(|_| ())?;
         let guard = sd::guard().map_err(|_| ())?;
         RESPONSE.reset();
+        RELAYING.store(true, Ordering::Release);
         REQUESTS.send(command).await;
         let result = RESPONSE.wait().await;
         if result.is_ok() {
@@ -146,6 +157,7 @@ async fn persist(mut volume: Option<SdStorage>) {
             }
             Some(Work::Data) => {
                 let command = data.take().expect("admitted command");
+                RELAYING.store(false, Ordering::Release);
                 let result = if let Some(storage) = volume.as_mut() {
                     match sd::domain(storage, command).await {
                         Ok(reply) => Ok(reply),

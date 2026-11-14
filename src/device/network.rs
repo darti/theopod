@@ -380,6 +380,7 @@ async fn transfer(
                     STOP_WAKE.wait().await;
                 }
             },
+            super::storage::handed_off,
         )
         .await?;
         let complete = match &body.reader {

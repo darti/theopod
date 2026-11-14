@@ -1,5 +1,5 @@
 use super::*;
-use core::cell::RefCell;
+use core::cell::{Cell, RefCell};
 use futures::executor::block_on;
 use std::{format, string::String, vec, vec::Vec};
 
@@ -41,12 +41,23 @@ struct Sink<'a> {
     stores: usize,
     /// Fail the store with this index (1-based).
     fail_at: Option<usize>,
+    /// Cleared while a store waits to leave this core, like a request the
+    /// relay task has not taken yet.
+    handed: Option<&'a Cell<bool>>,
 }
 impl ChunkSink for Sink<'_> {
     async fn store(&mut self, bytes: &[u8]) -> Result<(), Error> {
         self.stores += 1;
         let k = self.stores;
         self.log.borrow_mut().push(format!("store {k} start"));
+        if let Some(handed) = self.handed {
+            handed.set(false);
+            for _ in 0..2 {
+                embassy_futures::yield_now().await;
+            }
+            handed.set(true);
+            self.log.borrow_mut().push(format!("store {k} handed"));
+        }
         // Storage takes longer than the read: several polls.
         for _ in 0..3 {
             embassy_futures::yield_now().await;
@@ -82,7 +93,11 @@ fn sink(log: &Log) -> Sink<'_> {
         sizes: Vec::new(),
         stores: 0,
         fail_at: None,
+        handed: None,
     }
+}
+fn always() -> bool {
+    true
 }
 fn never() -> core::future::Pending<()> {
     core::future::pending()
@@ -99,7 +114,10 @@ fn pump_overlapped_reads_next_chunk_while_storing_previous() {
     let log = Log::default();
     let (mut r, mut s) = (reader(&log, 10), sink(&log));
     let (mut front, mut back) = ([0; 4], [0; 4]);
-    block_on(pump(&mut r, &mut s, &mut front, &mut back, true, never)).unwrap();
+    block_on(pump(
+        &mut r, &mut s, &mut front, &mut back, true, never, always,
+    ))
+    .unwrap();
     assert!(position(&log, "read 2 start") < position(&log, "store 1 end"));
     assert!(position(&log, "read 3 start") < position(&log, "store 2 end"));
 }
@@ -112,9 +130,33 @@ fn pump_overlapped_hands_store_over_before_reading() {
     let log = Log::default();
     let (mut r, mut s) = (reader(&log, 10), sink(&log));
     let (mut front, mut back) = ([0; 4], [0; 4]);
-    block_on(pump(&mut r, &mut s, &mut front, &mut back, true, never)).unwrap();
+    block_on(pump(
+        &mut r, &mut s, &mut front, &mut back, true, never, always,
+    ))
+    .unwrap();
     assert!(position(&log, "store 1 start") < position(&log, "read 2 start"));
     assert!(position(&log, "store 2 start") < position(&log, "read 3 start"));
+}
+
+#[test]
+fn pump_overlapped_reads_only_once_store_left_this_core() {
+    // Regression (t-163): the store request reaches core1 through a relay
+    // task on core0. Read first, record N+1's decrypt (~40 ms in one poll)
+    // held that task off: core1 started each store a record late, nearly
+    // doubling the store per MiB.
+    let log = Log::default();
+    let handed = Cell::new(true);
+    let (mut r, mut s) = (reader(&log, 10), sink(&log));
+    s.handed = Some(&handed);
+    let (mut front, mut back) = ([0; 4], [0; 4]);
+    let handed_off = || handed.get();
+    block_on(pump(
+        &mut r, &mut s, &mut front, &mut back, true, never, handed_off,
+    ))
+    .unwrap();
+    assert!(position(&log, "store 1 handed") < position(&log, "read 2 start"));
+    assert!(position(&log, "store 2 handed") < position(&log, "read 3 start"));
+    assert_eq!(s.stored, body(10));
 }
 
 #[test]
@@ -126,7 +168,10 @@ fn pump_fills_each_buffer_across_short_reads() {
     let (mut r, mut s) = (reader(&log, 19), sink(&log));
     r.most = 3;
     let (mut front, mut back) = ([0; 8], [0; 8]);
-    block_on(pump(&mut r, &mut s, &mut front, &mut back, true, never)).unwrap();
+    block_on(pump(
+        &mut r, &mut s, &mut front, &mut back, true, never, always,
+    ))
+    .unwrap();
     assert_eq!(s.sizes, vec![8, 8, 3]);
     assert_eq!(s.stored, body(19));
 }
@@ -137,7 +182,10 @@ fn pump_overlapped_stores_every_byte_in_order() {
     let log = Log::default();
     let (mut r, mut s) = (reader(&log, 4 * 5 + 3), sink(&log));
     let (mut front, mut back) = ([0; 4], [0; 4]);
-    block_on(pump(&mut r, &mut s, &mut front, &mut back, true, never)).unwrap();
+    block_on(pump(
+        &mut r, &mut s, &mut front, &mut back, true, never, always,
+    ))
+    .unwrap();
     assert_eq!(s.stored, body(23));
     assert_eq!(s.stores, 6);
 }
@@ -147,7 +195,10 @@ fn pump_overlapped_stores_last_chunk_before_returning() {
     let log = Log::default();
     let (mut r, mut s) = (reader(&log, 6), sink(&log));
     let (mut front, mut back) = ([0; 4], [0; 4]);
-    block_on(pump(&mut r, &mut s, &mut front, &mut back, true, never)).unwrap();
+    block_on(pump(
+        &mut r, &mut s, &mut front, &mut back, true, never, always,
+    ))
+    .unwrap();
     assert_eq!(log.borrow().last().map(String::as_str), Some("store 2 end"));
 }
 
@@ -157,7 +208,10 @@ fn pump_sequential_stores_each_chunk_before_next_read() {
     let log = Log::default();
     let (mut r, mut s) = (reader(&log, 10), sink(&log));
     let (mut front, mut back) = ([0; 4], [0; 4]);
-    block_on(pump(&mut r, &mut s, &mut front, &mut back, false, never)).unwrap();
+    block_on(pump(
+        &mut r, &mut s, &mut front, &mut back, false, never, always,
+    ))
+    .unwrap();
     assert!(position(&log, "store 1 end") < position(&log, "read 2 start"));
     assert!(position(&log, "store 2 end") < position(&log, "read 3 start"));
     assert_eq!(s.stored, body(10));
@@ -171,7 +225,9 @@ fn pump_store_error_wins_over_concurrent_read_error() {
     r.fail_at = Some(2);
     s.fail_at = Some(1);
     let (mut front, mut back) = ([0; 4], [0; 4]);
-    let result = block_on(pump(&mut r, &mut s, &mut front, &mut back, true, never));
+    let result = block_on(pump(
+        &mut r, &mut s, &mut front, &mut back, true, never, always,
+    ));
     assert_eq!(result, Err(Error::Storage));
 }
 
@@ -182,7 +238,9 @@ fn pump_read_error_waits_for_store_in_flight() {
     let (mut r, mut s) = (reader(&log, 10), sink(&log));
     r.fail_at = Some(2);
     let (mut front, mut back) = ([0; 4], [0; 4]);
-    let result = block_on(pump(&mut r, &mut s, &mut front, &mut back, true, never));
+    let result = block_on(pump(
+        &mut r, &mut s, &mut front, &mut back, true, never, always,
+    ));
     assert_eq!(result, Err(Error::Network));
     assert!(position(&log, "read 2 failed") < position(&log, "store 1 end"));
     assert_eq!(s.stored, body(4));
@@ -194,7 +252,9 @@ fn pump_stop_cancels_read_and_store_together() {
     let (mut r, mut s) = (reader(&log, 10), sink(&log));
     let (mut front, mut back) = ([0; 4], [0; 4]);
     let stop = || async {};
-    let result = block_on(pump(&mut r, &mut s, &mut front, &mut back, true, stop));
+    let result = block_on(pump(
+        &mut r, &mut s, &mut front, &mut back, true, stop, always,
+    ));
     assert_eq!(result, Err(Error::Stopped));
     assert_eq!(s.stored, vec![]);
 }

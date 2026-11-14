@@ -176,8 +176,11 @@ async fn request(command: Command) -> Result<Reply, Error> {
 /// storing one record overlaps decrypting the next (t-160), as one audio
 /// request (t-162).
 const BODY_STEP_BYTES: usize = AUDIO_CHUNK;
-/// TCP receive buffer, hence the advertised window (under 64 KiB: no scaling).
-const TCP_RX_BYTES: usize = 32 * 1024;
+/// TCP receive buffer, hence the advertised window (in PSRAM; smoltcp
+/// scales the window above 64 KiB). With the Wi-Fi RX buffers below, the
+/// socket stays full during a download: the board, not the network, bounds
+/// it (t-161).
+const TCP_RX_BYTES: usize = 256 * 1024;
 struct Buffers {
     tcp_rx: Vec<u8, &'static esp_alloc::ExternalMemory>,
     tcp_tx: Vec<u8, &'static esp_alloc::ExternalMemory>,
@@ -632,11 +635,15 @@ async fn start(wifi: WIFI<'static>) -> Result<(), Error> {
             password.try_into().map_err(|_| Error::Protocol)?,
         ));
     let config = ControllerConfig::default()
-        .with_static_rx_buf_num(6)
-        .with_dynamic_rx_buf_num(8)
+        // Wi-Fi RX buffering (internal RAM, ~1.6 KB per buffer). At 6/8
+        // buffers, a BA window of 3 and an RX queue of 2, the socket ran dry
+        // and a download stayed near 150 KB/s whatever the TCP window; with
+        // these, ~195 KB/s and 66-77 KB of internal heap left free (t-161).
+        .with_static_rx_buf_num(16)
+        .with_dynamic_rx_buf_num(32)
         .with_dynamic_tx_buf_num(4)
-        .with_rx_ba_win(3)
-        .with_rx_queue_size(2)
+        .with_rx_ba_win(16)
+        .with_rx_queue_size(16)
         .with_tx_queue_size(2)
         .with_initial_config(Config::Station(station));
     let mut controller = WifiController::new(wifi, config).map_err(|_| Error::Network)?;

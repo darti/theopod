@@ -147,3 +147,9 @@ pinned disposable shared-owner/publication tests, a full linked candidate and
 verified audio TLS. Host catalogue implementation may proceed. The historical
 stop reasons above do not require an unrequested board connection before host
 work; production activation and physical validation remain separate requirements.
+
+## 2026-11-11 amendment
+
+ADR-0020 replaces the v1 descriptor with layout v2: a dedicated log
+region and a raw media region in place of one LittleFS media/log region. v1
+is no longer accepted. The sections above are kept as written.

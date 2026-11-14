@@ -1,4 +1,8 @@
-use crate::{catalogue::EpisodeId, media::*};
+use crate::{
+    catalogue::{Catalogue, EpisodeId},
+    media::*,
+};
+use ekv::flash::Flash;
 use std::{
     collections::BTreeSet,
     fs::{self, File, OpenOptions},
@@ -90,12 +94,12 @@ impl Drop for HostMedia {
         let _ = fs::remove_dir_all(&self.root);
     }
 }
-impl MediaStore for HostMedia {
+impl<F: Flash> MediaStore<F> for HostMedia {
     type Error = io::Error;
     fn active(&self, id: EpisodeId) -> bool {
         self.active.contains(&id.0)
     }
-    async fn space(&mut self) -> io::Result<Space> {
+    async fn space(&mut self, _: &mut Catalogue<F>) -> io::Result<Space> {
         self.operation(|this| {
             let mut used = this.other_bytes;
             for entry in fs::read_dir(&this.root)? {
@@ -109,13 +113,23 @@ impl MediaStore for HostMedia {
             })
         })
     }
-    async fn reset_temp(&mut self, id: EpisodeId) -> io::Result<()> {
+    async fn reset_temp(
+        &mut self,
+        _: &mut Catalogue<F>,
+        id: EpisodeId,
+        _: Option<u64>,
+    ) -> io::Result<()> {
         self.operation(|this| {
             File::create(this.path(id, true))?;
             Ok(())
         })
     }
-    async fn append_temp(&mut self, id: EpisodeId, bytes: &[u8]) -> io::Result<()> {
+    async fn append_temp(
+        &mut self,
+        _: &mut Catalogue<F>,
+        id: EpisodeId,
+        bytes: &[u8],
+    ) -> io::Result<()> {
         if self.hang_append {
             self.enabled = false;
             core::future::pending::<()>().await;
@@ -127,7 +141,7 @@ impl MediaStore for HostMedia {
                 .write_all(bytes)
         })
     }
-    async fn sync_temp(&mut self, id: EpisodeId) -> io::Result<u64> {
+    async fn sync_temp(&mut self, _: &mut Catalogue<F>, id: EpisodeId) -> io::Result<u64> {
         self.operation(|this| {
             let f = File::open(this.path(id, true))?;
             if this.physical_sync {
@@ -136,7 +150,7 @@ impl MediaStore for HostMedia {
             Ok(f.metadata()?.len())
         })
     }
-    async fn publish_temp(&mut self, id: EpisodeId) -> io::Result<()> {
+    async fn publish_temp(&mut self, _: &mut Catalogue<F>, id: EpisodeId) -> io::Result<()> {
         let result = self.operation(|this| {
             if this.path(id, false).exists() {
                 return Err(io::Error::other("refuse overwrite"));
@@ -151,10 +165,10 @@ impl MediaStore for HostMedia {
         }
         result
     }
-    async fn unlink_temp(&mut self, id: EpisodeId) -> io::Result<()> {
+    async fn unlink_temp(&mut self, _: &mut Catalogue<F>, id: EpisodeId) -> io::Result<()> {
         self.operation(|this| this.unlink(id, true))
     }
-    async fn unlink_audio(&mut self, id: EpisodeId) -> io::Result<()> {
+    async fn unlink_audio(&mut self, _: &mut Catalogue<F>, id: EpisodeId) -> io::Result<()> {
         let result = self.operation(|this| this.unlink(id, false));
         if result.is_ok()
             && let Some(flag) = &self.after_unlink
@@ -163,7 +177,7 @@ impl MediaStore for HostMedia {
         }
         result
     }
-    async fn audio_len(&mut self, id: EpisodeId) -> io::Result<Option<u64>> {
+    async fn audio_len(&mut self, _: &mut Catalogue<F>, id: EpisodeId) -> io::Result<Option<u64>> {
         self.operation(|this| match fs::metadata(this.path(id, false)) {
             Ok(m) => Ok(Some(m.len())),
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
@@ -172,6 +186,7 @@ impl MediaStore for HostMedia {
     }
     async fn list_ids(
         &mut self,
+        _: &mut Catalogue<F>,
         after: Option<EpisodeId>,
         out: &mut [EpisodeId; FILE_PAGE],
     ) -> io::Result<usize> {
@@ -252,4 +267,84 @@ pub(crate) async fn available(
         cat.mark_read(id, scratch).await.unwrap();
     }
     id
+}
+
+/// Raw media device for `UnitMedia` tests: bounds-checked, counting, storing
+/// sector contents only when `keep`.
+pub(crate) struct Disk {
+    pub sectors: std::collections::BTreeMap<u32, [u8; 512]>,
+    pub keep: bool,
+    pub reads: usize,
+    pub writes: usize,
+    /// Highest sector written, if any.
+    pub highest: Option<u32>,
+    pub limit: u32,
+}
+impl Disk {
+    pub fn counting(limit: u32) -> Self {
+        Self {
+            sectors: std::collections::BTreeMap::new(),
+            keep: false,
+            reads: 0,
+            writes: 0,
+            highest: None,
+            limit,
+        }
+    }
+    pub fn storing(limit: u32) -> Self {
+        Self {
+            keep: true,
+            ..Self::counting(limit)
+        }
+    }
+}
+impl theo_storage::littlefs::SectorIo for Disk {
+    fn read_sector(
+        &mut self,
+        sector: u32,
+        out: &mut [u8; 512],
+    ) -> Result<(), littlefs_rust::Error> {
+        if sector >= self.limit {
+            return Err(littlefs_rust::Error::Io);
+        }
+        self.reads += 1;
+        *out = self.sectors.get(&sector).copied().unwrap_or([0; 512]);
+        Ok(())
+    }
+    fn write_sector(&mut self, sector: u32, data: &[u8; 512]) -> Result<(), littlefs_rust::Error> {
+        if sector >= self.limit {
+            return Err(littlefs_rust::Error::Io);
+        }
+        self.writes += 1;
+        self.highest = self.highest.max(Some(sector));
+        if self.keep {
+            self.sectors.insert(sector, *data);
+        }
+        Ok(())
+    }
+    fn sync(&mut self) -> Result<(), littlefs_rust::Error> {
+        Ok(())
+    }
+    fn check(&mut self) -> Result<(), littlefs_rust::Error> {
+        Ok(())
+    }
+}
+// Lets a test keep the disk across a simulated reboot.
+impl theo_storage::littlefs::SectorIo for &mut Disk {
+    fn read_sector(
+        &mut self,
+        sector: u32,
+        out: &mut [u8; 512],
+    ) -> Result<(), littlefs_rust::Error> {
+        (**self).read_sector(sector, out)
+    }
+    fn write_sector(&mut self, sector: u32, data: &[u8; 512]) -> Result<(), littlefs_rust::Error> {
+        (**self).write_sector(sector, data)
+    }
+    fn sync(&mut self) -> Result<(), littlefs_rust::Error> {
+        Ok(())
+    }
+    fn check(&mut self) -> Result<(), littlefs_rust::Error> {
+        Ok(())
+    }
 }

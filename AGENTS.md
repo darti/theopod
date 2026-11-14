@@ -52,6 +52,12 @@ the ESP toolchain and target are defined in `rust-toolchain.toml`.
   must stay well under 5 s. Bound any new wait in it (`with_timeout`),
   as the flush and sleep-in are; a compile-time assert in `src/main.rs`
   checks the idle wait and `FLUSH_TIMEOUT`.
+- The SD storage owner runs on core1's 48 KiB stack (`sd_worker.rs`).
+  Awaiting a large future there builds it on that stack and inlines its
+  poll into the owner's frame: await big one-shot work through `apart`
+  (`theo_storage::future::run_in`) and build large values in PSRAM
+  (t-121). Check the owner's frame in the disassembly (`l32r` literal
+  after `entry` in `__worker_task…::poll`) after changing its futures.
 - The display DMA reads the PSRAM framebuffer in place only through
   `PsramTxBuf` (64-byte bursts, aligned descriptors) with PSRAM at 80 MHz
   and transfers starting 64-byte aligned; dropping any of these brings back

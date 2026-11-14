@@ -10,7 +10,6 @@ use crate::{
 use ekv::flash::Flash;
 use heapless::{String, Vec};
 pub type Chunk = Vec<u8, AUDIO_CHUNK>;
-#[allow(clippy::large_enum_variant)]
 pub enum Command {
     Recover,
     Follow(String<256>),
@@ -36,7 +35,6 @@ pub enum Command {
     DownloadEnd(bool),
     Abort,
 }
-#[allow(clippy::large_enum_variant)]
 pub enum Reply {
     Offline,
     Rejected,
@@ -63,7 +61,7 @@ pub enum Error {
     Invalid,
     Storage,
 }
-pub struct Runtime<F: Flash, M: MediaStore> {
+pub struct Runtime<F: Flash, M: MediaStore<F>> {
     catalogue: Catalogue<F>,
     pub media: M,
     recovery: Recovery,
@@ -71,7 +69,7 @@ pub struct Runtime<F: Flash, M: MediaStore> {
     download: Option<DownloadSession>,
     enabled: bool,
 }
-impl<F: Flash, M: MediaStore> Runtime<F, M> {
+impl<F: Flash, M: MediaStore<F>> Runtime<F, M> {
     pub fn new(catalogue: Catalogue<F>, media: M) -> Self {
         Self {
             catalogue,
@@ -99,7 +97,7 @@ impl<F: Flash, M: MediaStore> Runtime<F, M> {
                 self.recovery
                     .step(&mut self.catalogue, &mut self.media, scratch)
                     .await
-                    .map_err(media_error)?,
+                    .map_err(media_error::<F, M>)?,
             ),
             Command::Follow(url) => {
                 Reply::Followed(self.catalogue.follow(&url).await.map_err(cat_error)?)
@@ -211,7 +209,7 @@ impl<F: Flash, M: MediaStore> Runtime<F, M> {
                 }
                 match DownloadSession::start(&mut self.catalogue, &mut self.media, job, scratch)
                     .await
-                    .map_err(media_error)?
+                    .map_err(media_error::<F, M>)?
                 {
                     Start::Ready(session) => {
                         self.download = Some(session);
@@ -240,7 +238,7 @@ impl<F: Flash, M: MediaStore> Runtime<F, M> {
                     .ok_or(Error::Invalid)?
                     .push(&mut self.catalogue, &mut self.media, &bytes, scratch)
                     .await
-                    .map_err(media_error)?
+                    .map_err(media_error::<F, M>)?
                 {
                     ChunkOutcome::Written => Reply::Done,
                     ChunkOutcome::WaitingForSpace => {
@@ -254,7 +252,7 @@ impl<F: Flash, M: MediaStore> Runtime<F, M> {
                     .ok_or(Error::Invalid)?
                     .finish(&mut self.catalogue, &mut self.media, complete, scratch)
                     .await
-                    .map_err(media_error)?,
+                    .map_err(media_error::<F, M>)?,
             ),
             Command::Abort => {
                 self.sync = None;
@@ -262,7 +260,7 @@ impl<F: Flash, M: MediaStore> Runtime<F, M> {
                     download
                         .abort(&mut self.catalogue, &mut self.media, scratch)
                         .await
-                        .map_err(media_error)?;
+                        .map_err(media_error::<F, M>)?;
                 }
                 Reply::Done
             }
@@ -285,10 +283,11 @@ fn sync_error<E>(error: SyncError<E>) -> Error {
         _ => Error::Invalid,
     }
 }
-fn media_error<C, M>(error: MediaError<C, M>) -> Error {
+/// A non-fatal store error left the store enabled: reject the request only.
+fn media_error<F: Flash, M: MediaStore<F>>(error: MediaError<F::Error, M::Error>) -> Error {
     match error {
         MediaError::Catalogue(e) => cat_error(e),
-        MediaError::Media(_) => Error::Storage,
+        MediaError::Media(e) if M::is_fatal(&e) => Error::Storage,
         _ => Error::Invalid,
     }
 }

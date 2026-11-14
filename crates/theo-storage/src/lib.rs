@@ -3,6 +3,7 @@
 //! - [`LogBuffer`], [`rotation_needed`]: bounded, recoverable log batches.
 //! - [`littlefs`]: `SectorStorage`, `mount_for_writes`, `append_log`, `log_tail`.
 //! - [`card_layout`], [`regions`]: checked database/media card regions.
+//! - [`scope`]: which storage scope a failed request disables.
 //! - [`sector_bus`]: cancellation-safe mailbox to the async SD service.
 //! - [`page_store`]: copy-on-write EKV pages on raw sectors.
 //!
@@ -18,6 +19,7 @@ pub mod fat_page_file;
 pub mod littlefs;
 pub mod page_store;
 pub mod regions;
+pub mod scope;
 pub mod sector_bus;
 
 use core::fmt;

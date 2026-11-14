@@ -1,5 +1,9 @@
 //! Checked, versioned SD region descriptors. Parsing never writes or formats media.
 //!
+//! Layout v2 places three ranges after the descriptors in sectors 0..16: the
+//! database (raw page store), the log (LittleFS, fixed `LOG_SECTORS`), and the
+//! media region (raw allocation units of `UNIT_SECTORS`, no filesystem).
+//!
 //! Two immutable descriptor copies occupy sectors 0 and 8. Provisioning must
 //! initialize/sync both regions before publishing either descriptor. Missing
 //! descriptors only permit trying the legacy whole-card LittleFS mount; they
@@ -10,7 +14,13 @@ use crate::page_store::{crc32, file_len};
 pub const DESCRIPTOR_SECTORS: [u32; 2] = [0, 8];
 const DATABASE_START: u32 = 16;
 const MIN_MEDIA_SECTORS: u32 = 65536; // 32 MiB; the download reserve is separate.
-const MAGIC: &[u8; 8] = b"THEOSD01";
+const MAGIC: &[u8; 8] = b"THEOSD02";
+const VERSION: u32 = 2;
+const V1_MAGIC: &[u8; 8] = b"THEOSD01";
+/// Sectors of the log region (16 MiB): two 128 KiB log files plus LittleFS headroom.
+pub const LOG_SECTORS: u32 = 32_768;
+/// Sectors of one raw media allocation unit (1 MiB).
+pub const UNIT_SECTORS: u32 = 2_048;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LayoutError {
@@ -52,6 +62,7 @@ pub struct CardLayout {
     card_sectors: u64,
     pages: u32,
     database: Region,
+    log: Region,
     media: Region,
 }
 
@@ -61,12 +72,13 @@ impl CardLayout {
             return Err(LayoutError::Geometry);
         }
         let database_sectors = file_len(pages) / 512;
-        let media_start = (DATABASE_START as u64 + database_sectors).next_multiple_of(8);
+        let log_start = (DATABASE_START as u64 + database_sectors).next_multiple_of(8);
+        let media_start = (log_start + LOG_SECTORS as u64).next_multiple_of(UNIT_SECTORS as u64);
         let media_sectors = card_sectors
             .checked_sub(media_start)
             .ok_or(LayoutError::Geometry)?
-            / 8
-            * 8;
+            / UNIT_SECTORS as u64
+            * UNIT_SECTORS as u64;
         if media_sectors < MIN_MEDIA_SECTORS as u64 {
             return Err(LayoutError::Geometry);
         }
@@ -77,6 +89,10 @@ impl CardLayout {
                 start: DATABASE_START,
                 sectors: database_sectors as u32,
             },
+            log: Region {
+                start: log_start as u32,
+                sectors: LOG_SECTORS,
+            },
             media: Region {
                 start: media_start as u32,
                 sectors: media_sectors as u32,
@@ -86,8 +102,15 @@ impl CardLayout {
     pub const fn database(self) -> Region {
         self.database
     }
+    pub const fn log(self) -> Region {
+        self.log
+    }
     pub const fn media(self) -> Region {
         self.media
+    }
+    /// Whole raw allocation units available in the media region.
+    pub const fn media_units(self) -> u32 {
+        self.media.sectors / UNIT_SECTORS
     }
     pub const fn pages(self) -> usize {
         self.pages as usize
@@ -97,33 +120,40 @@ impl CardLayout {
     pub fn encode(self) -> [u8; 512] {
         let mut bytes = [0; 512];
         bytes[..8].copy_from_slice(MAGIC);
-        bytes[8..12].copy_from_slice(&1u32.to_le_bytes());
+        bytes[8..12].copy_from_slice(&VERSION.to_le_bytes());
         bytes[12..16].copy_from_slice(&512u32.to_le_bytes());
         for (offset, value) in [
             (16, self.card_sectors),
             (24, self.database.start as u64),
             (32, self.database.sectors as u64),
-            (40, self.media.start as u64),
-            (48, self.media.sectors as u64),
+            (40, self.log.start as u64),
+            (48, self.log.sectors as u64),
+            (56, self.media.start as u64),
+            (64, self.media.sectors as u64),
         ] {
             bytes[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
         }
-        bytes[56..60].copy_from_slice(&self.pages.to_le_bytes());
+        bytes[72..76].copy_from_slice(&self.pages.to_le_bytes());
         checksum(&mut bytes);
         bytes
     }
 
     fn decode(bytes: &[u8; 512], card_sectors: u64) -> Result<Option<Self>, LayoutError> {
-        if &bytes[..8] != MAGIC {
+        let v1 = &bytes[..8] == V1_MAGIC;
+        if &bytes[..8] != MAGIC && !v1 {
             return Ok(None);
         }
-        if u32::from_le_bytes(bytes[508..].try_into().unwrap()) != crc32(&bytes[..508]) {
+        let words = bytes.as_chunks::<4>().0;
+        let (Some(&crc), Some(&pages)) = (words.get(508 / 4), words.get(72 / 4)) else {
+            return Err(LayoutError::Geometry);
+        };
+        if u32::from_le_bytes(crc) != crc32(&bytes[..508]) {
             return Err(LayoutError::Checksum);
         }
-        if bytes[8..12] != 1u32.to_le_bytes() {
+        if v1 || bytes[8..12] != VERSION.to_le_bytes() {
             return Err(LayoutError::Version);
         }
-        let pages = u32::from_le_bytes(bytes[56..60].try_into().unwrap()) as usize;
+        let pages = u32::from_le_bytes(pages) as usize;
         let layout = Self::new(card_sectors, pages)?;
         // Exact canonical encoding also checks card size, sector size, offsets,
         // capacities and every reserved byte. No arbitrary overlapping ranges.

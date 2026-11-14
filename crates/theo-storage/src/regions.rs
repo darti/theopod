@@ -1,4 +1,4 @@
-//! Unique shared-sector owner: both ranges retain one synchronous device.
+//! Unique shared-sector owner: all three ranges retain one synchronous device.
 //! Use only on the isolated storage core; Rc handles never cross cores.
 //! No constructor performs I/O, provisioning or descriptor publication.
 use crate::{
@@ -17,13 +17,21 @@ pub struct RegionIo<D> {
 }
 
 /// The caller must supply a descriptor validated against actual card capacity.
-/// The two returned handles cannot be cloned or used to construct overlapping regions.
-pub fn split<D: SectorIo>(device: D, layout: CardLayout) -> (RegionIo<D>, RegionIo<D>) {
+/// The three returned handles (database, log, media) cannot be cloned or used to
+/// construct overlapping regions.
+pub fn split<D: SectorIo>(
+    device: D,
+    layout: CardLayout,
+) -> (RegionIo<D>, RegionIo<D>, RegionIo<D>) {
     let owner = Rc::new(RefCell::new(Some(device)));
     (
         RegionIo {
             owner: owner.clone(),
             region: layout.database(),
+        },
+        RegionIo {
+            owner: owner.clone(),
+            region: layout.log(),
         },
         RegionIo {
             owner,
@@ -32,10 +40,14 @@ pub fn split<D: SectorIo>(device: D, layout: CardLayout) -> (RegionIo<D>, Region
     )
 }
 impl<D: SectorIo> RegionIo<D> {
+    /// A failed call drops the shared device, disabling every region, only
+    /// when the device itself failed; a soft (deadline) error fails this call
+    /// alone and leaves the other regions usable (t-121).
     fn access<T>(&mut self, call: impl FnOnce(&mut D) -> Result<T, Error>) -> Result<T, Error> {
         let mut owner = self.owner.borrow_mut();
-        let result = call(owner.as_mut().ok_or(Error::Io)?);
-        if result.is_err() {
+        let device = owner.as_mut().ok_or(Error::Io)?;
+        let result = call(device);
+        if result.is_err() && device.device_failed() {
             owner.take();
         }
         result
@@ -62,10 +74,18 @@ impl<D: SectorIo> SectorIo for RegionIo<D> {
     fn check(&mut self) -> Result<(), Error> {
         self.access(|device| device.check())
     }
+    fn device_failed(&self) -> bool {
+        self.owner
+            .borrow()
+            .as_ref()
+            .is_none_or(SectorIo::device_failed)
+    }
 }
 
 // Clearing the one owned device drops its unique sector client in firmware.
 // Cancellation therefore disables media and database together, including late replies.
+// A sector call that returns an error is not a cancellation: it disarms the
+// guard and leaves the decision to `RegionIo::access` (t-121).
 struct Guard<D> {
     owner: Owner<D>,
     complete: bool,
@@ -86,6 +106,18 @@ impl<D> Guard<D> {
         }
         self.complete = true;
         Ok(())
+    }
+    fn disarm(mut self) {
+        self.complete = true;
+    }
+    /// Disarm on a returned error; otherwise yield, then complete.
+    async fn finish(self, result: Result<(), Error>) -> Result<(), Error> {
+        if let Err(error) = result {
+            self.disarm();
+            return Err(error);
+        }
+        embassy_futures::yield_now().await;
+        self.complete()
     }
 }
 impl<D> Drop for Guard<D> {
@@ -121,33 +153,35 @@ impl<D: SectorIo, B: FnMut() -> Result<(), Error>> SectorFile for AsyncRegion<D,
         self.io.region.byte_len()
     }
     async fn read_sector(&mut self, relative: u64, out: &mut [u8; 512]) -> Result<(), Error> {
+        let relative = u32::try_from(relative).map_err(|_| Error::Invalid)?;
         let guard = Guard::begin(&self.io.owner)?;
         (self.before_io)()?;
-        let relative = u32::try_from(relative).map_err(|_| Error::Invalid)?;
-        self.io.read_sector(relative, out)?;
-        embassy_futures::yield_now().await;
-        guard.complete()
+        let result = self.io.read_sector(relative, out);
+        guard.finish(result).await
     }
     async fn write_sector(&mut self, relative: u64, data: &[u8; 512]) -> Result<(), Error> {
+        let relative = u32::try_from(relative).map_err(|_| Error::Invalid)?;
         let guard = Guard::begin(&self.io.owner)?;
         (self.before_io)()?;
-        let relative = u32::try_from(relative).map_err(|_| Error::Invalid)?;
-        self.io.write_sector(relative, data)?;
-        embassy_futures::yield_now().await;
-        guard.complete()
+        let result = self.io.write_sector(relative, data);
+        guard.finish(result).await
     }
     async fn sync(&mut self) -> Result<(), Error> {
         let guard = Guard::begin(&self.io.owner)?;
         (self.before_io)()?;
-        self.io.sync()?;
-        embassy_futures::yield_now().await;
-        guard.complete()
+        let result = self.io.sync();
+        guard.finish(result).await
     }
 }
 
 pub enum Discovered<D: SectorIo> {
     Legacy(crate::littlefs::SectorStorage<D>),
-    Regions(RegionIo<D>, RegionIo<D>, CardLayout),
+    Regions {
+        database: RegionIo<D>,
+        log: RegionIo<D>,
+        media: RegionIo<D>,
+        layout: CardLayout,
+    },
 }
 /// Read-only discovery. Missing descriptors try legacy geometry, never format.
 pub fn discover<D: SectorIo>(mut device: D, card_sectors: u64) -> Result<Discovered<D>, Error> {
@@ -164,8 +198,13 @@ pub fn discover<D: SectorIo>(mut device: D, card_sectors: u64) -> Result<Discove
             )?,
         )),
         Some(layout) => {
-            let (db, media) = split(device, layout);
-            Ok(Discovered::Regions(db, media, layout))
+            let (database, log, media) = split(device, layout);
+            Ok(Discovered::Regions {
+                database,
+                log,
+                media,
+                layout,
+            })
         }
     }
 }

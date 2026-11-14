@@ -55,6 +55,7 @@ disabled storage until reboot. Two costs combined:
   storage request disables both regions, podcasts included. Moving it to mount
   gives it the larger budget, not a bound. Large libraries need a follow-up
   that bounds log-allocation cost independently of media size.
+  Resolved by ADR-0020 for region-layout cards.
 - A cached sector stays cached for the life of the mount. A swapped card
   would be served stale sectors until the first miss or I/O failure. Card
   swap is unsupported; if it is added, the swap must invalidate the whole

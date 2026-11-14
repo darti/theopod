@@ -1,7 +1,7 @@
 //! Recovery by persisted local identity, never by remote URL or filename.
 use crate::{catalogue::*, media::*};
 use ekv::flash::Flash;
-pub async fn recover_one<F: Flash, M: MediaStore>(
+pub async fn recover_one<F: Flash, M: MediaStore<F>>(
     cat: &mut Catalogue<F>,
     media: &mut M,
     id: EpisodeId,
@@ -17,17 +17,26 @@ pub async fn recover_one<F: Flash, M: MediaStore>(
             .completed_audio_len(id)
             .await
             .map_err(MediaError::Catalogue)?;
-        let actual = media.audio_len(id).await.map_err(MediaError::Media)?;
+        let actual = media.audio_len(cat, id).await.map_err(MediaError::Media)?;
         if expected.is_some() && expected == actual {
-            media.unlink_temp(id).await.map_err(MediaError::Media)?;
+            media
+                .unlink_temp(cat, id)
+                .await
+                .map_err(MediaError::Media)?;
             return Ok(());
         }
     }
     if state.is_some_and(|s| s.audio == AudioState::Deleting && !s.read) {
         return Err(MediaError::InvalidState);
     }
-    media.unlink_temp(id).await.map_err(MediaError::Media)?;
-    media.unlink_audio(id).await.map_err(MediaError::Media)?;
+    media
+        .unlink_temp(cat, id)
+        .await
+        .map_err(MediaError::Media)?;
+    media
+        .unlink_audio(cat, id)
+        .await
+        .map_err(MediaError::Media)?;
     let Some(state) = state else {
         return Ok(());
     };
@@ -52,7 +61,7 @@ pub async fn recover_one<F: Flash, M: MediaStore>(
     }
     Ok(())
 }
-pub async fn recover_all<F: Flash, M: MediaStore>(
+pub async fn recover_all<F: Flash, M: MediaStore<F>>(
     cat: &mut Catalogue<F>,
     media: &mut M,
     scratch: &mut [u8],
@@ -80,7 +89,7 @@ pub async fn recover_all<F: Flash, M: MediaStore>(
     let mut ids = [EpisodeId(0); FILE_PAGE];
     loop {
         let n = media
-            .list_ids(after, &mut ids)
+            .list_ids(cat, after, &mut ids)
             .await
             .map_err(MediaError::Media)?;
         if n > FILE_PAGE {
@@ -127,7 +136,7 @@ impl Recovery {
             end: false,
         }
     }
-    pub async fn step<F: Flash, M: MediaStore>(
+    pub async fn step<F: Flash, M: MediaStore<F>>(
         &mut self,
         cat: &mut Catalogue<F>,
         media: &mut M,
@@ -151,7 +160,7 @@ impl Recovery {
         if self.files {
             let mut ids = [EpisodeId(0); FILE_PAGE];
             let n = media
-                .list_ids(self.after, &mut ids)
+                .list_ids(cat, self.after, &mut ids)
                 .await
                 .map_err(MediaError::Media)?;
             if n > FILE_PAGE {

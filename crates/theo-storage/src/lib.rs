@@ -1,4 +1,12 @@
-//! Bounded, recoverable persistent-log buffering.
+//! HAL-independent SD storage: log buffering, LittleFS sectors, regions, EKV.
+//!
+//! - [`LogBuffer`], [`rotation_needed`]: bounded, recoverable log batches.
+//! - [`littlefs`]: `SectorStorage`, `mount_for_writes`, `append_log`, `log_tail`.
+//! - [`card_layout`], [`regions`]: checked database/media card regions.
+//! - [`sector_bus`]: cancellation-safe mailbox to the async SD service.
+//! - [`page_store`]: copy-on-write EKV pages on raw sectors.
+//!
+//! See `ARCHITECTURE.md` for extension points and invariants.
 
 #![no_std]
 

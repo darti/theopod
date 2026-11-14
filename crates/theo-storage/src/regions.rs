@@ -59,6 +59,9 @@ impl<D: SectorIo> SectorIo for RegionIo<D> {
     fn sync(&mut self) -> Result<(), Error> {
         self.access(|device| device.sync())
     }
+    fn check(&mut self) -> Result<(), Error> {
+        self.access(|device| device.check())
+    }
 }
 
 // Clearing the one owned device drops its unique sector client in firmware.
@@ -153,9 +156,13 @@ pub fn discover<D: SectorIo>(mut device: D, card_sectors: u64) -> Result<Discove
     device.read_sector(0, &mut first)?;
     device.read_sector(8, &mut second)?;
     match CardLayout::select(&first, &second, card_sectors).map_err(|_| Error::Corrupt)? {
-        None => Ok(Discovered::Legacy(crate::littlefs::SectorStorage::new(
-            device, geometry,
-        ))),
+        None => Ok(Discovered::Legacy(
+            crate::littlefs::SectorStorage::try_new_in(
+                device,
+                geometry,
+                allocator_api2::alloc::Global,
+            )?,
+        )),
         Some(layout) => {
             let (db, media) = split(device, layout);
             Ok(Discovered::Regions(db, media, layout))

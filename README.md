@@ -101,7 +101,10 @@ The active file rotates at 128 KiB into `/theo.1.log` (one previous file is
 retained). Each batch is closed and synced. A controlled stop requests a final
 flush before deep sleep; a sudden reset can lose the current in-memory batch.
 Startup identification/mount waits are bounded at 3 s/2 s, and each write
-batch at 500 ms. A card/write/sync error or timeout disables SD logging until
+batch at 500 ms. Mount also runs LittleFS's deferred maintenance so the first
+append does not pay for it, and a 32-sector read cache (about 16.5 KiB of
+PSRAM) absorbs repeated metadata reads (ADR-0019). That maintenance grows with
+stored data; large podcast libraries are not yet bounded. A card/write/sync error or timeout disables SD logging until
 the next boot, preserves the unwritten batch in RAM, and leaves the UI and
 serial logging running. Reinsertion takes effect after reboot.
 
@@ -109,7 +112,8 @@ serial logging running. Reinsertion takes effect after reboot.
 `just sd-check full`, `readonly`, `removed`, `timeout` or `absent` builds a diagnostic
 firmware that injects the corresponding failure without filling or
 reformatting the card (`absent` simulates identification without a response).
-Diagnostics report worker operation times and sampled core-1 stack margin;
+Diagnostics report worker operation times, sampled core-1 stack margin and
+per-request sector counters (reads, writes, syncs, I/O time, hottest sector);
 this sample is not an exhaustive stack high-water measurement. `just sd-check rotate` exercises the real rotation
 path using isolated `sdtest2.log`/`sdtest2.1` fixtures; it refuses existing fixture
 files and leaves the generated files for inspection. `just sd-sleep-check`

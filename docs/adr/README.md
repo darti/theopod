@@ -21,3 +21,4 @@
 | [0017](0017-store-bounded-podcast-identity-and-state.md) | Store bounded podcast identity and local state in EKV | Host catalogue implemented; firmware activation pending |
 
 | [0018](0018-integrate-podcast-background-services.md) | Integrate bounded podcast background services | Implemented in software; hardware validation pending |
+| [0019](0019-prepare-littlefs-at-mount-and-cache-sector-reads.md) | Prepare LittleFS at mount and cache sector reads | Implemented; board-verified on a log-only volume |

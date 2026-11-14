@@ -25,6 +25,9 @@ impl SectorIo for HostDisk {
     fn sync(&mut self) -> Result<(), Error> {
         self.0.sync_all().map_err(|_| Error::Io)
     }
+    fn check(&mut self) -> Result<(), Error> {
+        Ok(())
+    }
 }
 
 fn run() -> Result<(), String> {

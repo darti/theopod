@@ -128,3 +128,8 @@ it does not authorize tracking the fork or unrelated changes. A path patch
 retains both0.1.1crate source snapshots under `vendor/littlefs`, with provenance
 and removal criteria in `THEO-PATCH.md`. Public safe API and on-disk format stay
 the same. Adopt upstream once the correction or reviewed equivalent merges.
+
+## 2026-11-11 mount preparation and sector read cache (t-103)
+
+The startup `gc()` preparation and the bounded sector read cache that bring
+the first log append under its 500 ms budget are recorded in ADR-0019.

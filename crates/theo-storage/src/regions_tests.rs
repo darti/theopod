@@ -65,6 +65,13 @@ impl SectorIo for Disk {
             Ok(())
         }
     }
+    fn check(&mut self) -> Result<(), Error> {
+        if self.0.borrow().fail {
+            Err(Error::Io)
+        } else {
+            Ok(())
+        }
+    }
 }
 fn setup() -> (
     RegionIo<Disk>,

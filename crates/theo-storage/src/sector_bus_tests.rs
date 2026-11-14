@@ -67,6 +67,9 @@ impl SectorIo for Proxy {
     fn sync(&mut self) -> Result<(), Error> {
         self.call(Operation::Sync).map(|_| ())
     }
+    fn check(&mut self) -> Result<(), Error> {
+        Ok(())
+    }
 }
 
 // Regression (t-101): filesystem and async device run on separate threads.

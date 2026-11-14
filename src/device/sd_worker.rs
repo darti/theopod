@@ -4,6 +4,8 @@
 
 use alloc::{rc::Rc, vec::Vec};
 use core::cell::Cell;
+#[cfg(feature = "sd-check")]
+use core::cell::RefCell;
 use embassy_sync::{
     blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel, signal::Signal,
 };
@@ -194,10 +196,21 @@ pub async fn report_log_tail(storage: &mut SdStorage) -> Result<(), Error> {
     Ok(())
 }
 
+/// Distinct sectors traced per request by the `sd-check` read histogram.
+#[cfg(feature = "sd-check")]
+const TRACED_SECTORS: usize = 256;
+
 #[cfg(feature = "sd-check")]
 struct Measurements {
     stack_bottom: usize,
     min_sampled_headroom: Cell<usize>,
+    reads: Cell<usize>,
+    writes: Cell<usize>,
+    syncs: Cell<usize>,
+    io_us: Cell<u64>,
+    max_io_us: Cell<u64>,
+    read_sectors: RefCell<Vec<(u32, usize)>>,
+    untracked_reads: Cell<usize>,
 }
 
 #[cfg(feature = "sd-check")]
@@ -226,7 +239,7 @@ struct CardIo {
 }
 
 impl CardIo {
-    fn check(&self) -> Result<(), Error> {
+    fn ensure_live(&self) -> Result<(), Error> {
         #[cfg(feature = "sd-check")]
         self.measurements.sample();
         if SECTORS.is_disabled() || Instant::now() >= self.deadline.get() {
@@ -240,17 +253,50 @@ impl CardIo {
 
 impl CardIo {
     fn request(&mut self, operation: Operation) -> Result<[u8; 512], Error> {
-        self.check()?;
+        self.ensure_live()?;
+        #[cfg(feature = "sd-check")]
+        let started = {
+            let count = match &operation {
+                Operation::Read(_) => &self.measurements.reads,
+                Operation::Write(..) => &self.measurements.writes,
+                Operation::Sync => &self.measurements.syncs,
+            };
+            count.set(count.get() + 1);
+            if let Operation::Read(sector) = &operation {
+                let mut trace = self.measurements.read_sectors.borrow_mut();
+                if let Some((_, hits)) = trace.iter_mut().find(|(key, _)| key == sector) {
+                    *hits += 1;
+                } else if trace.len() < TRACED_SECTORS {
+                    trace.push((*sector, 1));
+                } else {
+                    self.measurements
+                        .untracked_reads
+                        .set(self.measurements.untracked_reads.get() + 1);
+                }
+            }
+            Instant::now()
+        };
         let deadline = self.deadline.get();
         // Core 0's executor runs the async SD/I2C service while this core
         // waits. Its channels carry owned buffers only.
-        self.client.exchange_blocking(
+        let result = self.client.exchange_blocking(
             SectorRequest {
                 operation,
                 deadline_ticks: deadline.as_ticks(),
             },
             || SECTORS.is_disabled() || Instant::now() >= deadline,
-        )
+        );
+        #[cfg(feature = "sd-check")]
+        {
+            let elapsed = started.elapsed().as_micros();
+            self.measurements
+                .io_us
+                .set(self.measurements.io_us.get() + elapsed);
+            self.measurements
+                .max_io_us
+                .set(self.measurements.max_io_us.get().max(elapsed));
+        }
+        result
     }
 }
 
@@ -264,6 +310,9 @@ impl SectorIo for CardIo {
     }
     fn sync(&mut self) -> Result<(), Error> {
         self.request(Operation::Sync).map(|_| ())
+    }
+    fn check(&mut self) -> Result<(), Error> {
+        self.ensure_live()
     }
 }
 
@@ -295,6 +344,13 @@ async fn owner(geometry: Geometry, sectors: u64, _stack_bottom: usize) {
     let measurements = Rc::new(Measurements {
         stack_bottom: _stack_bottom,
         min_sampled_headroom: Cell::new(STACK_SIZE),
+        reads: Cell::new(0),
+        writes: Cell::new(0),
+        syncs: Cell::new(0),
+        io_us: Cell::new(0),
+        max_io_us: Cell::new(0),
+        read_sectors: RefCell::new(Vec::with_capacity(TRACED_SECTORS)),
+        untracked_reads: Cell::new(0),
     });
     let deadline = Rc::new(Cell::new(Instant::now()));
     let mut card = Some(CardIo {
@@ -324,7 +380,16 @@ async fn owner(geometry: Geometry, sectors: u64, _stack_bottom: usize) {
             Command::RotationFinish => "rotation-finish",
         };
         #[cfg(feature = "sd-check")]
-        let started = Instant::now();
+        let started = {
+            measurements.reads.set(0);
+            measurements.writes.set(0);
+            measurements.syncs.set(0);
+            measurements.io_us.set(0);
+            measurements.max_io_us.set(0);
+            measurements.read_sectors.borrow_mut().clear();
+            measurements.untracked_reads.set(0);
+            Instant::now()
+        };
         let result = if SECTORS.is_disabled() || Instant::now() >= request.deadline {
             Err(Error::Io)
         } else {
@@ -399,12 +464,31 @@ async fn owner(geometry: Geometry, sectors: u64, _stack_bottom: usize) {
             card = None;
         }
         #[cfg(feature = "sd-check")]
+        let (unique, hottest, hot_reads) = {
+            let trace = measurements.read_sectors.borrow();
+            let (sector, count) = trace
+                .iter()
+                .max_by_key(|(_, count)| count)
+                .copied()
+                .unwrap_or((0, 0));
+            (trace.len(), sector, count)
+        };
+        #[cfg(feature = "sd-check")]
         esp_println::println!(
-            "INFO - SD measurement: op={} elapsed_us={} sampled_stack_margin={} status={}",
+            "INFO - SD measurement: op={} elapsed_us={} sampled_stack_margin={} status={} reads={} writes={} syncs={} io_us={} max_io_us={} unique={} hottest={} hot_reads={} untracked={}",
             label,
             started.elapsed().as_micros(),
             measurements.min_sampled_headroom.get(),
-            if result.is_ok() { "ok" } else { "error" }
+            if result.is_ok() { "ok" } else { "error" },
+            measurements.reads.get(),
+            measurements.writes.get(),
+            measurements.syncs.get(),
+            measurements.io_us.get(),
+            measurements.max_io_us.get(),
+            unique,
+            hottest,
+            hot_reads,
+            measurements.untracked_reads.get(),
         );
         REPLY.signal(result);
     }
@@ -446,8 +530,9 @@ pub async fn test_rotation(storage: &mut SdStorage) -> Result<(), Error> {
 }
 
 type DbFlash = PageStore<AsyncRegion<CardIo>, &'static esp_alloc::ExternalMemory>;
-type MediaFs = Filesystem<SectorStorage<MediaIo>>;
-type PodcastOwner = Runtime<DbFlash, LittlefsMedia<SectorStorage<MediaIo>>>;
+type MediaStorage = SectorStorage<MediaIo, &'static esp_alloc::ExternalMemory>;
+type MediaFs = Filesystem<MediaStorage>;
+type PodcastOwner = Runtime<DbFlash, LittlefsMedia<MediaStorage>>;
 enum MediaIo {
     Legacy(CardIo),
     Region(RegionIo<CardIo>),
@@ -469,6 +554,12 @@ impl SectorIo for MediaIo {
         match self {
             Self::Legacy(io) => io.sync(),
             Self::Region(io) => io.sync(),
+        }
+    }
+    fn check(&mut self) -> Result<(), Error> {
+        match self {
+            Self::Legacy(io) => io.check(),
+            Self::Region(io) => io.check(),
         }
     }
 }
@@ -496,18 +587,21 @@ async fn mount_owner(
             )
         }
     };
-    let storage = SectorStorage::new(io, geometry);
+    let storage = SectorStorage::try_new_in(io, geometry, &esp_alloc::ExternalMemory)
+        .map_err(|error| (error, ()))?;
     // Explicit provisioning remains legacy-only; normal boot never formats.
     #[cfg(feature = "sd-provision")]
     let fs = if option_env!("THEO_SD_PROVISION") == Some("format") && database.is_none() {
-        littlefs::provision_once(storage, geometry)
+        let fs = littlefs::provision_once(storage, geometry)
             .map(|(fs, _)| fs)
-            .map_err(|e| (e, ()))?
+            .map_err(|e| (e, ()))?;
+        littlefs::prepare_for_writes(&fs).map_err(|e| (e, ()))?;
+        fs
     } else {
-        Filesystem::mount(storage, geometry.config()).map_err(|(e, _)| (e, ()))?
+        littlefs::mount_for_writes(storage, geometry).map_err(|e| (e, ()))?
     };
     #[cfg(not(feature = "sd-provision"))]
-    let fs = Filesystem::mount(storage, geometry.config()).map_err(|(e, _)| (e, ()))?;
+    let fs = littlefs::mount_for_writes(storage, geometry).map_err(|e| (e, ()))?;
     let fs = Rc::new(fs);
     if let Some((db, layout)) = database {
         if allocated {

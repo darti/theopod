@@ -120,8 +120,9 @@ sleep-check = []
 slint-build.workspace = true
 toml = "1.1"
 
+# Speed over size (t-157, ADR-0019): the 16 MB app partition has room.
 [profile.release]
-opt-level = "s"
+opt-level = 3
 lto = "thin"
 codegen-units = 1
 debug = 2
@@ -139,7 +140,5 @@ ekv = { path = "vendor/ekv" }
 [patch."https://github.com/light-player/littlefs-rust"]
 littlefs-rust = { path = "vendor/littlefs/littlefs-rust" }
 
-[profile.release.package.esp-radio]
-opt-level = 3
 [profile.dev.package.esp-radio]
 opt-level = 3

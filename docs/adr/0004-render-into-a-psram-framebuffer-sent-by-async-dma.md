@@ -7,6 +7,8 @@
   DMA arithmetic (t-30), flush retry policy (t-1, t-28), several row bands
   per frame (t-5), PSRAM clock measured and self-tested (t-27); the
   display owns the framebuffer (t-46)
+- Amended: 2026-11-14, underrun margin re-checked with the CPU at 240 MHz
+  (t-157, ADR-0019)
 
 ## Context
 
@@ -133,8 +135,9 @@ the previous one).
   the bursts and alignment (t-27): resending the full frame every 16 ms,
   81% of 1,000 flushes underran with an idle CPU, and every one with a
   task copying PSRAM meanwhile; 80 MHz underran none of 2,000 in the same
-  test. To catch a marginal clock, `Board::init` pattern-tests the
-  framebuffer region (`theo_drivers::check_pattern_with`, an address hash
+  test. With the CPU at 240 MHz (ADR-0019), the same conditions underran
+  none of 1,800 (t-157). To catch a marginal clock, `Board::init`
+  pattern-tests the framebuffer region (`theo_drivers::check_pattern_with`, an address hash
   and its complement in 32-bit words, 98 ms) and panics on a mismatch.
   Each pattern is written back and dropped from the data cache before it
   is checked (`psram_tx_buf::write_back_and_invalidate`, ROM

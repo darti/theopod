@@ -27,6 +27,7 @@ mod provision_guard;
 mod prune_scale_tests;
 pub mod reclaim;
 pub mod recovery;
+pub mod resume;
 #[cfg(test)]
 mod scale_tests;
 pub mod service;

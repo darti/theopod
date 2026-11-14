@@ -135,7 +135,8 @@ mod tests;
 pub struct ResponseHeaders {
     pub length: Option<u64>,
     pub chunked: bool,
-    pub partial: bool,
+    /// A satisfied `Content-Range` (`bytes first-last/total`).
+    pub range: Option<ContentRange>,
     pub location: String<MAX_URL_BYTES>,
     pub etag: String<512>,
     pub modified: String<128>,
@@ -169,7 +170,10 @@ impl ResponseHeaders {
             {
                 return Err(Error::Url);
             } else if name.eq_ignore_ascii_case("content-range") {
-                out.partial = true;
+                if out.range.is_some() {
+                    return Err(Error::Url);
+                }
+                out.range = Some(ContentRange::parse(value).ok_or(Error::Url)?);
             } else if name.eq_ignore_ascii_case("location") {
                 if !out.location.is_empty() {
                     return Err(Error::Url);
@@ -191,4 +195,72 @@ impl ResponseHeaders {
         }
         Ok(out)
     }
+}
+/// A satisfied byte range of a `206` response, `last` inclusive.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ContentRange {
+    /// Offset of the first byte sent.
+    pub first: u64,
+    /// Offset of the last byte sent, inclusive.
+    pub last: u64,
+    /// Length of the whole representation.
+    pub total: u64,
+}
+impl ContentRange {
+    /// Parse `bytes first-last/total`; `*` forms and `last >= total` are refused.
+    fn parse(value: &str) -> Option<Self> {
+        let (span, total) = value.strip_prefix("bytes ")?.split_once('/')?;
+        let (first, last) = span.split_once('-')?;
+        let number = |s: &str| {
+            (!s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
+                .then(|| s.parse::<u64>().ok())
+                .flatten()
+        };
+        let range = Self {
+            first: number(first)?,
+            last: number(last)?,
+            total: number(total)?,
+        };
+        (range.first <= range.last && range.last < range.total).then_some(range)
+    }
+}
+/// The request headers of one hop, `Range` text written into `range`.
+///
+/// `from > 0` with a validator resumes: `Range: bytes={from}-` and
+/// `If-Range` (ADR-0029); a range without a validator is never sent.
+/// Otherwise `etag`/`modified` are the sync conditionals. Four headers and
+/// `bytes=` plus 20 digits always fit, so the pushes cannot fail.
+pub fn request_headers<'a>(
+    range: &'a mut String<32>,
+    from: u64,
+    etag: &'a str,
+    modified: &'a str,
+) -> Vec<(&'a str, &'a str), 4> {
+    range.clear();
+    let mut headers = Vec::new();
+    let _ = headers.push(("Accept-Encoding", "identity"));
+    let _ = headers.push(("Connection", "close"));
+    if from > 0 {
+        if !etag.is_empty() {
+            let _ = core::fmt::Write::write_fmt(range, format_args!("bytes={from}-"));
+            let _ = headers.push(("Range", range.as_str()));
+            let _ = headers.push(("If-Range", etag));
+        }
+        return headers;
+    }
+    if !etag.is_empty() {
+        let _ = headers.push(("If-None-Match", etag));
+    }
+    if !modified.is_empty() {
+        let _ = headers.push(("If-Modified-Since", modified));
+    }
+    headers
+}
+/// The `If-Range` validator of a response: its strong ETag, else (no ETag at
+/// all) its `Last-Modified`. A weak ETag gives none (RFC 9110 13.1.5).
+pub fn range_validator<'a>(etag: &'a str, modified: &'a str) -> Option<&'a str> {
+    if !etag.is_empty() {
+        return (!etag.starts_with("W/")).then_some(etag);
+    }
+    (!modified.is_empty()).then_some(modified)
 }

@@ -86,7 +86,7 @@ side-session notes `t-164-board-audio.md`.
 | `esp_audio_codec` | AAC, MP3 | closed `.a` (4.4 MB), "Espressif Modified MIT" | AAC 51 KB heap, ~20 KB stack | Espressif table: AAC-LC 48k stereo 6.75 %, MP3 8.17 % (≈ 16–20 MHz if per core; AAC figure from a 90 kbps test) |
 | `symphonia-codec-aac` | AAC-LC | Rust, MPL-2.0, f32, `std` only | – | 30–60 MHz [est] after a `no_std` fork |
 | `nanomp3-core` 0.2 | MP3 | Rust `no_std`, no alloc, no `unsafe`, MIT/Apache, f32, bit-exact with minimp3 | ~18.6 KB | 20–40 MHz [est] |
-| Helix MP3 | MP3 | C, RPSL/RCSL | not measured | 22–35 MHz [est] |
+| Helix MP3 | MP3 | C, RPSL/RCSL | 23.8 KB (measured) | 22–35 MHz [est]; measured 32.5 MHz |
 | esphome micro-mp3 (OpenCore) | MP3 | C, Apache-2.0, fixed point | ~22.8 KB | 18.2 MHz (published RTF 0.076, 128 kbps 48k stereo) |
 
 Excluded: faad2 (GPL), fdk-aac (C++, no patent grant, heavy), symphonia MP3
@@ -116,9 +116,14 @@ esp-alloc. Details and sources: side-session notes `t-164-decoders.md`.
 1. **Decoders.** AAC-LC: Helix AAC (measured 22 MHz), built by `build.rs`
    with the ESP GCC as the benchmark does, after a licence review of
    RPSL/RCSL; `esp_audio_codec` stays the fallback. MP3: Helix MP3 from the
-   same sources (to be measured), not `nanomp3-core`: the Xtensa LLVM backend
-   only builds it at opt-level 1, where it needs 101 MHz (42 % of a core).
-   Revisit `nanomp3-core` if that backend bug is fixed. A host-tested `no_std` crate
+   same sources (measured 32.5 MHz), not `nanomp3-core`: the Xtensa LLVM
+   backend only builds it at opt-level 1, where it needs 101 MHz (42 % of a
+   core). Revisit `nanomp3-core` if that backend bug is fixed. Sources:
+   `pschatzmann/codec-helix` (formerly `arduino-libhelix`) at `f6e55a3`,
+   only `src/libhelix-aac` and `src/libhelix-mp3` (Helix code, RPSL/RCSL);
+   the repository's own `License.txt` is GPL-3.0 and covers its Arduino
+   wrapper, which is not used (`tools/audio-bench/shim` replaces its
+   `ConfigHelix.h` and allocator). A host-tested `no_std` crate
    (`crates/theo-audio`) holds format sniffing, a hand-written MP4 reader
    (`moov/trak/mdia/minf/stbl`, `mdhd`, `esds`, `stsc`, `stco/co64`, `stsz`
    read in 4 KiB pages from the card, never loaded whole; a sparse seek index
@@ -202,23 +207,29 @@ esp-alloc. Details and sources: side-session notes `t-164-decoders.md`.
 `audio_tone.rs`): 30 s clips copied to PSRAM, decoded on core1 as a task in
 the SD owner's executor (yielding after each frame), CCOUNT per frame with
 interrupts included; one decode call in 64 runs with the free stack painted
-instead of timed. Two runs, the second after reflashing; figures agree within
-1 %.
+instead of timed. Three runs for Helix AAC and `nanomp3-core`, one for Helix
+MP3 (added in the third); figures agree within 1 %.
 
 | Decoder (build) | Clip | Decoder state | Mean cycles/frame | MHz for real time | Worst frame | Stack per call |
 |---|---|---|---|---|---|---|
 | Helix AAC (GCC -O2, no SBR) | AAC-LC 48 kHz stereo 192 kbps, 1,384 frames | 20,656 B internal | 474,619 | 22.2 (9.2 %) | 2.85 ms | ≤ 0.5 KB (measurement floor) |
 | Helix AAC | same | PSRAM | 462,806 | 21.7 (9.0 %) | 3.06 ms | ≤ 0.5 KB |
-| `nanomp3-core` 0.2 (opt-level 1) | MP3 128 kbps 44.1 kHz, 1,130 frames | 22,784 B internal | 2,637,134 | 101.0 (42 %) | 13.0 ms | 1.6 KB |
+| Helix MP3 (GCC -O2) | MP3 128 kbps 44.1 kHz, 1,130 frames | 23,824 B internal | 848,117 | 32.5 (13.5 %) | 3.85 ms | ≤ 0.5 KB |
+| Helix MP3 | same | PSRAM | 847,759 | 32.5 (13.5 %) | 4.01 ms | ≤ 0.5 KB |
+| `nanomp3-core` 0.2 (opt-level 1) | same | 22,784 B internal | 2,637,134 | 101.0 (42 %) | 13.0 ms | 1.6 KB |
 | `nanomp3-core` 0.2 (opt-level 1) | same | PSRAM | 2,631,850 | 100.7 (42 %) | 11.5 ms | 1.6 KB |
 
-- No decode error; peak samples 25,807 (AAC) and 25,435 (MP3): real audio,
-  not silence. MP3 frames before the first decodable one (bit reservoir) are
+- No decode error; peak samples 25,807 (AAC) and 25,435 (MP3, identical for
+  Helix MP3 and `nanomp3-core`, a cross-check of both): real audio, not
+  silence. MP3 frames before the first decodable one (bit reservoir) are
   excluded.
 - Decoder state in PSRAM costs nothing measurable (cache), so the state
   lives in PSRAM and internal RAM stays free.
 - Helix AAC's 22 MHz is below the 28–45 MHz estimate. Its worst frame (3 ms)
-  is far below a 21.3 ms frame period.
+  is far below a 21.3 ms frame period. Helix MP3's 32.5 MHz is within its
+  22–35 MHz estimate; worst frame 4 ms against a 26.1 ms frame period. MP3
+  costs more per second than AAC despite the lower bitrate: Helix AAC's
+  fixed-point IMDCT is cheaper than MP3's hybrid filterbank.
 - `nanomp3-core` fails to build at opt-level `s`, 2 and 3 ("LLVM ERROR:
   Cannot select: Constant<4608>" in `minimp3::l3_decode`); at opt-level 1
   it is ~4.5× Helix AAC per second of audio. Not usable as is.
@@ -247,8 +258,7 @@ instead of timed. Two runs, the second after reflashing; figures agree within
   interrupt (~2.4 KB today), owner request deadlines stretched by decode and
   feeder time, PIE state saving if PIE is ever used, PSRAM bandwidth with the
   display DMA (the PCM ring is in PSRAM; DMA reads stay in internal RAM).
-- Measured load with AAC playback on core1: ~9 % of the core for decoding,
-  so owner (~30 % during a download) plus decoding stays under half of
-  core1.
-- Next steps: measure Helix MP3 the same way; then the licence review that
-  gates committing Helix sources.
+- Measured load on core1: ~9 % (AAC) or ~13.5 % (MP3) for decoding, so the
+  owner (~30 % during a download) plus decoding stays under half of core1.
+- Next step: the RPSL/RCSL licence review that gates committing Helix
+  sources (and AAC patent licensing for any commercial use).

@@ -92,20 +92,20 @@ sd-sleep-check log="target/sd-sleep.log" port="":
 imu-calibrate port="":
     ESP_LOG=info LIBCLANG_PATH="{{libclang_path}}" PATH="{{gcc_path}}:${PATH}" RUSTUP_TOOLCHAIN=esp cargo espflash flash --release --features imu-calibration --monitor --chip {{chip}} {{ if port != "" { "--port " + port } else { "" } }}
 
-# Fetch Helix AAC (pinned, RPSL/RCSL, kept under target/) and 30 s AAC/MP3
+# Fetch Helix AAC and MP3 (pinned, RPSL/RCSL, kept under target/) and 30 s AAC/MP3
 # clips (copyrighted, kept under target/), as `audio-bench` needs (t-164).
 audio-bench-inputs:
     #!/usr/bin/env bash
     set -euo pipefail
-    if [ ! -d target/helix/libhelix-aac ]; then
+    if [ ! -d target/helix/libhelix-aac ] || [ ! -d target/helix/libhelix-mp3 ]; then
         mkdir -p target/helix
-        curl -sSfL https://codeload.github.com/pschatzmann/arduino-libhelix/tar.gz/f6e55a307c7577c5e3dfe1bf424a61075235fa08 | tar xz -C target/helix --strip-components=2 '*/src/libhelix-aac'
+        curl -sSfL https://codeload.github.com/pschatzmann/codec-helix/tar.gz/f6e55a307c7577c5e3dfe1bf424a61075235fa08 | tar xz -C target/helix --strip-components=2 '*/src/libhelix-aac' '*/src/libhelix-mp3'
     fi
     mkdir -p target/audio-bench
     [ -f target/audio-bench/aac.bin ] || python3 -I tools/audio-bench/clip.py aac "$(cat docs/experiments/t106/audio.url)" target/audio-bench
     [ -f target/audio-bench/mp3.bin ] || python3 -I tools/audio-bench/clip.py mp3 https://media.radiofrance-podcast.net/podcast09/11549-21.03.2020-ITEMA_22312642-2020F16177S0081-NET_MFI_13439893-27FF-4D58-8BD5-395C69D6CCE8-22-ee341284cbb67507d5f06879819274e5.mp3 target/audio-bench
 
-# Flash the decoder benchmark (Helix AAC, nanomp3-core on core1) and record
+# Flash the decoder benchmark (Helix AAC/MP3, nanomp3-core on core1) and record
 # the log from boot until "audio-bench: done" (t-164, ADR-0026).
 audio-bench log="target/audio-bench.log" port="": audio-bench-inputs
     ESP_LOG=info LIBCLANG_PATH="{{libclang_path}}" PATH="{{gcc_path}}:${PATH}" RUSTUP_TOOLCHAIN=esp cargo espflash flash --release --features audio-bench --monitor --non-interactive --chip {{chip}} {{ if port != "" { "--port " + port } else { "" } }} | tee {{log}}

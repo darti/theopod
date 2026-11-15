@@ -3,7 +3,7 @@
 //! Runs as a task in core1's executor next to the SD owner, as ADR-0026
 //! proposes. Copies 30 s clips (AAC-LC 48 kHz stereo 192 kbps raw access
 //! units, MP3 128 kbps 44.1 kHz) into PSRAM, then decodes every frame with
-//! Helix AAC and nanomp3-core, the decoder state in internal RAM then in
+//! Helix AAC, Helix MP3 and nanomp3-core, the decoder state in internal RAM then in
 //! PSRAM. Logs cycles per frame (CCOUNT, interrupts included), the MHz
 //! needed for real time and the stack depth of one decode call.
 
@@ -46,7 +46,24 @@ unsafe extern "C" {
         bytes_left: *mut i32,
         output: *mut i16,
     ) -> i32;
+    fn theo_helix_arena(ptr: *mut c_void, size: i32);
+    fn theo_helix_arena_used() -> i32;
+    fn MP3InitDecoder() -> *mut c_void;
+    fn MP3FindSyncWord(input: *mut u8, bytes: i32) -> i32;
+    fn MP3Decode(
+        decoder: *mut c_void,
+        input: *mut *mut u8,
+        bytes_left: *mut i32,
+        output: *mut i16,
+        use_size: i32,
+    ) -> i32;
 }
+
+/// Helix MP3's "no main data yet" (bit reservoir) and "input exhausted".
+const ERR_MP3_INDATA_UNDERFLOW: i32 = -1;
+const ERR_MP3_MAINDATA_UNDERFLOW: i32 = -2;
+/// Bump arena Helix MP3 allocates its state from (shim `helix_malloc`).
+const MP3_ARENA: usize = 32 * 1024;
 
 /// Per-run statistics, logged as one line.
 struct Stats {
@@ -245,6 +262,74 @@ async fn nanomp3<A: allocator_api2::alloc::Allocator>(
     stats
 }
 
+async fn helix_mp3<A: allocator_api2::alloc::Allocator>(
+    alloc: A,
+    clip: &mut [u8],
+    stack_bottom: usize,
+) -> Stats {
+    let mut stats = Stats::new();
+    let mut arena = Vec::with_capacity_in(MP3_ARENA, &alloc);
+    arena.resize(MP3_ARENA, 0u8);
+    let mut pcm = Vec::with_capacity_in(2 * 1152, &alloc);
+    pcm.resize(2 * 1152, 0i16);
+    // SAFETY: `arena` outlives the decoder (both dropped at the end of this
+    // function) and is only handed out by the shim's helix_malloc.
+    let decoder = unsafe {
+        theo_helix_arena(arena.as_mut_ptr().cast(), MP3_ARENA as i32);
+        MP3InitDecoder()
+    };
+    if decoder.is_null() {
+        log::error!("audio-bench helix-mp3: init failed (arena {MP3_ARENA} B)");
+        return stats;
+    }
+    // SAFETY: plain C function without arguments.
+    let used = unsafe { theo_helix_arena_used() };
+    log::info!("audio-bench helix-mp3: state {used} B");
+    let mut input = clip.as_mut_ptr();
+    let mut left = clip.len() as i32;
+    // SAFETY: `input`/`left` describe the clip.
+    let sync = unsafe { MP3FindSyncWord(input, left) };
+    if sync < 0 {
+        log::error!("audio-bench helix-mp3: no sync word");
+        return stats;
+    }
+    // SAFETY: `sync` is an offset inside the clip.
+    input = unsafe { input.add(sync as usize) };
+    left -= sync;
+    let mut index = 0usize;
+    while left > 0 {
+        let before = left;
+        let mut result = 0;
+        let mut call = || {
+            // SAFETY: `input`/`left` stay within the clip (Helix advances
+            // both), `pcm` holds 2 x 1152 samples, a stereo Layer III frame.
+            result = unsafe { MP3Decode(decoder, &mut input, &mut left, pcm.as_mut_ptr(), 0) };
+        };
+        if index.is_multiple_of(64) {
+            stats.stack = stats.stack.max(stack_depth(stack_bottom, &mut call));
+        } else {
+            let start = get_cycle_count();
+            call();
+            let cycles = get_cycle_count().wrapping_sub(start);
+            if result == 0 {
+                stats.cycles.push(cycles);
+            }
+        }
+        index += 1;
+        match result {
+            0 => stats.peak = stats.peak.max(peak(&pcm)),
+            ERR_MP3_MAINDATA_UNDERFLOW => (),
+            ERR_MP3_INDATA_UNDERFLOW => break,
+            _ => stats.errors += 1,
+        }
+        if left == before {
+            break;
+        }
+        embassy_futures::yield_now().await;
+    }
+    stats
+}
+
 /// Runs every benchmark once, then idles.
 #[embassy_executor::task]
 pub async fn run(stack_bottom: usize) {
@@ -269,6 +354,12 @@ pub async fn run(stack_bottom: usize) {
     helix_aac(&ExternalMemory, &mut aac, AAC_LEN, stack_bottom)
         .await
         .log("helix-aac state=psram", AAC_FPS);
+    helix_mp3(&InternalMemory, &mut mp3, stack_bottom)
+        .await
+        .log("helix-mp3 state=internal", MP3_FPS);
+    helix_mp3(&ExternalMemory, &mut mp3, stack_bottom)
+        .await
+        .log("helix-mp3 state=psram", MP3_FPS);
     nanomp3(&InternalMemory, &mp3, stack_bottom)
         .await
         .log("nanomp3 state=internal", MP3_FPS);

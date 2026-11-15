@@ -226,7 +226,8 @@ instead of timed. Two runs, the second after reflashing; figures agree within
   Waveshare's `es8311.c`, amp on GPIO46): the ES8311 answers at 0x18 (chip
   ID register 0xFD = 0x83); the DMA ring drained 581,064 B in 3,013 ms =
   192,852 B/s for 192,000 expected (pushes are counted per refill), no DMA
-  error. Whether the tone is audible needs someone listening at the board.
+  error. The user heard the 3 s 1 kHz tone from the speaker (2026-11-15):
+  codec init, I2S wiring and the GPIO46 amplifier enable are confirmed.
 - Core1 stack: the bench task panicked on the stack guard on its first run
   because `Box::try_new_in(Decoder::new())` built the 18.6 KB decoder on the
   stack before boxing (the t-121 pattern); copying a const static into the
@@ -249,5 +250,5 @@ instead of timed. Two runs, the second after reflashing; figures agree within
 - Measured load with AAC playback on core1: ~9 % of the core for decoding,
   so owner (~30 % during a download) plus decoding stays under half of
   core1.
-- Next steps: measure Helix MP3 the same way; listen to the tone on the
-  board; then the licence review that gates committing Helix sources.
+- Next steps: measure Helix MP3 the same way; then the licence review that
+  gates committing Helix sources.

@@ -26,3 +26,4 @@
 | [0022](0022-store-the-podcast-catalogue-in-redb.md) | Store the podcast catalogue in redb | Accepted |
 | [0023](0023-drive-the-microsd-from-the-storage-core.md) | Drive the microSD from the storage core | Accepted |
 | [0024](0024-run-tls-aes-gcm-on-the-aes-peripheral.md) | Run TLS AES-GCM on the AES peripheral | Accepted |
+| [0025](0025-run-the-cpu-at-240-mhz.md) | Run the CPU at 240 MHz and build for speed | Accepted |

@@ -15,7 +15,8 @@ the ESP toolchain and target are defined in `rust-toolchain.toml`.
   not justify closing it.
 
 - Preserve the existing `no_std`/`no_main` model and ESP-HAL startup conventions.
-- Display pin assignments, panel geometry, the BOOT button, PSRAM mode and
+- Display pin assignments, panel geometry, the BOOT button, the CPU clock
+  (240 MHz, ADR-0025), PSRAM mode and
   frequency, and the TCA9554 power-up values are defined in
   `src/device/mod.rs`, the single source of truth for board wiring; the
   power-up sequence itself is `PanelPower` in `crates/theo-drivers`. The
@@ -48,6 +49,9 @@ the ESP toolchain and target are defined in `rust-toolchain.toml`.
 
 ## Gotchas
 
+- ADR numbers race between parallel branches: take the next free number
+  from `git ls-tree --name-only origin/main docs/adr/` after a fetch, and
+  recheck it before merging.
 - The UI loop feeds the main watchdog once per pass (ADR-0009): a pass
   must stay well under 5 s. Bound any new wait in it (`with_timeout`),
   as the flush and sleep-in are; a compile-time assert in `src/main.rs`

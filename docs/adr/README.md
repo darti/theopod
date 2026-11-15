@@ -27,3 +27,4 @@
 | [0023](0023-drive-the-microsd-from-the-storage-core.md) | Drive the microSD from the storage core | Accepted |
 | [0024](0024-run-tls-aes-gcm-on-the-aes-peripheral.md) | Run TLS AES-GCM on the AES peripheral | Accepted |
 | [0025](0025-run-the-cpu-at-240-mhz.md) | Run the CPU at 240 MHz and build for speed | Accepted |
+| [0026](0026-decode-podcast-audio-on-the-storage-core.md) | Decode podcast audio on the storage core and output it through I2S DMA | Proposed |

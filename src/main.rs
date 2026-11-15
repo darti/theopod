@@ -121,6 +121,10 @@ async fn main(spawner: Spawner) {
     device::spawn_storage(spawner, sd);
     podcasts::spawn(spawner, wifi, usb);
     input::spawn(spawner, button, deep_sleep, touch, imu);
+    #[cfg(feature = "audio-bench")]
+    if let Some(hw) = device::audio_tone::take() {
+        spawner.spawn(device::audio_tone::run(hw).expect("audio tone once"));
+    }
     let size = display.size();
     let panel = PanelSize {
         width: size.0,

@@ -211,6 +211,10 @@ pub async fn init(
                     worker(device, geometry, sectors, card_id, stack_bottom)
                         .expect("SD owner once"),
                 );
+                #[cfg(feature = "audio-bench")]
+                spawner.spawn(
+                    crate::device::audio_bench::run(stack_bottom).expect("audio bench once"),
+                );
             });
     });
     let deadline = Instant::now() + IDENTIFY_BUDGET + Duration::from_millis(OWNER_MARGIN_MS);

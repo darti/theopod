@@ -28,6 +28,10 @@
 //! providing another `device` module with the same items, where `Display`
 //! implements [`theo_drivers::Panel`].
 
+#[cfg(feature = "audio-bench")]
+pub(crate) mod audio_bench;
+#[cfg(feature = "audio-bench")]
+pub(crate) mod audio_tone;
 mod esp_qspi;
 mod expander;
 mod i2c_bus;
@@ -274,6 +278,17 @@ impl Board {
         if let Err(error) = sd_powered {
             log::error!("microSD card-select setup failed: {error:?}");
         }
+        #[cfg(feature = "audio-bench")]
+        audio_tone::store(audio_tone::ToneHw {
+            i2c,
+            i2s: peripherals.I2S0,
+            dma: peripherals.DMA_CH2,
+            mclk: peripherals.GPIO16,
+            bclk: peripherals.GPIO9,
+            ws: peripherals.GPIO45,
+            dout: peripherals.GPIO8,
+            amp: peripherals.GPIO46,
+        });
         let deep_sleep = DeepSleep::new(peripherals.LPWR);
         // Before the panel bring-up, which a hang may be in.
         let park = match start {

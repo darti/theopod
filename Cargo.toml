@@ -52,6 +52,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+nanomp3-core = { version = "0.2", default-features = false, optional = true }
 esp-radio = { version = "=1.0.0-beta.1", features = ["esp32s3", "wifi", "esp-alloc", "unstable"] }
 embassy-net = { version = "0.9", features = ["tcp", "dhcpv4", "dns", "medium-ethernet"] }
 reqwless = { version = "0.14", default-features = false, features = [] }
@@ -111,6 +112,9 @@ watchdog-loop = []
 # at each start with the raw reset state and brown-out configuration, to
 # tell a wake from deep sleep from a chip reset (`just sleep-check`, t-67).
 sleep-check = []
+# Decodes 30 s AAC (Helix) and MP3 (nanomp3-core) clips on core1 and logs
+# cycles per frame and stack depth (`just audio-bench`, t-164, ADR-0026).
+audio-bench = ["dep:nanomp3-core"]
 
 [build-dependencies]
 slint-build.workspace = true
@@ -131,6 +135,11 @@ opt-level = "s"
 # Provenance/removal criteria:vendor/littlefs/THEO-PATCH.md.
 [patch."https://github.com/light-player/littlefs-rust"]
 littlefs-rust = { path = "vendor/littlefs/littlefs-rust" }
+
+# The Xtensa LLVM backend fails on nanomp3-core's l3_decode at s, 2 and 3
+# ("Cannot select: Constant<4608>", t-164); 1 builds.
+[profile.release.package.nanomp3-core]
+opt-level = 1
 
 [profile.dev.package.esp-radio]
 opt-level = 3

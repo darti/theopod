@@ -49,6 +49,9 @@ the ESP toolchain and target are defined in `rust-toolchain.toml`.
 
 ## Gotchas
 
+- ADR numbers race between parallel branches: take the next free number
+  from `git ls-tree --name-only origin/main docs/adr/` after a fetch, and
+  recheck it before merging.
 - The UI loop feeds the main watchdog once per pass (ADR-0009): a pass
   must stay well under 5 s. Bound any new wait in it (`with_timeout`),
   as the flush and sleep-in are; a compile-time assert in `src/main.rs`

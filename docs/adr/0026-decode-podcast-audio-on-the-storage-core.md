@@ -1,6 +1,7 @@
 # ADR-0026: Decode podcast audio on the storage core and output it through I2S DMA
 
-- Status: Proposed (research only; nothing implemented or measured on the board)
+- Status: Proposed (decoder benchmark and test tone measured on the board
+  2026-11-15, see "Board measurements"; playback not implemented)
 - Date: 2026-11-15
 - Related: t-164 (parent t-153); ADR-0004 (PSRAM DMA), ADR-0005 (shared I2C),
   ADR-0018 (bounded requests, `Scheduler`), ADR-0020 (media units, leases),
@@ -112,11 +113,12 @@ esp-alloc. Details and sources: side-session notes `t-164-decoders.md`.
 
 ## Decision (proposed)
 
-1. **Decoders.** AAC-LC: Helix AAC compiled with `cc`, after a licence review
-   of RPSL/RCSL; fall back to `esp_audio_codec` if Helix exceeds the budget
-   (check its undefined symbols with `nm -u` first). MP3: `nanomp3-core`
-   (pure Rust, no build change); Helix MP3 if Helix AAC is already linked and
-   `nanomp3-core` measures slow. A host-tested `no_std` crate
+1. **Decoders.** AAC-LC: Helix AAC (measured 22 MHz), built by `build.rs`
+   with the ESP GCC as the benchmark does, after a licence review of
+   RPSL/RCSL; `esp_audio_codec` stays the fallback. MP3: Helix MP3 from the
+   same sources (to be measured), not `nanomp3-core`: the Xtensa LLVM backend
+   only builds it at opt-level 1, where it needs 101 MHz (42 % of a core).
+   Revisit `nanomp3-core` if that backend bug is fixed. A host-tested `no_std` crate
    (`crates/theo-audio`) holds format sniffing, a hand-written MP4 reader
    (`moov/trak/mdia/minf/stbl`, `mdhd`, `esds`, `stsc`, `stco/co64`, `stsz`
    read in 4 KiB pages from the card, never loaded whole; a sparse seek index
@@ -194,6 +196,42 @@ esp-alloc. Details and sources: side-session notes `t-164-decoders.md`.
      decoding); playback should not starve UI/input since none of it runs on
      core0.
 
+## Board measurements (2026-11-15)
+
+`just audio-bench` (feature `audio-bench`, `src/device/audio_bench.rs`,
+`audio_tone.rs`): 30 s clips copied to PSRAM, decoded on core1 as a task in
+the SD owner's executor (yielding after each frame), CCOUNT per frame with
+interrupts included; one decode call in 64 runs with the free stack painted
+instead of timed. Two runs, the second after reflashing; figures agree within
+1 %.
+
+| Decoder (build) | Clip | Decoder state | Mean cycles/frame | MHz for real time | Worst frame | Stack per call |
+|---|---|---|---|---|---|---|
+| Helix AAC (GCC -O2, no SBR) | AAC-LC 48 kHz stereo 192 kbps, 1,384 frames | 20,656 B internal | 474,619 | 22.2 (9.2 %) | 2.85 ms | ≤ 0.5 KB (measurement floor) |
+| Helix AAC | same | PSRAM | 462,806 | 21.7 (9.0 %) | 3.06 ms | ≤ 0.5 KB |
+| `nanomp3-core` 0.2 (opt-level 1) | MP3 128 kbps 44.1 kHz, 1,130 frames | 22,784 B internal | 2,637,134 | 101.0 (42 %) | 13.0 ms | 1.6 KB |
+| `nanomp3-core` 0.2 (opt-level 1) | same | PSRAM | 2,631,850 | 100.7 (42 %) | 11.5 ms | 1.6 KB |
+
+- No decode error; peak samples 25,807 (AAC) and 25,435 (MP3): real audio,
+  not silence. MP3 frames before the first decodable one (bit reservoir) are
+  excluded.
+- Decoder state in PSRAM costs nothing measurable (cache), so the state
+  lives in PSRAM and internal RAM stays free.
+- Helix AAC's 22 MHz is below the 28–45 MHz estimate. Its worst frame (3 ms)
+  is far below a 21.3 ms frame period.
+- `nanomp3-core` fails to build at opt-level `s`, 2 and 3 ("LLVM ERROR:
+  Cannot select: Constant<4608>" in `minimp3::l3_decode`); at opt-level 1
+  it is ~4.5× Helix AAC per second of audio. Not usable as is.
+- Test tone (I2S0 + GDMA, 1 kHz, 48 kHz stereo 16-bit, ES8311 init from
+  Waveshare's `es8311.c`, amp on GPIO46): the ES8311 answers at 0x18 (chip
+  ID register 0xFD = 0x83); the DMA ring drained 581,064 B in 3,013 ms =
+  192,852 B/s for 192,000 expected (pushes are counted per refill), no DMA
+  error. Whether the tone is audible needs someone listening at the board.
+- Core1 stack: the bench task panicked on the stack guard on its first run
+  because `Box::try_new_in(Decoder::new())` built the 18.6 KB decoder on the
+  stack before boxing (the t-121 pattern); copying a const static into the
+  allocation fixed it. Playback code must build decoder state in place.
+
 ## Consequences
 
 - Expected gains (estimates until measured): I2S+GDMA and the ES8311 remove
@@ -208,6 +246,8 @@ esp-alloc. Details and sources: side-session notes `t-164-decoders.md`.
   interrupt (~2.4 KB today), owner request deadlines stretched by decode and
   feeder time, PIE state saving if PIE is ever used, PSRAM bandwidth with the
   display DMA (the PCM ring is in PSRAM; DMA reads stay in internal RAM).
-- Next step: a board benchmark of Helix AAC and `nanomp3-core` on core1 with
-  a 30 s clip in PSRAM (cycles per frame, stack), then the ES8311/I2S output
-  path with a test tone. Both need an explicit request to flash.
+- Measured load with AAC playback on core1: ~9 % of the core for decoding,
+  so owner (~30 % during a download) plus decoding stays under half of
+  core1.
+- Next steps: measure Helix MP3 the same way; listen to the tone on the
+  board; then the licence review that gates committing Helix sources.

@@ -190,9 +190,18 @@ async fn nanomp3<A: allocator_api2::alloc::Allocator>(
     stack_bottom: usize,
 ) -> Stats {
     let mut stats = Stats::new();
-    let Ok(mut decoder) = Box::try_new_in(nanomp3_core::Decoder::new(), &alloc) else {
+    // The 18.6 KB decoder must not be built on core1's stack (t-121): copy
+    // a const-initialized value straight into the allocation.
+    static FRESH: nanomp3_core::Decoder = nanomp3_core::Decoder::new();
+    let Ok(mut decoder) = Box::<nanomp3_core::Decoder, _>::try_new_uninit_in(&alloc) else {
         log::error!("audio-bench nanomp3: no memory");
         return stats;
+    };
+    // SAFETY: FRESH is a valid decoder made only of plain data, and the copy
+    // fully initializes the allocation before assume_init.
+    let mut decoder = unsafe {
+        core::ptr::copy_nonoverlapping(&raw const FRESH, decoder.as_mut_ptr(), 1);
+        decoder.assume_init()
     };
     log::info!(
         "audio-bench nanomp3: state {} B",

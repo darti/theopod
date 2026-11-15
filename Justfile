@@ -93,13 +93,18 @@ imu-calibrate port="":
     ESP_LOG=info LIBCLANG_PATH="{{libclang_path}}" PATH="{{gcc_path}}:${PATH}" RUSTUP_TOOLCHAIN=esp cargo espflash flash --release --features imu-calibration --monitor --chip {{chip}} {{ if port != "" { "--port " + port } else { "" } }}
 
 # Fetch Helix AAC and MP3 (pinned, RPSL/RCSL, kept under target/) and 30 s AAC/MP3
-# clips (copyrighted, kept under target/), as `audio-bench` needs (t-164).
+# clips (copyrighted, kept under target/), as `audio-bench` needs (t-164);
+# opencore-aacdec (Apache-2.0, AOSP android-4.0.4_r2.1) for t-167.
 audio-bench-inputs:
     #!/usr/bin/env bash
     set -euo pipefail
-    if [ ! -d target/helix/libhelix-aac ] || [ ! -d target/helix/libhelix-mp3 ]; then
+    if [ ! -d target/helix/libhelix-aac ] || [ ! -d target/helix/libhelix-mp3 ] || [ ! -d target/helix/utils ]; then
         mkdir -p target/helix
-        curl -sSfL https://codeload.github.com/pschatzmann/codec-helix/tar.gz/f6e55a307c7577c5e3dfe1bf424a61075235fa08 | tar xz -C target/helix --strip-components=2 '*/src/libhelix-aac' '*/src/libhelix-mp3'
+        curl -sSfL https://codeload.github.com/pschatzmann/codec-helix/tar.gz/f6e55a307c7577c5e3dfe1bf424a61075235fa08 | tar xz -C target/helix --strip-components=2 '*/src/libhelix-aac' '*/src/libhelix-mp3' '*/src/utils'
+    fi
+    if [ ! -f target/opencore-aacdec/pvmp4audiodecoder_api.h ]; then
+        mkdir -p target/opencore-aacdec
+        curl -sSfL https://android.googlesource.com/platform/frameworks/base/+archive/refs/tags/android-4.0.4_r2.1/media/libstagefright/codecs/aacdec.tar.gz | tar xz -C target/opencore-aacdec
     fi
     mkdir -p target/audio-bench
     [ -f target/audio-bench/aac.bin ] || python3 -I tools/audio-bench/clip.py aac "$(cat docs/experiments/t106/audio.url)" target/audio-bench

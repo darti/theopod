@@ -74,6 +74,10 @@ the ESP toolchain and target are defined in `rust-toolchain.toml`.
 - To see what the firmware renders: `just flash-dump` (records from boot,
   Ctrl-C after `theo-frame-end`), then `just frame-png` → `target/frame.png`.
   Capturing after boot misses the first rows.
+- LittleFS allocation scans (first write after mount, each time the 4 MiB
+  lookahead runs out) walk every file's blocks (~1 sector read per 2 blocks).
+  Keep bulk media off LittleFS volumes that need bounded latency (ADR-0019,
+  t-121).
 - In a worktree under `.claude/worktrees/`, Cargo also reads the main
   checkout's `.cargo/config.toml` and links `-Tlinkall.x` twice
   ("region 'vectors_seg' already defined"): prefix link/flash recipes with

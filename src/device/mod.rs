@@ -28,6 +28,8 @@
 //! providing another `device` module with the same items, where `Display`
 //! implements [`theo_drivers::Panel`].
 
+#[cfg(feature = "audio-bench")]
+pub(crate) mod audio_bench;
 mod esp_qspi;
 mod expander;
 mod i2c_bus;

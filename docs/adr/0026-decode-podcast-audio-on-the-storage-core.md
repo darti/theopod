@@ -114,8 +114,9 @@ esp-alloc. Details and sources: side-session notes `t-164-decoders.md`.
 ## Decision (proposed)
 
 1. **Decoders.** AAC-LC: Helix AAC (measured 22 MHz), built by `build.rs`
-   with the ESP GCC as the benchmark does, after a licence review of
-   RPSL/RCSL; `esp_audio_codec` stays the fallback. MP3: Helix MP3 from the
+   with the ESP GCC as the benchmark does, for personal use only (see
+   Licensing: distribution is blocked pending legal advice);
+   `esp_audio_codec` stays the fallback. MP3: Helix MP3 from the
    same sources (measured 32.5 MHz), not `nanomp3-core`: the Xtensa LLVM
    backend only builds it at opt-level 1, where it needs 101 MHz (42 % of a
    core). Revisit `nanomp3-core` if that backend bug is fixed. Sources:
@@ -244,6 +245,113 @@ MP3 (added in the third); figures agree within 1 %.
   stack before boxing (the t-121 pattern); copying a const static into the
   allocation fixed it. Playback code must build decoder state in place.
 
+## Licensing (t-165, 2026-11-15; not legal advice)
+
+Sources read: `RPSL.txt` (RPSL 1.0, rev. 28 Oct 2002), `RCSL.txt` and
+`LICENSE.txt` shipped in `src/libhelix-mp3` at `f6e55a3`. The license header
+in every AAC `.c` file points to the same RPSL/RCSL. Section numbers below
+are RPSL sections unless marked otherwise.
+
+**Verdict.** Helix may be used under the RPSL for personal use. It must not
+go into a distributed firmware until a lawyer has reviewed the plan, or until
+it is replaced. RCSL is not a usable route.
+
+- **Personal use is outside the RPSL's duties.** The RPSL defines "Deploy"
+  as use or distribution other than internal R&D or Personal Use (§1.5).
+  Personal Use is an individual's "personal, private and non-commercial"
+  use, and use on behalf of any organisation does not count (§1.11). The
+  §2.1(d)/(e) source-publication duties and §4.1 attach to "Deploy" and
+  "Externally Deploy". A firmware the author builds and runs on his own
+  board deploys nothing.
+- **Distribution triggers §4.1.** Handing the firmware to anyone else, sold
+  or free, Externally Deploys it (§1.7). Any distributed Derivative Work
+  must then be licensed "as a whole at no charge" under the RPSL, with its
+  source available (§4.1). Our own MIT OR Apache-2.0 code is acceptable
+  under §4.2, since both licences are on Exhibit B. However, §4.2 also
+  requires everything linked into the image to be "wholly subject to" an
+  Exhibit B licence, and two dependencies are not:
+  - **Slint.** It is `GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR
+    LicenseRef-Slint-Software-3.0`. Neither Slint licence is on Exhibit B,
+    and Exhibit B forbids applying the GPL to Covered Code.
+  - **The esp-radio Wi-Fi stack.** It links Espressif's binary-only blobs
+    (`esp-wifi-sys`: `libnet80211.a`, `libpp.a`, `libphy.a`, …), which have
+    no source. That conflicts with §1.2 and §4.2.
+
+  **Lawyer needed.** Whether a statically linked image is one "Derivative
+  Work" or a "mere aggregation" (§4.3) is a legal question, and so is
+  whether these conflicts can be cured. Get advice before shipping.
+- **RCSL is not a route.** It grants Research Use only. "Commercial Use"
+  needs a separately signed Attachment D with RealNetworks (RCSL §3.2).
+  `helixcommunity.org` now redirects to an unrelated `.com.cn` host, and
+  realnetworks.com lists no Helix licensing (checked 2026-11-15). Whether
+  RealNetworks still offers Attachment D is a question for a lawyer.
+
+**Obligations while Helix is used (personal use):**
+
+1. Do not commit Helix sources to this repository (it is public:
+   committing redistributes them). The `audio-bench-inputs` recipe fetches
+   the pinned commit into `target/helix`, and a future `build.rs` must do the
+   same.
+2. Keep every RealNetworks notice intact (§2.1(a)).
+3. If the decoder is ever redistributed in source form:
+   - ship `RPSL.txt` with both directories; `libhelix-aac` lacks it upstream
+     (§2.1(b));
+   - mark each change with a dated notice beside the Exhibit A header
+     (§2.1(c)).
+
+   The `codec-helix` fork already changed RealNetworks files without such
+   notices: the `ConfigHelix.h` and `utils/helix_memory.h` includes, and the
+   ARDUINO/ESP32/ESP_PLATFORM/Zephyr/Apple `#if`s in `assembly.h` and
+   `aacdec.h`. Our shim (`tools/audio-bench/shim`, MIT OR Apache-2.0) is a
+   separate module and modifies no Helix file.
+4. If the firmware is ever deployed in object form, after a lawyer has
+   cleared it:
+   - include the Object Code Notice in an about screen and in the
+     documentation (§2.1(e), Exhibit A): "Helix DNA Client technology
+     included. Copyright (c) RealNetworks, Inc., 1995-2002. All rights
+     reserved.";
+   - publish the source of our modifications for at least 12 months
+     (§2.1(d)).
+5. Do not use the "Helix" or "RealNetworks" names to brand the product (§5.1,
+   Exhibit C).
+6. Patents are not covered beyond RealNetworks' own. The licensee must
+   obtain any third-party patent licences itself (§2.2, §2.3).
+
+**Patents.**
+
+- **AAC.** Via LA's AAC programme
+  (<https://www.via-la.com/licensing-programs/aac/>) licenses "manufacturers
+  or developers of end-user encoder and/or decoder products". Components and
+  implementations are not covered. There is no exemption for free or
+  non-commercial products, and the programme has no licence for individuals.
+  Terms:
+  - $0.98 per unit for units 1–500,000, with tiers below that;
+  - a $15,000 one-time fee ($1,000 for small entities);
+  - a 5-year term and quarterly reports.
+
+  Any distributed AAC product needs this licence. A single board kept for
+  personal use has no licensing path, and the practical risk is low, but it
+  is not legally exempt.
+- **MP3.** Technicolor's MP3 licensing programme "has been terminated" as of
+  23 April 2017 (Fraunhofer IIS,
+  <https://www.iis.fraunhofer.de/en/ff/amm/consumer-electronics/mp3.html>).
+  MP3 decoding needs no patent licence.
+
+**Alternatives if Helix cannot ship:**
+
+| Decoder | Licence | Fit |
+|---|---|---|
+| `esp_audio_codec` | Espressif Modified MIT, "EXCLUSIVELY with Espressif Systems products"; `lib/` prebuilt (not checked) | Allowed on this chip; adds IDF shims and closed code; AAC patents still apply |
+| FAAD2 | GPL-2.0-or-later; COPYING: "Any non-GPL usage … is strictly forbidden", commercial licence via Ahead/Nero | Makes the firmware GPL, which Slint's GPL-3.0-only option accepts; Wi-Fi blobs remain a GPL question |
+| opencore-aacdec | Apache-2.0 | Licence-compatible; not benchmarked |
+| fdk-aac | FDK licence, no patent grant | C++, heavy; excluded above |
+| `nanomp3-core` | MIT/Apache | MP3 only; 101 MHz on Xtensa LLVM (see above) |
+
+Distribution route with the fewest unknowns: Helix MP3 is royalty-free, but
+its RPSL conflicts remain. The cleanest path is opencore-aacdec plus an
+MIT/Apache MP3 decoder, together with an AAC patent licence and a Slint
+licence choice.
+
 ## Consequences
 
 - Expected gains (estimates until measured): I2S+GDMA and the ES8311 remove
@@ -260,5 +368,7 @@ MP3 (added in the third); figures agree within 1 %.
   display DMA (the PCM ring is in PSRAM; DMA reads stay in internal RAM).
 - Measured load on core1: ~9 % (AAC) or ~13.5 % (MP3) for decoding, so the
   owner (~30 % during a download) plus decoding stays under half of core1.
-- Next step: the RPSL/RCSL licence review that gates committing Helix
-  sources (and AAC patent licensing for any commercial use).
+- Licensing (t-165): Helix is fine for personal use when fetched at build
+  time and never committed. Distributing the firmware is blocked by RPSL
+  §4.1/§4.2 (Slint, Wi-Fi blobs) until a lawyer reviews it, and needs a Via
+  LA AAC licence.

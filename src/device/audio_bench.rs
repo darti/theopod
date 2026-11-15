@@ -3,7 +3,7 @@
 //! Runs as a task in core1's executor next to the SD owner, as ADR-0026
 //! proposes. Copies 30 s clips (AAC-LC 48 kHz stereo 192 kbps raw access
 //! units, MP3 128 kbps 44.1 kHz) into PSRAM, then decodes every frame with
-//! Helix AAC, Helix MP3 and nanomp3-core, the decoder state in internal RAM then in
+//! Helix AAC, opencore-aacdec (t-167), Helix MP3 and nanomp3-core, the decoder state in internal RAM then in
 //! PSRAM. Logs cycles per frame (CCOUNT, interrupts included), the MHz
 //! needed for real time and the stack depth of one decode call.
 
@@ -20,6 +20,7 @@ const PAINT: u32 = 0x5a5a_5a5a;
 
 static AAC: &[u8] = include_bytes!(concat!(env!("THEO_AUDIO_CLIPS"), "/aac.bin"));
 static AAC_LEN: &[u8] = include_bytes!(concat!(env!("THEO_AUDIO_CLIPS"), "/aac.len"));
+static AAC_ASC: &[u8] = include_bytes!(concat!(env!("THEO_AUDIO_CLIPS"), "/aac.asc"));
 static MP3: &[u8] = include_bytes!(concat!(env!("THEO_AUDIO_CLIPS"), "/mp3.bin"));
 
 #[repr(C)]
@@ -45,6 +46,15 @@ unsafe extern "C" {
         input: *mut *mut u8,
         bytes_left: *mut i32,
         output: *mut i16,
+    ) -> i32;
+    fn theo_opencore_size() -> u32;
+    fn theo_opencore_init(mem: *mut c_void, asc: *const u8, asc_len: i32) -> i32;
+    fn theo_opencore_decode(
+        mem: *mut c_void,
+        frame: *const u8,
+        len: i32,
+        pcm: *mut i16,
+        used: *mut i32,
     ) -> i32;
     fn theo_helix_arena(ptr: *mut c_void, size: i32);
     fn theo_helix_arena_used() -> i32;
@@ -196,6 +206,76 @@ async fn helix_aac<A: allocator_api2::alloc::Allocator>(
             stats.errors += 1;
         }
         stats.peak = stats.peak.max(peak(&pcm));
+        embassy_futures::yield_now().await;
+    }
+    stats
+}
+
+/// PacketVideo AAC (opencore-aacdec, Apache-2.0, t-167), driven like SoftAAC.
+async fn opencore_aac<A: allocator_api2::alloc::Allocator>(
+    alloc: A,
+    clip: &[u8],
+    sizes: &[u8],
+    stack_bottom: usize,
+) -> Stats {
+    let mut stats = Stats::new();
+    // SAFETY: plain C function without arguments.
+    let size = unsafe { theo_opencore_size() } as usize;
+    let mut state = Vec::new_in(&alloc);
+    if state.try_reserve_exact(size).is_err() {
+        log::error!("audio-bench opencore-aac: no memory (state {size} B)");
+        return stats;
+    }
+    state.resize(size, 0u8);
+    // 2048 core samples plus 2048 for the SBR output (shim contract).
+    let mut pcm = Vec::with_capacity_in(4096, &alloc);
+    pcm.resize(4096, 0i16);
+    // SAFETY: `state` holds the size the decoder asked for and outlives it;
+    // the ASC slice is read during the call only.
+    let err = unsafe {
+        theo_opencore_init(
+            state.as_mut_ptr().cast(),
+            AAC_ASC.as_ptr(),
+            AAC_ASC.len() as i32,
+        )
+    };
+    if err != 0 {
+        log::error!("audio-bench opencore-aac: init failed ({err})");
+        return stats;
+    }
+    log::info!("audio-bench opencore-aac: state {size} B");
+    let mut offset = 0;
+    for (index, len) in sizes.chunks_exact(2).enumerate() {
+        let len = usize::from(u16::from_le_bytes([len[0], len[1]]));
+        let frame = &clip[offset..offset + len];
+        offset += len;
+        let mut result = 0;
+        let mut used = 0;
+        let mut call = || {
+            // SAFETY: `frame` is one whole access unit, `pcm` holds the 4096
+            // samples the shim writes at most, `state` was initialized above.
+            result = unsafe {
+                theo_opencore_decode(
+                    state.as_mut_ptr().cast(),
+                    frame.as_ptr(),
+                    len as i32,
+                    pcm.as_mut_ptr(),
+                    &mut used,
+                )
+            };
+        };
+        if index.is_multiple_of(64) {
+            stats.stack = stats.stack.max(stack_depth(stack_bottom, &mut call));
+        } else {
+            let start = get_cycle_count();
+            call();
+            let cycles = get_cycle_count().wrapping_sub(start);
+            stats.cycles.push(cycles);
+        }
+        if result != 0 || used as usize != len {
+            stats.errors += 1;
+        }
+        stats.peak = stats.peak.max(peak(&pcm[..2048]));
         embassy_futures::yield_now().await;
     }
     stats
@@ -354,6 +434,12 @@ pub async fn run(stack_bottom: usize) {
     helix_aac(&ExternalMemory, &mut aac, AAC_LEN, stack_bottom)
         .await
         .log("helix-aac state=psram", AAC_FPS);
+    opencore_aac(&InternalMemory, &aac, AAC_LEN, stack_bottom)
+        .await
+        .log("opencore-aac state=internal", AAC_FPS);
+    opencore_aac(&ExternalMemory, &aac, AAC_LEN, stack_bottom)
+        .await
+        .log("opencore-aac state=psram", AAC_FPS);
     helix_mp3(&InternalMemory, &mut mp3, stack_bottom)
         .await
         .log("helix-mp3 state=internal", MP3_FPS);

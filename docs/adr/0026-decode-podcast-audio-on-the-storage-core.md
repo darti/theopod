@@ -245,6 +245,40 @@ MP3 (added in the third); figures agree within 1 %.
   stack before boxing (the t-121 pattern); copying a const static into the
   allocation fixed it. Playback code must build decoder state in place.
 
+### Licence-clean alternatives (t-167, 2026-11-15)
+
+One run with the t-157 release profile (opt-level 3, fat LTO, one codegen
+unit; `nanomp3-core` still pinned at opt-level 1), same harness and clips:
+
+| Decoder (build) | Decoder state | Mean cycles/frame | MHz for real time | Worst frame | Stack per call |
+|---|---|---|---|---|---|
+| opencore-aacdec (PacketVideo, Apache-2.0, G++ -O2, AAC+ and PS built in) | 108,344 B PSRAM | 459,949 | 21.6 (8.9 %) | 3.13 ms | 0.6 KB |
+| Helix AAC, same run | 20,656 B internal / PSRAM | 590,475 / 461,586 | 27.7 / 21.6 | 4.21 / 5.01 ms | ≤ 0.5 KB |
+| Helix MP3, same run | internal / PSRAM | 848,874 / 851,823 | 32.5 / 32.6 | 4.59 / 4.85 ms | ≤ 0.5 KB |
+| `nanomp3-core` 0.2 (opt-level 1, LTO) | 22,784 B internal | 890,160 | 34.1 (14.1 %) | 5.20 ms | 1.7 KB |
+| `nanomp3-core` 0.2 (opt-level 1, LTO) | PSRAM | 890,788 | 34.1 (14.2 %) | 5.46 ms | 1.7 KB |
+
+- opencore-aacdec (AOSP `android-4.0.4_r2.1`,
+  `media/libstagefright/codecs/aacdec`, unchanged sources, C shim
+  `tools/audio-bench/shim/theo_opencore.cpp` driven like AOSP's
+  `SoftAAC.cpp`) decodes the clip with no error and the same peak (25,806)
+  as Helix: it matches Helix AAC's cost, with a lower worst frame. Its state
+  is 108 KB on Xtensa (80 KB on a 64-bit host) and does not fit in internal
+  RAM next to the firmware (the internal-state run gets no memory): it lives
+  in PSRAM, which costs nothing measurable here either.
+- `nanomp3-core` drops from 101 to 34 MHz with LTO and one codegen unit,
+  within 5 % of Helix MP3, at the same opt-level 1 (cross-crate inlining of
+  `minimp3` helpers is the likely cause; not profiled).
+- Helix AAC with internal state measured 27.7 MHz in this run against 22.2
+  before; the PSRAM run agrees with before (21.6 vs 21.7). One run only:
+  treat ±25 % between runs of the internal-state AAC case as noise until
+  repeated.
+- Both RPSL/RCSL decoders now have a licence-clean equivalent at the same
+  CPU cost: opencore-aacdec (Apache-2.0; unmaintained, dropped from AOSP in 2012, never
+  fuzzed, inputs to treat as untrusted) and `nanomp3-core` (MIT/Apache, pure
+  Rust, no `unsafe`). The decoder choice in the decision above is to
+  revisit; the AAC patent licence is needed whichever decoder is used.
+
 ## Licensing (t-165, 2026-11-15; not legal advice)
 
 Sources read: `RPSL.txt` (RPSL 1.0, rev. 28 Oct 2002), `RCSL.txt` and
@@ -343,9 +377,9 @@ it is replaced. RCSL is not a usable route.
 |---|---|---|
 | `esp_audio_codec` | Espressif Modified MIT, "EXCLUSIVELY with Espressif Systems products"; `lib/` prebuilt (not checked) | Allowed on this chip; adds IDF shims and closed code; AAC patents still apply |
 | FAAD2 | GPL-2.0-or-later; COPYING: "Any non-GPL usage … is strictly forbidden", commercial licence via Ahead/Nero | Makes the firmware GPL, which Slint's GPL-3.0-only option accepts; Wi-Fi blobs remain a GPL question |
-| opencore-aacdec | Apache-2.0 | Licence-compatible; not benchmarked |
+| opencore-aacdec | Apache-2.0 | Licence-compatible; 21.6 MHz, state 108 KB in PSRAM (t-167, above) |
 | fdk-aac | FDK licence, no patent grant | C++, heavy; excluded above |
-| `nanomp3-core` | MIT/Apache | MP3 only; 101 MHz on Xtensa LLVM (see above) |
+| `nanomp3-core` | MIT/Apache | MP3 only; 34 MHz with the t-157 release profile (t-167, above) |
 
 Distribution route with the fewest unknowns: Helix MP3 is royalty-free, but
 its RPSL conflicts remain. The cleanest path is opencore-aacdec plus an

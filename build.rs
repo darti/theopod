@@ -113,4 +113,53 @@ fn audio_bench() {
     assert!(status.success(), "archiving Helix");
     println!("cargo:rustc-link-search=native={}", out.display());
     println!("cargo:rustc-link-lib=static=helix");
+    opencore(&root, &shim, &out);
+}
+
+/// Builds the PacketVideo AAC decoder (opencore-aacdec, Apache-2.0) with
+/// HE-AAC v1/v2 for `audio-bench` (t-167).
+///
+/// `just audio-bench-inputs` fetches it from AOSP into `target/opencore-aacdec`;
+/// the Android wrapper `SoftAAC.cpp` is left out, `theo_opencore.cpp` replaces it.
+fn opencore(root: &std::path::Path, shim: &std::path::Path, out: &std::path::Path) {
+    let dir = root.join("target/opencore-aacdec");
+    let mut sources: Vec<_> = std::fs::read_dir(&dir)
+        .expect("run `just audio-bench-inputs` to fetch opencore-aacdec")
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            path.extension().is_some_and(|ext| ext == "cpp")
+                && path.file_name().is_some_and(|name| name != "SoftAAC.cpp")
+        })
+        .collect();
+    sources.push(shim.join("theo_opencore.cpp"));
+    let mut objects = Vec::new();
+    for source in &sources {
+        let stem = source.file_stem().unwrap().to_string_lossy();
+        let object = out.join(format!("opencore-{stem}.o"));
+        let status = std::process::Command::new("xtensa-esp32s3-elf-g++")
+            .args(["-O2", "-mlongcalls", "-ffunction-sections"])
+            .args(["-fno-exceptions", "-fno-rtti", "-Wno-narrowing"])
+            .args(["-DAAC_PLUS", "-DHQ_SBR", "-DPARAMETRICSTEREO"])
+            .args(["-DOSCL_IMPORT_REF=", "-DOSCL_EXPORT_REF="])
+            .arg("-DOSCL_UNUSED_ARG(x)=(void)(x)")
+            .arg(format!("-I{}", dir.display()))
+            .arg("-c")
+            .arg(source)
+            .arg("-o")
+            .arg(&object)
+            .status()
+            .expect("xtensa-esp32s3-elf-g++ on PATH (just recipes set it)");
+        assert!(status.success(), "compiling {}", source.display());
+        objects.push(object);
+    }
+    let archive = out.join("libopencore.a");
+    let _ = std::fs::remove_file(&archive);
+    let status = std::process::Command::new("xtensa-esp32s3-elf-ar")
+        .arg("crs")
+        .arg(&archive)
+        .args(&objects)
+        .status()
+        .expect("xtensa-esp32s3-elf-ar on PATH");
+    assert!(status.success(), "archiving opencore-aacdec");
+    println!("cargo:rustc-link-lib=static=opencore");
 }

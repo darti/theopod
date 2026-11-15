@@ -1,140 +1,52 @@
 # Agent instructions
 
-## Project
+Theo Pod: Rust `no_std`/`no_main` firmware for the ESP32-S3-Touch-AMOLED-1.8 V2
+(target `xtensa-esp32s3-none-elf`; see `.cargo/config.toml`, `rust-toolchain.toml`).
 
-Theo Pod is a Rust `no_std` firmware for the ESP32-S3-Touch-AMOLED-1.8 V2 board.
-The target, linker, and `core` compilation are configured in `.cargo/config.toml`;
-the ESP toolchain and target are defined in `rust-toolchain.toml`.
+## Rules
 
-## Conventions
+- Before any work (code, tests, docs, investigation) create or reuse an Oku
+  task. Keep it open until the changes are merged into `main`, then close it;
+  a local commit or passing tests do not justify closing it.
+- Oku: `oku cli -a http://127.0.0.1:50051 task … --project theo-pod`
+  (`OKU_ADDRESS` points to 50151, the wrong port).
+- The commit hook requires `Reviewed-by: …` (after `/review`) or
+  `Review-waived: <reason>`.
+- Keep the `no_std`/`no_main` model and ESP-HAL startup conventions.
+- ESP/board code lives in `src/device/`. Drivers in `crates/theo-drivers` stay
+  HAL-independent (`embedded-hal`, `embedded-hal-async`, `QspiBus`/`FrameBus`
+  only) with passing host unit tests.
+- Record significant decisions in `docs/adr/`. ADR numbers race between
+  branches: after a fetch take the next free one from
+  `git ls-tree --name-only origin/main docs/adr/`, recheck before merging.
+- Regression tests live in side-by-side `*_tests.rs`, tagged
+  `// Regression (t-N): ...` (ADR-0007).
+- Use `just` for firmware operations (it sets the ESP environment).
 
-- Before starting any work (code, tests, documentation or investigation),
-  create or reuse an Oku task and record its ID. Keep the task open through implementation, checks,
-  review and pull request submission. Close it only after the corresponding
-  changes have been merged into `main`; a local commit or passing tests do
-  not justify closing it.
+NEVER:
+- add an unbounded wait in the UI loop; use `with_timeout` (ADR-0009);
+- remove `PsramTxBuf`, PSRAM at 80 MHz or 64-byte alignment (ADR-0004);
+- block on the shared I2C expander to select the SD card; only identification
+  may ask core0 for it (ADR-0005, ADR-0023);
+- retry hardware landscape rotation (ADR-0006).
 
-- Preserve the existing `no_std`/`no_main` model and ESP-HAL startup conventions.
-- Display pin assignments, panel geometry, the BOOT button, the CPU clock
-  (240 MHz, ADR-0025), PSRAM mode and
-  frequency, and the TCA9554 power-up values are defined in
-  `src/device/mod.rs`, the single source of truth for board wiring; the
-  power-up sequence itself is `PanelPower` in `crates/theo-drivers`. The
-  CST820 touch wiring (I2C 0x15, reset on TCA9554 EXIO2, interrupt on
-  GPIO21), the QMI8658 address and axis map (`IMU_AXES`, measured on the
-  board) and the shared async I2C bus (ADR-0005) are there too. Do not
-  assume the audio pin assignments: they are not yet documented or
-  implemented.
-- Keep ESP- and board-specific code in `src/device/`. Drivers in
-  `crates/theo-drivers` must stay HAL-independent (`embedded-hal` and
-  `embedded-hal-async` traits and `QspiBus`/`FrameBus` only) and keep
-  their host unit tests passing.
-- Keep changes compatible with the `xtensa-esp32s3-none-elf` target and the
-  dependency versions declared in `Cargo.toml`.
-- Record significant technical decisions in `docs/adr/`.
-- Regression tests live in the side-by-side `*_tests.rs` files, each
-  tagged `// Regression (t-N): ...` (or `Regression guard`), not in
-  `tests/regressions/` (ADR-0007).
-- Layout: `README.md`; driver map in `crates/theo-drivers/ARCHITECTURE.md`;
-  storage map in `crates/theo-storage/ARCHITECTURE.md`.
-  Debug tooling: `crates/theo-frame-dump` (`no_std`, shared by the firmware
-  and the host), the host-only `tools/frame-png`, and
-  `tools/passive-monitor.py` (serial log without reset).
-- Use `just` for firmware operations; its recipes configure the required ESP
-  environment.
-- Undocumented board wiring: check Waveshare's sources
-  (`waveshareteam/ESP32-S3-Touch-AMOLED-1.8`: `pin_config.h`,
-  `board_variant.c`; BSP in `waveshareteam/Waveshare-ESP32-components`) and
-  cite them in `src/device/mod.rs`.
-
-## Gotchas
-
-- ADR numbers race between parallel branches: take the next free number
-  from `git ls-tree --name-only origin/main docs/adr/` after a fetch, and
-  recheck it before merging.
-- The UI loop feeds the main watchdog once per pass (ADR-0009): a pass
-  must stay well under 5 s. Bound any new wait in it (`with_timeout`),
-  as the flush and sleep-in are; a compile-time assert in `src/main.rs`
-  checks the idle wait and `FLUSH_TIMEOUT`.
-- The SD storage owner runs on core1's 48 KiB stack (`sd_worker.rs`).
-  Awaiting a large future there builds it on that stack and inlines its
-  poll into the owner's frame: await big one-shot work through `in_psram`
-  (`theo_storage::future::run_in`) and build large values in PSRAM
-  (t-121). Each request arm of `Runtime` runs through
-  `theo_storage::future::apart` (its own frame), and large state is
-  reset in place, never rebuilt as a stack temporary (`SyncSession::restart`,
-  `RadioFranceFeed::reset`): a 53 KB request frame overflowed core1 on the
-  first podcast write (t-133). Core0's main stack is the internal RAM the
-  linker leaves after `.bss`: keep large task futures out of it (the
-  network task's 64 KB state runs in PSRAM through `run_in`; as a static
-  it left 47 KB for a 99 KB TLS/storage chain, t-133). Run
-  `just frame-check` after changing either.
-- The display DMA reads the PSRAM framebuffer in place only through
-  `PsramTxBuf` (64-byte bursts, aligned descriptors) with PSRAM at 80 MHz
-  and transfers starting 64-byte aligned; dropping any of these brings back
-  SPI underruns, i.e. bands on the panel (ADR-0004).
-- `.cargo/config.toml` forces the xtensa target: host builds need
-  `RUSTUP_TOOLCHAIN=stable cargo <cmd> --target $(rustc +stable -vV | sed -n 's/^host: //p')`.
-- Firmware `log` output is silent unless `ESP_LOG` (e.g. `info`) is set at
-  build time. `src/device/logging.rs` installs the dual serial/SD logger
-  before HAL startup; normal build/flash recipes default to `info`.
-- SD logging uses a bounded queue and a separate async task. Core1 drives
-  SPI3 itself; only identification asks core0 to set chip select on the
-  shared I2C expander (touch/IMU also use that bus), then the card stays
-  selected (ADR-0023). A failed storage operation disables storage until
-  reboot.
-- `IMU_AXES` is measured, not documented: `just imu-calibrate` keeps the
-  view upright and logs raw accelerometer axes once a second. Calibrate from
-  positions defined against gravity (vertical with text upright, a quarter
-  turn clockwise, flat); don't infer axes from how a tilted screen "points".
-- Slint renderer behaviour (rotation, dirty regions) can be checked on the
-  host with a scratch `std` crate using the same `slint` version and
-  `renderer-software`, rendering into a buffer.
-- To see what the firmware renders: `just flash-dump` (records from boot,
-  Ctrl-C after `theo-frame-end`), then `just frame-png` → `target/frame.png`.
-  Capturing after boot misses the first rows.
-- In a worktree under `.claude/worktrees/`, Cargo also reads the main
-  checkout's `.cargo/config.toml` and links `-Tlinkall.x` twice
-  ("region 'vectors_seg' already defined"): prefix link/flash recipes with
-  `RUSTFLAGS="-C link-arg=-Tlinkall.x"`.
-- `just monitor`, `just run` and `just imu-calibrate` need a TTY; from an
-  agent use `just flash-dump` (logs from boot), `just monitor-log` or
-  `just monitor-passive`.
-- espflash's monitor (`just monitor-log`, `monitor`, `run`, the `--monitor`
-  recipes) resets the chip through DTR/RTS when it connects. To see a
-  deep-sleep wake, use `just monitor-passive` (`tools/passive-monitor.py`,
-  macOS: no reset observed on open, reattaches after each wake): through
-  espflash the wake is replaced by a reset reported as `ChipPowerOn`
-  (t-67). Python tools in `tools/` use the standard library only, and no
-  `just` recipe lints or tests them.
-- A flash stuck on "Connecting…": check `lsof /dev/cu.usbmodem*` for a
-  process holding the serial port.
-- `flash-dump` shows the framebuffer, not the panel: panel-side effects
-  (MADCTL, area addressing) need a human looking at the screen. CO5300
-  row/column exchange caps written lines at 368 px; don't retry hardware
-  landscape rotation (ADR-0006).
+`just monitor`, `run` and `imu-calibrate` need a TTY.
 
 ## Verification
 
-- Run `just fmt` to format the code.
-- Run `just check` to verify compilation with the ESP toolchain.
-- Run `just test` to run the host unit tests (drivers, storage, frame dump, frame-png).
-- Run `just lint` to run clippy on the firmware and the host crates.
-- Run `just test-catalogue-bounds` after changing the catalogue, the redb
-  backend or sync (release-only sector bounds, under a minute; kept out of
-  `just test`, which runs debug).
-- Run `just miri` after changing `unsafe` code in `crates/theo-drivers`
-  (slow, about 5 minutes), and `just audit` after changing dependencies.
-- Run `just build` to produce a release firmware image.
-- Run `just frame-check` after changing the SD owner, the podcast runtime,
-  the network task or what they call (release network build with the
-  placeholder credentials, then each task's deepest call chain against its
-  stack; `tools/frame-check.py`). Rebuild before flashing: it leaves a
-  placeholder-credential image in `target/`.
+`just fmt`, `check`, `test`, `lint`, `build`; `just miri` after `unsafe`
+changes in `crates/theo-drivers`; `just audit` after dependency changes;
+`just test-catalogue-bounds` after changing the catalogue, redb backend or
+sync; `just frame-check` after changing the SD owner, podcast runtime or
+network task (see `calibration-sd-logging.md`; it leaves a placeholder-
+credential image in `target/`, rebuild before flashing).
+Never flash or monitor (`flash`, `monitor`, `run`, `flash-monitor`,
+`flash-dump`, `monitor-log`, `monitor-passive`, `sleep-check`,
+`imu-calibrate`, `sd-provision-v3` (erases the card), `watchdog-*`) without an explicit request.
 
-Flashing and the serial monitor (`just flash`, `just monitor`, `just run`,
-`just flash-monitor`, `just flash-dump`, `just monitor-log`,
-`just monitor-passive`, `just sleep-check`, `just sd-provision-v3` (erases
-the card),
-`just imu-calibrate`, `just watchdog-check`, `just watchdog-loop`) require
-the board to be connected and must not be run without an explicit request.
+## Read when (docs/agents/)
+
+- `board-wiring.md`: before touching wiring, pins or I2C.
+- `host-build-and-worktrees.md`: before any host build or work in a worktree.
+- `serial-and-flash.md`: before any flash or serial monitoring.
+- `calibration-sd-logging.md`: before touching IMU axes or the SD logger.

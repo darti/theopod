@@ -3,7 +3,8 @@
 - Status: Proposed (decoder benchmark and test tone measured on the board
   2026-11-15, see "Board measurements"; playback not implemented)
 - Date: 2026-11-15
-- Related: t-164 (parent t-153); ADR-0004 (PSRAM DMA), ADR-0005 (shared I2C),
+- Related: t-164 (parent t-153), t-165 (licensing), t-167 (licence-clean
+  decoders), t-168 (decoder decision revised); ADR-0004 (PSRAM DMA), ADR-0005 (shared I2C),
   ADR-0018 (bounded requests, `Scheduler`), ADR-0020 (media units, leases),
   ADR-0022 (one commit per podcast request), ADR-0023 (SD on core1), t-156
   (Range resume), t-163 (core0 starvation)
@@ -113,18 +114,35 @@ esp-alloc. Details and sources: side-session notes `t-164-decoders.md`.
 
 ## Decision (proposed)
 
-1. **Decoders.** AAC-LC: Helix AAC (measured 22 MHz), built by `build.rs`
-   with the ESP GCC as the benchmark does, for personal use only (see
-   Licensing: distribution is blocked pending legal advice);
-   `esp_audio_codec` stays the fallback. MP3: Helix MP3 from the
-   same sources (measured 32.5 MHz), not `nanomp3-core`: the Xtensa LLVM
-   backend only builds it at opt-level 1, where it needs 101 MHz (42 % of a
-   core). Revisit `nanomp3-core` if that backend bug is fixed. Sources:
-   `pschatzmann/codec-helix` (formerly `arduino-libhelix`) at `f6e55a3`,
-   only `src/libhelix-aac` and `src/libhelix-mp3` (Helix code, RPSL/RCSL);
-   the repository's own `License.txt` is GPL-3.0 and covers its Arduino
-   wrapper, which is not used (`tools/audio-bench/shim` replaces its
-   `ConfigHelix.h` and allocator). A host-tested `no_std` crate
+1. **Decoders** (revised by t-168 after the t-165 licence review and the
+   t-167 bench; Helix is no longer used, see Licensing).
+   - *AAC-LC: opencore-aacdec* (PacketVideo, Apache-2.0; AOSP
+     `android-4.0.4_r2.1`, `media/libstagefright/codecs/aacdec`), measured
+     21.6 MHz, the same as Helix AAC. `build.rs` builds it with the ESP G++
+     as the benchmark does, behind a C shim modelled on AOSP's `SoftAAC.cpp`
+     (`tools/audio-bench/shim/theo_opencore.cpp`). Its sources are fetched
+     into `target/opencore-aacdec` by `just audio-bench-inputs` (a future
+     playback build fetches the same pinned tag) and are never committed.
+     Its 108 KB state does not fit in internal RAM: it lives in PSRAM
+     (no measurable cost) and must be built in place in its allocation, never
+     on the core1 stack (t-121 pattern, see Board measurements).
+     The code is unmaintained (dropped from AOSP in 2012) and was never
+     fuzzed, while its input is downloaded and untrusted: a host fuzzing
+     harness of the raw/ADTS decode path (the shim's entry point, built with
+     the host compiler and sanitizers) must run before playback ships.
+     `esp_audio_codec` stays the fallback.
+   - *MP3: `nanomp3-core` 0.2* (MIT/Apache, pure Rust, `no_std`, no
+     `unsafe`), measured 34.1 MHz with the t-157 release profile, within 5 %
+     of Helix MP3 (32.5 MHz). It stays pinned at opt-level 1
+     (`[profile.release.package.nanomp3-core]`): the Xtensa LLVM backend
+     fails on its `l3_decode` at `s`, 2 and 3. The 34 MHz depends on the
+     workspace release profile (LTO, one codegen unit); without it the same
+     opt-level costs 101 MHz, so a profile change must re-run
+     `just audio-bench`. Raise the opt-level once the backend bug is fixed.
+   - The AAC patent licence (Via LA) is still needed to distribute the
+     firmware, whichever AAC decoder is used; MP3 needs none.
+
+   A host-tested `no_std` crate
    (`crates/theo-audio`) holds format sniffing, a hand-written MP4 reader
    (`moov/trak/mdia/minf/stbl`, `mdhd`, `esds`, `stsc`, `stco/co64`, `stsz`
    read in 4 KiB pages from the card, never loaded whole; a sparse seek index
@@ -148,7 +166,8 @@ esp-alloc. Details and sources: side-session notes `t-164-decoders.md`.
    - The decoder runs as an ordinary task in core1's thread-mode executor,
      next to the SD owner. Tasks of one executor run one at a time, so the
      core1 stack needs max(owner, decoder), not their sum; the decoder state
-     (20–50 KB) and its future live in PSRAM (`run_in`, t-121).
+     (opencore-aacdec 108 KB, `nanomp3-core` 23 KB) and its future live in
+     PSRAM (`run_in`, t-121), built in place.
    - It decodes ahead into a PCM ring in PSRAM of ≥ 2 s (384 KB at 48 kHz
      stereo), larger than the longest owner request (1 s budget, ~230 ms
      commit), so a blocked core1 executor never empties the output.
@@ -247,7 +266,7 @@ MP3 (added in the third); figures agree within 1 %.
 
 ### Licence-clean alternatives (t-167, 2026-11-15)
 
-One run with the t-157 release profile (opt-level 3, fat LTO, one codegen
+One run with the t-157 release profile (opt-level 3, thin LTO, one codegen
 unit; `nanomp3-core` still pinned at opt-level 1), same harness and clips:
 
 | Decoder (build) | Decoder state | Mean cycles/frame | MHz for real time | Worst frame | Stack per call |
@@ -276,8 +295,8 @@ unit; `nanomp3-core` still pinned at opt-level 1), same harness and clips:
 - Both RPSL/RCSL decoders now have a licence-clean equivalent at the same
   CPU cost: opencore-aacdec (Apache-2.0; unmaintained, dropped from AOSP in 2012, never
   fuzzed, inputs to treat as untrusted) and `nanomp3-core` (MIT/Apache, pure
-  Rust, no `unsafe`). The decoder choice in the decision above is to
-  revisit; the AAC patent licence is needed whichever decoder is used.
+  Rust, no `unsafe`). The decision above now uses them (t-168); the AAC
+  patent licence is needed whichever decoder is used.
 
 ## Licensing (t-165, 2026-11-15; not legal advice)
 
@@ -285,6 +304,10 @@ Sources read: `RPSL.txt` (RPSL 1.0, rev. 28 Oct 2002), `RCSL.txt` and
 `LICENSE.txt` shipped in `src/libhelix-mp3` at `f6e55a3`. The license header
 in every AAC `.c` file points to the same RPSL/RCSL. Section numbers below
 are RPSL sections unless marked otherwise.
+
+Since t-168 the decision uses opencore-aacdec and `nanomp3-core`; Helix
+stays only in the `audio-bench` comparison build. The review below still
+applies to that build.
 
 **Verdict.** Helix may be used under the RPSL for personal use. It must not
 go into a distributed firmware until a lawyer has reviewed the plan, or until
@@ -384,7 +407,7 @@ it is replaced. RCSL is not a usable route.
 Distribution route with the fewest unknowns: Helix MP3 is royalty-free, but
 its RPSL conflicts remain. The cleanest path is opencore-aacdec plus an
 MIT/Apache MP3 decoder, together with an AAC patent licence and a Slint
-licence choice.
+licence choice; the decision takes that path (t-168).
 
 ## Consequences
 
@@ -393,16 +416,26 @@ licence choice.
   keeps core0's UI/TLS budget intact (t-163); per-episode sample rates avoid
   a resampler (~5–10 MHz); PIE would save at most part of a 16–45 MHz decoder
   and is deferred.
-- A C dependency (Helix) needs a toolchain recipe (`cc` env), an ADR-level
-  licence decision and host tests through its C build. `esp_audio_codec`
-  is Espressif-only and closed.
+- A C++ dependency (opencore-aacdec) needs a toolchain recipe (`cc` env,
+  ESP G++), a pinned fetch into `target/` (never committed) and host tests
+  through its C build, including a fuzzing harness of the raw/ADTS path: the
+  code is unmaintained and was never fuzzed, and podcast files are untrusted
+  input. Bugs found there are ours to patch (vendored patches on top of the
+  fetched tag, Apache-2.0 notices kept). `esp_audio_codec` is
+  Espressif-only and closed.
+- The AAC decoder state (108 KB) takes PSRAM, not internal RAM, and must be
+  constructed in place.
+- `nanomp3-core`'s 34 MHz rests on the release profile (LTO, one codegen
+  unit) and its opt-level 1 pin; any profile change re-runs
+  `just audio-bench`.
 - New risks to verify on the board: core1 stack headroom with the feeder
   interrupt (~2.4 KB today), owner request deadlines stretched by decode and
   feeder time, PIE state saving if PIE is ever used, PSRAM bandwidth with the
   display DMA (the PCM ring is in PSRAM; DMA reads stay in internal RAM).
-- Measured load on core1: ~9 % (AAC) or ~13.5 % (MP3) for decoding, so the
+- Measured load on core1: ~9 % (AAC) or ~14 % (MP3) for decoding, so the
   owner (~30 % during a download) plus decoding stays under half of core1.
-- Licensing (t-165): Helix is fine for personal use when fetched at build
-  time and never committed. Distributing the firmware is blocked by RPSL
-  §4.1/§4.2 (Slint, Wi-Fi blobs) until a lawyer reviews it, and needs a Via
-  LA AAC licence.
+- Licensing (t-165, t-168): both chosen decoders are Apache-2.0 or
+  MIT/Apache, so the RPSL §4.1/§4.2 conflicts (Slint, Wi-Fi blobs) no longer
+  apply to the firmware; Helix remains only in the personal-use bench build.
+  Distributing the firmware still needs a Via LA AAC patent licence and a
+  Slint licence choice.

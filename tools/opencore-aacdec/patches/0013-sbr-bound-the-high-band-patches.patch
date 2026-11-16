@@ -1,0 +1,116 @@
+Bound the SBR high-band patches.
+
+sbr_generate_high_freq.cpp built the patches from the master table
+without checking it:
+- a master table with tiny bands made more than MAX_NUM_PATCHES patches,
+  written past targetStartBand[] and then past the patch borders of
+  sbr_create_limiter_bands() (stack overflow); the construction stops at
+  MAX_NUM_PATCHES.
+- an empty patch looped with an unchanged state when goalSb was already
+  usb (a hang, libFuzzer timeout); it now stops the construction.
+- the LPC analysis ran up to v_k_master[0], past the 32 QMF bands of the
+  source buffers.
+- the HQ coefficients shifted by 2 + shift_factor, negative when the
+  quotient overflows; the overflow flag already discards them, so they
+  are set to 0 first.
+
+Regression input: tools/aacdec-fuzz/regressions/t169-sbr-patch-count.bin.
+
+Licence: this patch modifies opencore-aacdec, Copyright (C) 1998-2009
+PacketVideo, licensed under the Apache License, Version 2.0. The patch is
+distributed under the same licence; each modified file keeps its notice and
+states that it was changed.
+
+--- a/sbr_generate_high_freq.cpp
++++ b/sbr_generate_high_freq.cpp
+@@ -14,6 +14,9 @@
+  * See the License for the specific language governing permissions
+  * and limitations under the License.
+  * -------------------------------------------------------------------
++ *
++ * Modified by theo-pod (t-169): the patch construction and the LPC
++ * coefficients stay within their tables and shift ranges.
+  */
+ /*
+ 
+@@ -351,6 +354,18 @@
+ 
+     while (targetStopBand < usb)
+     {
++        Int32 prevGoalSb = goalSb;  /* theo-pod (t-169) */
++
++        /*
++         * theo-pod (t-169): targetStartBand[] and the limiter's patch
++         * borders hold MAX_NUM_PATCHES patches; a master table with tiny
++         * bands made more.
++         */
++        if (patch >= MAX_NUM_PATCHES)
++        {
++            break;
++        }
++
+         Patch->targetStartBand[patch] = targetStopBand;
+ 
+         numBandsInPatch = goalSb - targetStopBand;                   /* get the desired range of the patch */
+@@ -406,6 +421,15 @@
+ 
+         if (numBandsInPatch <= 0)
+         {
++            /*
++             * theo-pod (t-169): retrying only helps when goalSb has just
++             * moved to usb; otherwise the next pass is identical and the
++             * loop never ended.
++             */
++            if (goalSb == prevGoalSb)
++            {
++                break;
++            }
+             continue;
+         }
+ 
+@@ -499,7 +523,8 @@
+ 
+     autoCorrLength = 38;
+ 
+-    for (loBand = 1; loBand < v_k_master[0]; loBand++)
++    /* theo-pod (t-169): the source buffers hold 32 QMF bands. */
++    for (loBand = 1; loBand < v_k_master[0] && loBand < 32; loBand++)
+     {
+ 
+         calc_auto_corr_LC(&ac,
+@@ -813,7 +838,8 @@
+ 
+     autoCorrLength = 38;
+ 
+-    for (loBand = 1; loBand < v_k_master[0]; loBand++)
++    /* theo-pod (t-169): the source buffers hold 32 QMF bands. */
++    for (loBand = 1; loBand < v_k_master[0] && loBand < 32; loBand++)
+     {
+ 
+         calc_auto_corr(&ac,
+@@ -847,10 +873,10 @@
+ 
+             pv_div(temp1r, ac.det, &quotient);
+             overflow_flag = (quotient.shift_factor < -2) ? 1 : 0;
+-            temp1r = quotient.quotient >> (2 + quotient.shift_factor);   /*  Q28 */
++            temp1r = (overflow_flag) ? 0 : quotient.quotient >> (2 + quotient.shift_factor);   /*  Q28, theo-pod (t-169): no negative shift */
+             pv_div(temp1i, ac.det, &quotient);
+             overflow_flag = (quotient.shift_factor < -2) ? 1 : 0;
+-            temp1i = quotient.quotient >> (2 + quotient.shift_factor);   /*  Q28 */
++            temp1i = (overflow_flag) ? 0 : quotient.quotient >> (2 + quotient.shift_factor);   /*  Q28, theo-pod (t-169): no negative shift */
+ 
+             alphar[1][loBand] = temp1r;
+             alphai[1][loBand] = temp1i;
+@@ -872,10 +898,10 @@
+ 
+             pv_div(temp0r, ac.r11r, &quotient);
+             overflow_flag = (quotient.shift_factor < -2) ? 1 : 0;
+-            temp0r = quotient.quotient >> (2 + quotient.shift_factor);   /*  Q28 */
++            temp0r = (overflow_flag) ? 0 : quotient.quotient >> (2 + quotient.shift_factor);   /*  Q28, theo-pod (t-169): no negative shift */
+             pv_div(temp0i, ac.r11r, &quotient);
+             overflow_flag = (quotient.shift_factor < -2) ? 1 : 0;
+-            temp0i = quotient.quotient >> (2 + quotient.shift_factor);   /*  Q28 */
++            temp0i = (overflow_flag) ? 0 : quotient.quotient >> (2 + quotient.shift_factor);   /*  Q28, theo-pod (t-169): no negative shift */
+ 
+             alphar[0][loBand] = temp0r;
+             alphai[0][loBand] = temp0i;

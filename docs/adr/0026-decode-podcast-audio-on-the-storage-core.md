@@ -126,10 +126,12 @@ esp-alloc. Details and sources: side-session notes `t-164-decoders.md`.
      Its 108 KB state does not fit in internal RAM: it lives in PSRAM
      (no measurable cost) and must be built in place in its allocation, never
      on the core1 stack (t-121 pattern, see Board measurements).
-     The code is unmaintained (dropped from AOSP in 2012) and was never
-     fuzzed, while its input is downloaded and untrusted: a host fuzzing
-     harness of the raw/ADTS decode path (the shim's entry point, built with
-     the host compiler and sanitizers) must run before playback ships.
+     The code is unmaintained (dropped from AOSP in 2012) and had never
+     been fuzzed, while its input is downloaded and untrusted: a host
+     fuzzing harness of the raw/ADTS decode path (the shim's entry point,
+     built with the host compiler and sanitizers) had to run before
+     playback ships. ADR-0028 records it: four campaigns, 18 patches to
+     the fetched sources, each with a regression input.
      `esp_audio_codec` stays the fallback.
    - *MP3: `nanomp3-core` 0.2* (MIT/Apache, pure Rust, `no_std`, no
      `unsafe`), measured 34.1 MHz with the t-157 release profile, within 5 %
@@ -293,8 +295,8 @@ unit; `nanomp3-core` still pinned at opt-level 1), same harness and clips:
   treat ±25 % between runs of the internal-state AAC case as noise until
   repeated.
 - Both RPSL/RCSL decoders now have a licence-clean equivalent at the same
-  CPU cost: opencore-aacdec (Apache-2.0; unmaintained, dropped from AOSP in 2012, never
-  fuzzed, inputs to treat as untrusted) and `nanomp3-core` (MIT/Apache, pure
+  CPU cost: opencore-aacdec (Apache-2.0; unmaintained, dropped from AOSP in 2012, fuzzed
+  and patched since, ADR-0028; inputs to treat as untrusted) and `nanomp3-core` (MIT/Apache, pure
   Rust, no `unsafe`). The decision above now uses them (t-168); the AAC
   patent licence is needed whichever decoder is used.
 
@@ -419,9 +421,9 @@ licence choice; the decision takes that path (t-168).
 - A C++ dependency (opencore-aacdec) needs a toolchain recipe (`cc` env,
   ESP G++), a pinned fetch into `target/` (never committed) and host tests
   through its C build, including a fuzzing harness of the raw/ADTS path: the
-  code is unmaintained and was never fuzzed, and podcast files are untrusted
-  input. Bugs found there are ours to patch (vendored patches on top of the
-  fetched tag, Apache-2.0 notices kept). `esp_audio_codec` is
+  code is unmaintained and had never been fuzzed, and podcast files are
+  untrusted input. Bugs found there are ours to patch (vendored patches on
+  top of the fetched tag, Apache-2.0 notices kept; ADR-0028). `esp_audio_codec` is
   Espressif-only and closed.
 - The AAC decoder state (108 KB) takes PSRAM, not internal RAM, and must be
   constructed in place.

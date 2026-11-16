@@ -1,0 +1,191 @@
+theo-pod (t-169): reject sampling-frequency indices above 11
+
+The ADTS header, the program config element and the AudioSpecificConfig
+SBR extension carry a 4-bit sampling-frequency index, but samp_rate_info[]
+has 12 entries (12 to 14 are reserved, 15 is an explicit frequency this
+decoder does not support). Only the AudioSpecificConfig base index was
+checked; the others reached infoinit(), the SBR set-up and
+PVMP4AudioDecoderDisableAacPlus() and read past the table. Each source now
+rejects indices above 11, infoinit() refuses them, and
+PVMP4AudioDecoderDisableAacPlus() only restores and reads a valid index.
+Found by the host fuzzer (UBSan index out of bounds in infoinit and
+PVMP4AudioDecoderDisableAacPlus, ASan global-buffer-overflow in infoinit);
+regression inputs tools/aacdec-fuzz/regressions/t169-sampling-index-adts.bin
+and t169-sampling-index-pce.bin.
+
+Licence: this patch modifies opencore-aacdec, Copyright (C) 1998-2009
+PacketVideo, licensed under the Apache License, Version 2.0. The patch is
+distributed under the same licence; each modified file keeps its notice and
+states that it was changed.
+
+--- a/get_adts_header.cpp
++++ b/get_adts_header.cpp
+@@ -14,6 +14,9 @@
+  * See the License for the specific language governing permissions
+  * and limitations under the License.
+  * -------------------------------------------------------------------
++ *
++ * Modified by theo-pod (t-169): sampling-frequency indices above 11 are
++ * rejected.
+  */
+ /*
+ 
+@@ -437,6 +440,15 @@
+          * see Ref #1 for their interpretation.
+          */
+         pVars->prog_config.sampling_rate_idx = (lower_16 >> 6) & 0xF;
++
++        /*
++         * theo-pod (t-169): indices 12 to 15 are reserved or escape values,
++         * and samp_rate_info[] has 12 entries.
++         */
++        if (pVars->prog_config.sampling_rate_idx > 0xb)
++        {
++            status = 1;
++        }
+ 
+         /*
+          * private_bit is a bit for private use.  ISO/IEC will not make
+--- a/get_audio_specific_config.cpp
++++ b/get_audio_specific_config.cpp
+@@ -14,6 +14,9 @@
+  * See the License for the specific language governing permissions
+  * and limitations under the License.
+  * -------------------------------------------------------------------
++ *
++ * Modified by theo-pod (t-169): sampling-frequency indices above 11 are
++ * rejected.
+  */
+ /*
+ 
+@@ -393,6 +396,15 @@
+         extensionSamplingFrequencyIndex = /* extensionSamplingFrequencyIndex */
+             get9_n_lessbits(LEN_SAMP_RATE_IDX,
+                             pInputStream);
++        /*
++         * theo-pod (t-169): samp_rate_info[] has 12 entries, and the index
++         * selects one below; 12 to 14 are reserved, 15 (an explicit
++         * frequency) is not supported.
++         */
++        if (extensionSamplingFrequencyIndex > 0x0b)
++        {
++            return 1;
++        }
+         if (extensionSamplingFrequencyIndex == 0x0f)
+         {
+             /*
+@@ -459,6 +471,11 @@
+                         get9_n_lessbits( /* extensionSamplingFrequencyIndex */
+                             LEN_SAMP_RATE_IDX,
+                             pInputStream);
++                    /* theo-pod (t-169): see the explicit path above. */
++                    if (extensionSamplingFrequencyIndex > 0x0b)
++                    {
++                        return 1;
++                    }
+                     if (pVars->aacPlusEnabled == true)
+                     {
+ #ifdef AAC_PLUS
+--- a/get_prog_config.cpp
++++ b/get_prog_config.cpp
+@@ -14,6 +14,9 @@
+  * See the License for the specific language governing permissions
+  * and limitations under the License.
+  * -------------------------------------------------------------------
++ *
++ * Modified by theo-pod (t-169): sampling-frequency indices above 11 are
++ * rejected.
+  */
+ /*
+ 
+@@ -500,6 +503,15 @@
+         pInputStream->usedBits -= (LEN_TAG + LEN_PROFILE + LEN_SAMP_IDX);
+ 
+         return (1); /*  mismatch cannot happen */
++    }
++
++    /*
++     * theo-pod (t-169): this PCE is copied into prog_config below, whose
++     * index selects one of the 12 entries of samp_rate_info[].
++     */
++    if (pScratchPCE->sampling_rate_idx > 0xb)
++    {
++        return (1);
+     }
+ 
+ 
+--- a/infoinit.cpp
++++ b/infoinit.cpp
+@@ -14,6 +14,9 @@
+  * See the License for the specific language governing permissions
+  * and limitations under the License.
+  * -------------------------------------------------------------------
++ *
++ * Modified by theo-pod (t-169): sampling-frequency indices above 11 are
++ * rejected.
+  */
+ /*
+ 
+@@ -226,7 +229,7 @@
+     Int16   *sfbands;
+     FrameInfo    *pFrameInfo;
+ 
+-    const SR_Info *pSi = &(samp_rate_info[samp_rate_idx]);
++    const SR_Info *pSi;
+ 
+     const Int16 * pt_SFbands1024 = NULL;
+     const Int16 * pt_SFbands128  = NULL;
+@@ -235,6 +238,16 @@
+     ; Function body here
+     ----------------------------------------------------------------------------*/
+ 
++    /*
++     * theo-pod (t-169): samp_rate_info[] has 12 entries; callers pass the
++     * 4-bit index read from the stream.
++     */
++    if ((samp_rate_idx < 0) || (samp_rate_idx > 0xb))
++    {
++        return -1;
++    }
++    pSi = &(samp_rate_info[samp_rate_idx]);
++
+     switch (pSi->samp_rate)
+     {
+         case 96000:
+--- a/pvmp4audiodecoderinitlibrary.cpp
++++ b/pvmp4audiodecoderinitlibrary.cpp
+@@ -14,6 +14,9 @@
+  * See the License for the specific language governing permissions
+  * and limitations under the License.
+  * -------------------------------------------------------------------
++ *
++ * Modified by theo-pod (t-169): sampling-frequency indices above 11 are
++ * rejected.
+  */
+ /*
+ 
+@@ -403,12 +406,22 @@
+         pVars->mc_info.upsamplingFactor = 1;
+         pVars->mc_info.psPresentFlag  = 0;
+         pVars->mc_info.sbrPresentFlag = 0;
+-        pVars->prog_config.sampling_rate_idx += 3;
++        /*
++         * theo-pod (t-169): undo the implicit-SBR halving only when the
++         * result is a valid index into samp_rate_info[] (12 entries).
++         */
++        if (pVars->prog_config.sampling_rate_idx + 3 <= 0xb)
++        {
++            pVars->prog_config.sampling_rate_idx += 3;
++        }
+         pVars->sbrDecoderData.SbrChannel[0].syncState = SBR_NOT_INITIALIZED;
+         pVars->sbrDecoderData.SbrChannel[1].syncState = SBR_NOT_INITIALIZED;
+ 
+ 
+-        pExt->samplingRate = samp_rate_info[pVars->prog_config.sampling_rate_idx].samp_rate;
++        if (pVars->prog_config.sampling_rate_idx <= 0xb)
++        {
++            pExt->samplingRate = samp_rate_info[pVars->prog_config.sampling_rate_idx].samp_rate;
++        }
+         pExt->aacPlusUpsamplingFactor = 1;
+ #endif
+     }

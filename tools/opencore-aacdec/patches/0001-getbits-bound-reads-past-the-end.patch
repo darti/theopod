@@ -1,0 +1,64 @@
+theo-pod (t-169): bound the bit readers once past the end of the input
+
+getbits(), get9_n_lessbits() and get17_n_lessbits() compute the bytes left
+as `inputBufferCurrentLength - offset` in unsigned arithmetic. Once usedBits
+has gone past the end of the buffer (a truncated or corrupt frame, or an
+empty AudioSpecificConfig), the difference wraps, the "enough bytes" branch
+is taken and the reader loads up to 4 bytes past the buffer. Found by the
+host fuzzer (ASan heap-buffer-overflow in get9_n_lessbits, from
+get_audio_specific_config); regression input
+tools/aacdec-fuzz/regressions/t169-empty-config-read.bin.
+
+Licence: this patch modifies opencore-aacdec, Copyright (C) 1998-2009
+PacketVideo, licensed under the Apache License, Version 2.0. The patch is
+distributed under the same licence; the modified file keeps its notice and
+states that it was changed.
+
+--- a/getbits.h
++++ b/getbits.h
+@@ -14,6 +14,9 @@
+  * See the License for the specific language governing permissions
+  * and limitations under the License.
+  * -------------------------------------------------------------------
++ *
++ * Modified by theo-pod (t-169): bounded reads once the bit position is past
++ * the end of the input buffer.
+  */
+ /*
+ 
+@@ -110,7 +113,10 @@
+ 
+ #if CHECK_INPUT_BUFFER_LIMITS
+ 
+-        offset =  pInputStream->inputBufferCurrentLength - offset;
++        /* theo-pod (t-169): bytes left, 0 once usedBits is past the end;
++         * the unsigned difference wrapped and read past the buffer. */
++        offset = (offset < pInputStream->inputBufferCurrentLength) ?
++                 pInputStream->inputBufferCurrentLength - offset : 0;
+         /*  check if access to input buffer does not go beyond boundaries */
+         if (offset > 3)
+         {
+@@ -218,7 +224,10 @@
+ #if CHECK_INPUT_BUFFER_LIMITS
+ 
+ 
+-        offset =  pInputStream->inputBufferCurrentLength - offset;
++        /* theo-pod (t-169): bytes left, 0 once usedBits is past the end;
++         * the unsigned difference wrapped and read past the buffer. */
++        offset = (offset < pInputStream->inputBufferCurrentLength) ?
++                 pInputStream->inputBufferCurrentLength - offset : 0;
+         /*  check if access to input buffer does not go beyond boundaries */
+         if (offset > 1)
+         {
+@@ -281,7 +290,10 @@
+ 
+ #if CHECK_INPUT_BUFFER_LIMITS
+ 
+-        offset =  pInputStream->inputBufferCurrentLength - offset;
++        /* theo-pod (t-169): bytes left, 0 once usedBits is past the end;
++         * the unsigned difference wrapped and read past the buffer. */
++        offset = (offset < pInputStream->inputBufferCurrentLength) ?
++                 pInputStream->inputBufferCurrentLength - offset : 0;
+         /*  check if access to input buffer does not go beyond boundaries */
+ 
+         if (offset > 2)

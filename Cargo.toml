@@ -1,6 +1,6 @@
 [workspace]
 exclude = ["vendor/littlefs", "vendor/esp-radio"]
-members = ["crates/theo-drivers", "crates/theo-frame-dump", "crates/theo-storage", "crates/theo-podcasts", "tools/frame-png"]
+members = ["crates/theo-drivers", "crates/theo-frame-dump", "crates/theo-storage", "crates/theo-podcasts", "tools/aacdec-fuzz", "tools/frame-png"]
 
 [workspace.package]
 edition = "2024"

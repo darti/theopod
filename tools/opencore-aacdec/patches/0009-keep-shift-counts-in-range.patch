@@ -1,0 +1,273 @@
+Keep shift counts within the width of their operand.
+
+A malformed stream drives several shift counts out of range, which is
+undefined behaviour in C++ (UBSan reports):
+- trans4m_freq_2_time_fxp.cpp: imdct_fxp() returns an exponent derived
+  from the stream's q-format; exp + 15 - SCALING went negative on the
+  long-window paths. Every computed shift now goes through
+  trans4m_shift(), which clamps it to 0..31.
+- ms_synt.cpp: the left/right q-format difference gave shifts up to 51.
+- pvmp4audiodecoderframe.cpp: an SBR header left upsamplingFactor at 0, so
+  the bit rate was shifted by -1.
+
+Licence: this patch modifies opencore-aacdec, Copyright (C) 1998-2009
+PacketVideo, licensed under the Apache License, Version 2.0. The patch is
+distributed under the same licence; each modified file keeps its notice and
+states that it was changed.
+
+--- a/ms_synt.cpp
++++ b/ms_synt.cpp
+@@ -14,6 +14,9 @@
+  * See the License for the specific language governing permissions
+  * and limitations under the License.
+  * -------------------------------------------------------------------
++ *
++ * Modified by theo-pod (t-169): keep the M/S normalisation shifts within
++ * 0..31
+  */
+ /*
+ 
+@@ -312,6 +315,12 @@
+                  */
+                 Int shift_left_chan  = 1 + tempInt;
+ 
++                /* theo-pod (t-169): a shift of 32 or more is undefined */
++                if (shift_left_chan > 31)
++                {
++                    shift_left_chan = 31;
++                }
++
+                 /*
+                  * Following code line is equivalent to...
+                  * q_formatLeft  = q_formatRight - 1;
+@@ -349,6 +358,12 @@
+                  */
+                 Int shift_right_chan = 1 - tempInt;
+ 
++                /* theo-pod (t-169): a shift of 32 or more is undefined */
++                if (shift_right_chan > 31)
++                {
++                    shift_right_chan = 31;
++                }
++
+                 /*
+                  * Following code line is equivalent to...
+                  * q_formatRight = q_formatLeft - 1;
+--- a/pvmp4audiodecoderframe.cpp
++++ b/pvmp4audiodecoderframe.cpp
+@@ -17,6 +17,7 @@
+  *
+  * Modified by theo-pod (t-169): keep ltp_buffer_state within the layout of
+  * the current frame
++ * shift the bit rate only for an upsampling factor above 1
+  */
+ /*
+ 
+@@ -1428,7 +1429,14 @@
+         pExt->bitRate = (pExt->samplingRate *
+                          (pVars->inputStream.usedBits - initialUsedBits)) >> 10;  /*  LONG_WINDOW  1024 */
+ 
+-        pExt->bitRate >>= (pMC_Info->upsamplingFactor - 1);
++        /*
++         * theo-pod (t-169): upsamplingFactor comes from the SBR header's
++         * sampleRateMode, which a malformed stream can leave at 0.
++         */
++        if (pMC_Info->upsamplingFactor > 1)
++        {
++            pExt->bitRate >>= (pMC_Info->upsamplingFactor - 1);
++        }
+ 
+ 
+     } /* end if (status == SUCCESS) */
+--- a/trans4m_freq_2_time_fxp.cpp
++++ b/trans4m_freq_2_time_fxp.cpp
+@@ -14,6 +14,8 @@
+  * See the License for the specific language governing permissions
+  * and limitations under the License.
+  * -------------------------------------------------------------------
++ *
++ * Modified by theo-pod (t-169): keep the IMDCT output shifts within 0..31
+  */
+ /*
+ 
+@@ -457,7 +459,18 @@
+ 
+ #define  ROUNDING_SCALED     (ROUNDING<<(16 - SCALING))
+ 
++/*
++ * theo-pod (t-169): imdct_fxp() returns an exponent derived from the
++ * stream's q-format, which a malformed stream can push far enough for the
++ * right shifts below to be negative or wider than 31 bits (undefined).
++ * Keep them within 0..31.
++ */
++static inline Int trans4m_shift(Int shift)
++{
++    return (shift < 0) ? 0 : ((shift > 31) ? 31 : shift);
++}
+ 
++
+ #if defined(PV_ARM_V5)
+ 
+ 
+@@ -653,7 +666,7 @@
+ 
+                         Int32 * pFreq2T = (Int32 *)pFreqInfo;
+                         Int32 * win = (Int32 *) & Long_Window_fxp[wnd_shape_prev_bk][0];
+-                        Int shift = exp + 15 - SCALING;
++                        Int shift = trans4m_shift(exp + 15 - SCALING);
+ 
+ 
+                         Int32 * pFreq2T_2 = &pFreq2T[HALF_LONG_WINDOW];
+@@ -706,7 +719,7 @@
+                     pOutput_buffer_2 = pOutput_buffer + HALF_LONG_WINDOW;
+ 
+ 
+-                    shift = exp + 15 - SCALING;
++                    shift = trans4m_shift(exp + 15 - SCALING);
+ 
+                     for (i = HALF_LONG_WINDOW; i != 0; i--)
+                     {
+@@ -755,7 +768,7 @@
+                     else if (exp < 0)
+                     {
+ 
+-                        Int shift = -exp;
++                        Int shift = trans4m_shift(-exp);
+                         for (i = (W_L_START_1 - LONG_WINDOW) >> 1; i != 0 ; i--)
+                         {
+                             Int32 temp2 = ((Int32) * (pFreq_2_Time_data_1++)) << shift;
+@@ -851,7 +864,7 @@
+                     }
+                     else if (exp < 0)
+                     {
+-                        shift = -exp;
++                        shift = trans4m_shift(-exp);
+                         Int32 temp1 = ((Int32) * (pFreq_2_Time_data_1++)) << shift;
+                         temp = *(pOverlap_and_Add_Buffer_1++);
+ 
+@@ -896,7 +909,7 @@
+ 
+                     exp += SCALING;  /* +8 back to what it was */
+ 
+-                    shift = exp + 15 - SCALING;
++                    shift = trans4m_shift(exp + 15 - SCALING);
+ 
+ 
+                     for (i = HALF_SHORT_WINDOW; i != 0; i--)
+@@ -1113,7 +1126,7 @@
+                  */
+ 
+ 
+-                shift = exp + 15 - SCALING;
++                shift = trans4m_shift(exp + 15 - SCALING);
+ 
+ 
+                 for (i = SHORT_WINDOW; i != 0; i--)
+@@ -1204,7 +1217,7 @@
+              *        W_L_STOP_1
+              */
+ 
+-            shift = exp + 15 - SCALING;
++            shift = trans4m_shift(exp + 15 - SCALING);
+             {
+                 Int16 win1;
+                 Int16  dat1;
+@@ -1315,7 +1328,7 @@
+             pShort_Window_2 =
+                 &Short_Window_fxp[wnd_shape_this_bk][SHORT_WINDOW_m_1];
+ 
+-            shift = exp + 15 - SCALING;
++            shift = trans4m_shift(exp + 15 - SCALING);
+ 
+ 
+             Int16 win1;
+@@ -1456,7 +1469,7 @@
+                  *      W_L_STOP_1
+                  */
+ 
+-                shift = exp + 15 - SCALING;
++                shift = trans4m_shift(exp + 15 - SCALING);
+ 
+                 Int16 dat1 = *(pFreq_2_Time_data_2++);
+                 Int16 win1 = *(pShort_Window_2--);
+@@ -1660,7 +1673,7 @@
+                         Int32 * pFreq2T_2 = &pFreq2T[HALF_LONG_WINDOW];
+                         Int32 * win = (Int32 *) & Long_Window_fxp[wnd_shape_prev_bk][0];
+ 
+-                        Int shift = exp + 15 - SCALING;
++                        Int shift = trans4m_shift(exp + 15 - SCALING);
+ 
+                         for (i = HALF_LONG_WINDOW; i != 0; i--)
+                         {
+@@ -1719,7 +1732,7 @@
+                      *  process first  LONG_WINDOW elements
+                      */
+ 
+-                    shift = exp + 15 - SCALING;
++                    shift = trans4m_shift(exp + 15 - SCALING);
+ 
+                     for (i = HALF_LONG_WINDOW; i != 0; i--)
+                     {
+@@ -1771,7 +1784,7 @@
+                     else if (exp < 0)
+                     {
+ 
+-                        Int shift = -exp;
++                        Int shift = trans4m_shift(-exp);
+                         for (i = (W_L_START_1 - LONG_WINDOW) >> 1; i != 0 ; i--)
+                         {
+                             Int32 temp2 = ((Int32) * (pFreq_2_Time_data_1++)) << shift;
+@@ -1870,7 +1883,7 @@
+                     }
+                     else if (exp < 0)
+                     {
+-                        shift = -exp;
++                        shift = trans4m_shift(-exp);
+ 
+                         Int32 temp1 = ((Int32) * (pFreq_2_Time_data_1++)) << shift;
+                         temp = *(pOverlap_and_Add_Buffer_1++);
+@@ -1916,7 +1929,7 @@
+                     pInterleaved_output_2 = pInterleaved_output + (2 * HALF_SHORT_WINDOW);
+ 
+                     exp += SCALING;  /* +8 back to what it was */
+-                    shift = exp + 15 - SCALING;
++                    shift = trans4m_shift(exp + 15 - SCALING);
+ 
+ 
+                     for (i = HALF_SHORT_WINDOW; i != 0; i--)
+@@ -2143,7 +2156,7 @@
+                  */
+ 
+ 
+-                shift = exp + 15 - SCALING;
++                shift = trans4m_shift(exp + 15 - SCALING);
+ 
+ 
+                 for (i = SHORT_WINDOW; i != 0; i--)
+@@ -2234,7 +2247,7 @@
+              *        W_L_STOP_1
+              */
+ 
+-            shift = exp + 15 - SCALING;
++            shift = trans4m_shift(exp + 15 - SCALING);
+             {
+                 Int16 win1;
+                 Int16  dat1;
+@@ -2348,7 +2361,7 @@
+             pShort_Window_2 =
+                 &Short_Window_fxp[wnd_shape_this_bk][SHORT_WINDOW_m_1];
+ 
+-            shift = exp + 15 - SCALING;
++            shift = trans4m_shift(exp + 15 - SCALING);
+ 
+             Int16 win1;
+             Int16  dat1;
+@@ -2492,7 +2505,7 @@
+                  *      W_L_STOP_1
+                  */
+ 
+-                shift = exp + 15 - SCALING;
++                shift = trans4m_shift(exp + 15 - SCALING);
+ 
+                 Int16 dat1 = *(pFreq_2_Time_data_2++);
+                 Int16 win1 = *(pShort_Window_2--);

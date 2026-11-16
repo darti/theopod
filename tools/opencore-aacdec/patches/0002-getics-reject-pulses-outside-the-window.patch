@@ -1,0 +1,67 @@
+theo-pod (t-169): reject pulse data outside the long window
+
+get_pulse_data() reads pulse_start_sfb (6 bits) and up to four 5-bit
+offsets without checking them against the window. pulse_nc() then reads
+win_sfb_top[0][pulse_start_sfb - 1] past the scalefactor band table and
+writes coefficients past the 1024-line spectrum. getics() now rejects
+the frame when pulse_start_sfb >= num_swb or the last pulse falls past
+coef_per_frame, as ISO/IEC 14496-3 requires. Found by the host fuzzer (ASan
+global-buffer-overflow in pulse_nc); regression input
+tools/aacdec-fuzz/regressions/t169-pulse-outside-window.bin.
+
+Licence: this patch modifies opencore-aacdec, Copyright (C) 1998-2009
+PacketVideo, licensed under the Apache License, Version 2.0. The patch is
+distributed under the same licence; each modified file keeps its notice and
+states that it was changed.
+
+--- a/getics.cpp
++++ b/getics.cpp
+@@ -14,6 +14,9 @@
+  * See the License for the specific language governing permissions
+  * and limitations under the License.
+  * -------------------------------------------------------------------
++ *
++ * Modified by theo-pod (t-169): pulse data outside the long window is
++ * rejected.
+  */
+ /*
+ 
+@@ -593,6 +596,38 @@
+                 status = get_pulse_data(
+                              pPulseInfo,
+                              pInputStream);
++
++                /*
++                 * theo-pod (t-169): pulse_nc() reads win_sfb_top[0] at
++                 * pulse_start_sfb - 1 and adds every offset to that start.
++                 * Reject pulses outside the long window (ISO/IEC 14496-3
++                 * requires pulse_start_sfb < num_swb).
++                 */
++                if (status == SUCCESS)
++                {
++                    Int sfb = pPulseInfo->pulse_start_sfb;
++                    Int position = 0;
++
++                    if (sfb >= pFrameInfo->sfb_per_win[0])
++                    {
++                        status = 1;
++                    }
++                    else
++                    {
++                        if (sfb > 0)
++                        {
++                            position = pFrameInfo->win_sfb_top[0][sfb - 1];
++                        }
++                        for (sfb = 0; sfb < pPulseInfo->number_pulse; sfb++)
++                        {
++                            position += pPulseInfo->pulse_offset[sfb];
++                        }
++                        if (position >= pFrameInfo->coef_per_frame)
++                        {
++                            status = 1;
++                        }
++                    }
++                }
+             }
+             else
+             {

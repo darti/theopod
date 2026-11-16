@@ -1,0 +1,44 @@
+theo-pod (t-169): clamp the TNS filter bottom at band 0
+
+get_tns() subtracts each filter length from top without a floor. ISO/IEC
+14496-3 takes bottom = max(top - length, 0); here a negative top went
+through MINIMUM() into an unsigned start band, so the start coefficient
+and the band count were garbage, and apply_tns() walked win_sfb_top[] and
+coef[] past their ends. top is now clamped at 0. Found by the host fuzzer
+(ASan global- and heap-buffer-overflow in apply_tns); regression input
+tools/aacdec-fuzz/regressions/t169-tns-negative-bottom.bin.
+
+Licence: this patch modifies opencore-aacdec, Copyright (C) 1998-2009
+PacketVideo, licensed under the Apache License, Version 2.0. The patch is
+distributed under the same licence; each modified file keeps its notice and
+states that it was changed.
+
+--- a/get_tns.cpp
++++ b/get_tns.cpp
+@@ -14,6 +14,8 @@
+  * See the License for the specific language governing permissions
+  * and limitations under the License.
+  * -------------------------------------------------------------------
++ *
++ * Modified by theo-pod (t-169): the TNS filter bottom is clamped at band 0.
+  */
+ /*
+ 
+@@ -459,6 +461,17 @@
+                 top -= get9_n_lessbits(num_start_band_bits,
+                                        pInputStream);
+ 
++                /*
++                 * theo-pod (t-169): ISO/IEC 14496-3 takes
++                 * bottom = max(top - length, 0). A negative top wrapped into
++                 * a huge unsigned start band, and apply_tns() then walked
++                 * win_sfb_top[] and coef[] past their ends.
++                 */
++                if (top < 0)
++                {
++                    top = 0;
++                }
++
+                 tempInt = MINIMUM(top, tns_bands);
+ 
+                 pFilt->start_coef = SCALE_FACTOR_BAND_OFFSET(tempInt);

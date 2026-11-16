@@ -1,0 +1,46 @@
+theo-pod (t-169): reject an SBR crossover band outside the master table
+
+sbr_reset_dec() derives the high-resolution band count as
+Num_Master - xover_band, with xover_band read from the SBR header (3 bits).
+When xover_band >= Num_Master the count is zero or negative, and the
+low-resolution table is built from FreqBandTable[HI][-1] and below.
+ISO/IEC 14496-3 needs at least one high-resolution band; the header is now
+rejected with SBRDEC_ILLEGAL_SCFACTORS, as the existing band checks do.
+Found by the host fuzzer (UBSan index -2 out of bounds in sbr_reset_dec);
+regression input tools/aacdec-fuzz/regressions/t169-sbr-crossover.bin.
+
+Licence: this patch modifies opencore-aacdec, Copyright (C) 1998-2009
+PacketVideo, licensed under the Apache License, Version 2.0. The patch is
+distributed under the same licence; each modified file keeps its notice and
+states that it was changed.
+
+--- a/sbr_reset_dec.cpp
++++ b/sbr_reset_dec.cpp
+@@ -14,6 +14,9 @@
+  * See the License for the specific language governing permissions
+  * and limitations under the License.
+  * -------------------------------------------------------------------
++ *
++ * Modified by theo-pod (t-169): a crossover band outside the master table is
++ * rejected.
+  */
+ /*
+ 
+@@ -173,6 +176,17 @@
+     }
+ 
+     /*Derive Hiresolution from master frequency function*/
++
++    /*
++     * theo-pod (t-169): the crossover band must lie inside the master table
++     * (ISO/IEC 14496-3 needs at least one high-resolution band). A larger
++     * xover_band made NSfb[HI] negative, and the low-resolution table was
++     * read before FreqBandTable[HI][0].
++     */
++    if (headerData->xover_band >= sbrDec->Num_Master)
++    {
++        return SBRDEC_ILLEGAL_SCFACTORS;
++    }
+ 
+     sbrDec->NSfb[HI] = sbrDec->Num_Master - headerData->xover_band;
+ 

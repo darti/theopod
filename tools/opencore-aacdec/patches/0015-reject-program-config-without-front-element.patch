@@ -1,0 +1,44 @@
+Reject a program config element without a front element.
+
+The decoder takes its channel configuration from the first front element
+of a program_config_element(). With none, ele_is_cpe[0] kept a stale
+scratch value, set_mc_info() derived the channel count from it (12 with
+the fuzzer's input) and the frame loop indexed past pChVars[2] (heap
+overflow). get_prog_config.cpp now rejects the element.
+
+Regression input:
+tools/aacdec-fuzz/regressions/t169-pce-without-front.bin.
+
+Licence: this patch modifies opencore-aacdec, Copyright (C) 1998-2009
+PacketVideo, licensed under the Apache License, Version 2.0. The patch is
+distributed under the same licence; each modified file keeps its notice and
+states that it was changed.
+
+--- a/get_prog_config.cpp
++++ b/get_prog_config.cpp
+@@ -17,6 +17,7 @@
+  *
+  * Modified by theo-pod (t-169): sampling-frequency indices above 11 are
+  * rejected.
++ * A program config without a front element is rejected.
+  */
+ /*
+ 
+@@ -702,6 +703,17 @@
+                                    pInputStream);
+ 
+     } /* end for */
++
++    /*
++     * theo-pod (t-169): the decoder takes its channel configuration from the
++     * first front element. Without one, ele_is_cpe[0] kept a stale scratch
++     * value, set_mc_info() set nch from it (12 with the fuzzer's input) and
++     * the frame loop indexed past pChVars[2].
++     */
++    if (pScratchPCE->front.num_ele == 0)
++    {
++        return 1;
++    }
+ 
+     if (pVars->current_program < 0)
+     {

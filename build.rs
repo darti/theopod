@@ -119,10 +119,12 @@ fn audio_bench() {
 /// Builds the PacketVideo AAC decoder (opencore-aacdec, Apache-2.0) with
 /// HE-AAC v1/v2 for `audio-bench` (t-167).
 ///
-/// `just audio-bench-inputs` fetches it from AOSP into `target/opencore-aacdec`;
-/// the Android wrapper `SoftAAC.cpp` is left out, `theo_opencore.cpp` replaces it.
+/// `just audio-bench-inputs` fetches it from AOSP into `target/opencore-aacdec`
+/// and applies `tools/opencore-aacdec/patches` (t-169, ADR-0028); the Android
+/// wrapper `SoftAAC.cpp` is left out, `theo_opencore.cpp` replaces it.
 fn opencore(root: &std::path::Path, shim: &std::path::Path, out: &std::path::Path) {
     let dir = root.join("target/opencore-aacdec");
+    println!("cargo:rerun-if-changed={}", dir.display());
     let mut sources: Vec<_> = std::fs::read_dir(&dir)
         .expect("run `just audio-bench-inputs` to fetch opencore-aacdec")
         .map(|entry| entry.unwrap().path())
@@ -138,6 +140,9 @@ fn opencore(root: &std::path::Path, shim: &std::path::Path, out: &std::path::Pat
         let object = out.join(format!("opencore-{stem}.o"));
         let status = std::process::Command::new("xtensa-esp32s3-elf-g++")
             .args(["-O2", "-mlongcalls", "-ffunction-sections"])
+            // The fixed-point code relies on wrapping signed arithmetic
+            // (ADR-0028).
+            .arg("-fwrapv")
             .args(["-fno-exceptions", "-fno-rtti", "-Wno-narrowing"])
             .args(["-DAAC_PLUS", "-DHQ_SBR", "-DPARAMETRICSTEREO"])
             .args(["-DOSCL_IMPORT_REF=", "-DOSCL_EXPORT_REF="])

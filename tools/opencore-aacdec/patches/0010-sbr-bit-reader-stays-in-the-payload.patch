@@ -1,0 +1,196 @@
+Keep the SBR bit reader inside the SBR payload.
+
+A truncated or inconsistent SBR element made the bit readers run past
+the payload (ASan heap/global overflows, UBSan shift exponents):
+- buf_getbits.cpp: buf_refill() loads zeros once past bufferLen instead
+  of reading the stream structure and the decoder state that follow.
+- sbr_crc_check.cpp: a one-byte payload gave a negative CRC length and
+  the bits left wrapped; the count is now signed and floored at 0.
+- check_crc.cpp: a CRC region that is a multiple of MAXCRCSTEP left no
+  rest bits, and 1 << -1 is undefined.
+- sbr_extract_extended_data.cpp, ps_read_data.cpp: once the PS header
+  had read past the extension, the bits left went negative and were
+  passed to buf_getbits() as a read size (shift by 45).
+
+Regression input:
+tools/aacdec-fuzz/regressions/t169-sbr-payload-overrun.bin.
+
+Licence: this patch modifies opencore-aacdec, Copyright (C) 1998-2009
+PacketVideo, licensed under the Apache License, Version 2.0. The patch is
+distributed under the same licence; each modified file keeps its notice and
+states that it was changed.
+
+--- a/buf_getbits.cpp
++++ b/buf_getbits.cpp
+@@ -14,6 +14,8 @@
+  * See the License for the specific language governing permissions
+  * and limitations under the License.
+  * -------------------------------------------------------------------
++ *
++ * Modified by theo-pod (t-169): reads stay inside the SBR payload.
+  */
+ /*
+ 
+@@ -127,15 +129,31 @@
+ ; FUNCTION CODE
+ ----------------------------------------------------------------------------*/
+ 
++/*
++ * theo-pod (t-169): loads the next 16 bits, reading only bytes inside
++ * bufferLen and loading zeros past it. The readers went on reading past
++ * the SBR payload, its stream structure and the decoder state.
++ * nrBitsRead + buffered_bits is the number of bits loaded so far.
++ */
++static void buf_refill(BIT_BUFFER * hBitBuf)
++{
++    UInt32 pos = (hBitBuf->nrBitsRead + hBitBuf->buffered_bits) >> 3;
++    UInt32 len = hBitBuf->bufferLen >> 3;
++    UInt32 hi = (pos < len) ? hBitBuf->char_ptr[0] : 0;
++    UInt32 lo = (pos + 1 < len) ? hBitBuf->char_ptr[1] : 0;
++
++    hBitBuf->char_ptr += 2;
++    hBitBuf->buffer_word    = (hBitBuf->buffer_word << 16) | (hi << 8) | lo;
++    hBitBuf->buffered_bits += 16;
++}
++
+ UInt32 buf_getbits(BIT_BUFFER * hBitBuf, Int32 n)
+ {
+ 
+     /* read bits from MSB side */
+     if (hBitBuf->buffered_bits <= 16)
+     {
+-        hBitBuf->buffer_word    = (hBitBuf->buffer_word << 16) | (*(hBitBuf->char_ptr++) << 8);
+-        hBitBuf->buffer_word   |= *(hBitBuf->char_ptr++);
+-        hBitBuf->buffered_bits += 16;
++        buf_refill(hBitBuf);
+     }
+ 
+     hBitBuf->buffered_bits -= n;
+@@ -152,9 +170,7 @@
+     /* read bits from MSB side */
+     if (hBitBuf->buffered_bits <= 16)
+     {
+-        hBitBuf->buffer_word    = (hBitBuf->buffer_word << 16) | (*(hBitBuf->char_ptr++) << 8);
+-        hBitBuf->buffer_word   |= *(hBitBuf->char_ptr++);
+-        hBitBuf->buffered_bits += 16;
++        buf_refill(hBitBuf);
+     }
+ 
+     hBitBuf->buffered_bits--;
+--- a/check_crc.cpp
++++ b/check_crc.cpp
+@@ -14,6 +14,8 @@
+  * See the License for the specific language governing permissions
+  * and limitations under the License.
+  * -------------------------------------------------------------------
++ *
++ * Modified by theo-pod (t-169): an empty CRC rest is skipped.
+  */
+ /*
+ 
+@@ -127,8 +129,18 @@
+ void check_crc(HANDLE_CRC hCrcBuf, UInt32 bValue, Int32 nBits)
+ {
+     Int32 i;
+-    UInt32 bMask = (1UL << (nBits - 1));
++    UInt32 bMask;
+ 
++    /*
++     * theo-pod (t-169): a CRC region that is a multiple of MAXCRCSTEP
++     * leaves no rest bits; 1 << -1 is undefined.
++     */
++    if (nBits <= 0)
++    {
++        return;
++    }
++    bMask = (1UL << (nBits - 1));
++
+     for (i = 0; i < nBits; i++, bMask >>= 1)
+     {
+         UInt16 flag  = (UInt16)((hCrcBuf->crcState & hCrcBuf->crcMask) ? 1 : 0);
+--- a/ps_read_data.cpp
++++ b/ps_read_data.cpp
+@@ -14,6 +14,9 @@
+  * See the License for the specific language governing permissions
+  * and limitations under the License.
+  * -------------------------------------------------------------------
++ *
++ * Modified by theo-pod (t-169): the skipped extension stops once its bits
++ * are read.
+  */
+ /*
+ 
+@@ -288,7 +291,8 @@
+         ps_dec->bPsDataAvail = 0;
+ 
+         nBitsLeft -= startbits - GetNrBitsAvailable(hBitBuf);
+-        while (nBitsLeft)
++        /* theo-pod (t-169): the header may already have read past the extension. */
++        while (nBitsLeft > 0)
+         {
+             int i = nBitsLeft;
+             if (i > 8)
+--- a/sbr_crc_check.cpp
++++ b/sbr_crc_check.cpp
+@@ -14,6 +14,9 @@
+  * See the License for the specific language governing permissions
+  * and limitations under the License.
+  * -------------------------------------------------------------------
++ *
++ * Modified by theo-pod (t-169): the CRC length is counted in signed
++ * arithmetic.
+  */
+ /*
+ 
+@@ -159,9 +162,20 @@
+     BitBufferCRC.bufferLen      = hBitBuf->bufferLen;
+ 
+ 
+-    NrCrcBits = min(NrBits, BitBufferCRC.bufferLen - BitBufferCRC.nrBitsRead);
++    /*
++     * theo-pod (t-169): a one-byte payload gives a negative NrBits, and the
++     * bits left wrapped once past bufferLen; both made CrcNrBitsRest
++     * negative, a negative read size. Count in signed arithmetic, from 0.
++     */
++    {
++        Int32 wanted = (Int32)NrBits;
++        Int32 left = (Int32)BitBufferCRC.bufferLen - (Int32)BitBufferCRC.nrBitsRead;
+ 
++        wanted = (wanted < left) ? wanted : left;
++        NrCrcBits = (wanted > 0) ? (UInt32)wanted : 0;
++    }
+ 
++
+     CrcStep = NrCrcBits / MAXCRCSTEP;
+     CrcNrBitsRest = (NrCrcBits - CrcStep * MAXCRCSTEP);
+ 
+--- a/sbr_extract_extended_data.cpp
++++ b/sbr_extract_extended_data.cpp
+@@ -14,6 +14,9 @@
+  * See the License for the specific language governing permissions
+  * and limitations under the License.
+  * -------------------------------------------------------------------
++ *
++ * Modified by theo-pod (t-169): no fill bits are read once the extension is
++ * exhausted.
+  */
+ /*
+ 
+@@ -211,8 +214,15 @@
+                     nBitsLeft -= (cnt << 3);
+             }
+         }
+-        /* read fill bits for byte alignment */
+-        buf_getbits(hBitBuf, nBitsLeft);
++        /*
++         * read fill bits for byte alignment; theo-pod (t-169): none when
++         * ps_read_data() read past the extension, whose size then went
++         * negative (the frame overrun is caught by sbr_read_data()).
++         */
++        if (nBitsLeft > 0)
++        {
++            buf_getbits(hBitBuf, nBitsLeft);
++        }
+     }
+ }
+ 

@@ -1,0 +1,225 @@
+Reject SBR frames without valid frequency tables.
+
+An ADTS header marks SBR active on every frame (get_adts_header.cpp),
+also after an SBR header that sbr_reset_dec() rejected or a fallback to
+upsampling. The next frames then ran the high-band generation and the
+envelope adjustment with half-updated or stale tables, and indexed past
+the QMF and envelope buffers:
+- init_sbr_dec.cpp marks the tables unset (noSubbands = 0), and
+  sbr_read_data.cpp keeps them unset after a failed reset; a frame
+  without a successful reset is rejected as an invalid bitstream.
+- sbr_applied.cpp falls back to upsampling when SBR is active without
+  tables (frames that carry no SBR element).
+- sbr_update_freq_scale.cpp: with too few bands, the band adjustment
+  walked off diff_tot; it now reports an empty master table.
+- sbr_reset_dec.cpp rejects a decreasing master table (negative bands,
+  ISO/IEC 14496-3, 4.6.18.3.2) and more than MAX_NOISE_COEFFS noise
+  bands.
+
+Regression input: tools/aacdec-fuzz/regressions/t169-sbr-stale-tables.bin.
+
+Licence: this patch modifies opencore-aacdec, Copyright (C) 1998-2009
+PacketVideo, licensed under the Apache License, Version 2.0. The patch is
+distributed under the same licence; each modified file keeps its notice and
+states that it was changed.
+
+--- a/init_sbr_dec.cpp
++++ b/init_sbr_dec.cpp
+@@ -14,6 +14,9 @@
+  * See the License for the specific language governing permissions
+  * and limitations under the License.
+  * -------------------------------------------------------------------
++ *
++ * Modified by theo-pod (t-169): the frequency tables are marked unset until
++ * a reset succeeds.
+  */
+ /*
+ 
+@@ -184,7 +187,13 @@
+ 
+     sbrDec->lowSubband =  32;
+ 
++    /*
++     * theo-pod (t-169): the frequency tables are not set up until
++     * sbr_reset_dec() succeeds; sbr_read_data() checks this marker.
++     */
++    sbrDec->noSubbands = 0;
+ 
++
+     return outFrameSize;
+ }
+ 
+--- a/sbr_applied.cpp
++++ b/sbr_applied.cpp
+@@ -14,6 +14,9 @@
+  * See the License for the specific language governing permissions
+  * and limitations under the License.
+  * -------------------------------------------------------------------
++ *
++ * Modified by theo-pod (t-169): without frequency tables, SBR falls back to
++ * upsampling.
+  */
+ /*
+ 
+@@ -344,7 +347,34 @@
+             }
+ 
+         }
++
++    }
++
++    /*
++     * theo-pod (t-169): an ADTS header marks SBR active on every frame
++     * (get_adts_header.cpp), also in a frame without SBR data after a
++     * rejected SBR header or a fallback to upsampling. Without frequency
++     * tables from a successful sbr_reset_dec() (see sbr_read_data.cpp),
++     * run the upsampler instead of indexing past the QMF buffers.
++     */
++    if (((SbrChannel[LEFT].syncState == SBR_ACTIVE) ||
++            (SbrChannel[RIGHT].syncState == SBR_ACTIVE)) && (sbrDec->noSubbands <= 0))
++    {
++        SbrChannel[LEFT].syncState  = UPSAMPLING;
++        SbrChannel[RIGHT].syncState = UPSAMPLING;
+ 
++        init_sbr_dec((sbrDec->outSampleRate >> 1),
++                     pVars->mc_info.upsamplingFactor,
++                     sbrDec,
++                     &(self->SbrChannel[LEFT].frameData));
++
++        if (numChannels == 2)
++        {
++            init_sbr_dec((sbrDec->outSampleRate >> 1),
++                         pVars->mc_info.upsamplingFactor,
++                         sbrDec,
++                         &(self->SbrChannel[RIGHT].frameData));
++        }
+     }
+ 
+ 
+--- a/sbr_read_data.cpp
++++ b/sbr_read_data.cpp
+@@ -14,6 +14,9 @@
+  * See the License for the specific language governing permissions
+  * and limitations under the License.
+  * -------------------------------------------------------------------
++ *
++ * Modified by theo-pod (t-169): frames are rejected while the frequency
++ * tables are unset.
+  */
+ /*
+ 
+@@ -218,6 +221,20 @@
+         }     /* if (bs_header_flag) */
+ 
+ 
++        /*
++         * theo-pod (t-169): an ADTS header marks SBR active on every frame
++         * (get_adts_header.cpp), also after a rejected SBR header or a
++         * fallback to upsampling. Without a header in this frame, the
++         * frequency tables must then come from a successful reset, else
++         * the high-band generation and the envelope adjustment index past
++         * their buffers.
++         */
++        if ((SbrChannel[0].syncState == SBR_ACTIVE) &&
++                (headerStatus != HEADER_RESET) && (sbrDec->noSubbands <= 0))
++        {
++            sbr_err = SBRDEC_INVALID_BITSTREAM;
++        }
++        else
+         switch (stream->sbrElement[0].ElementID)
+         {
+             case SBR_ID_SCE :
+@@ -231,6 +248,8 @@
+ 
+                     if (sbr_err != SBRDEC_OK)
+                     {
++                        /* theo-pod (t-169): the tables are half updated. */
++                        sbrDec->noSubbands = 0;
+                         break;
+                     }
+                     /*
+@@ -277,6 +296,8 @@
+ 
+                         if (sbr_err != SBRDEC_OK)
+                         {
++                            /* theo-pod (t-169): the tables are half updated. */
++                            sbrDec->noSubbands = 0;
+                             break;
+                         }
+ 
+--- a/sbr_reset_dec.cpp
++++ b/sbr_reset_dec.cpp
+@@ -17,6 +17,7 @@
+  *
+  * Modified by theo-pod (t-169): a crossover band outside the master table is
+  * rejected.
++ * A decreasing master table or too many noise bands are rejected.
+  */
+ /*
+ 
+@@ -186,6 +187,20 @@
+     if (headerData->xover_band >= sbrDec->Num_Master)
+     {
+         return SBRDEC_ILLEGAL_SCFACTORS;
++    }
++
++    /*
++     * theo-pod (t-169): the master table must not decrease (ISO/IEC
++     * 14496-3, 4.6.18.3.2). Some start/stop/scale combinations made
++     * sbr_update_freq_scale() emit negative bands, which then indexed
++     * before the envelope buffers.
++     */
++    for (i = 0; i < sbrDec->Num_Master; i++)
++    {
++        if (sbrDec->V_k_master[i + 1] < sbrDec->V_k_master[i])
++        {
++            return SBRDEC_ILLEGAL_SCFACTORS;
++        }
+     }
+ 
+     sbrDec->NSfb[HI] = sbrDec->Num_Master - headerData->xover_band;
+@@ -256,6 +271,15 @@
+         }
+     }
+ 
++    /*
++     * theo-pod (t-169): ISO/IEC 14496-3 limits the noise floor to
++     * MAX_NOISE_COEFFS bands; more indexed past sbrNoiseFloorLevel_man[].
++     */
++    if (sbrDec->NoNoiseBands > MAX_NOISE_COEFFS)
++    {
++        return SBRDEC_ILLEGAL_SCFACTORS;
++    }
++
+     headerData->noNoiseBands = sbrDec->NoNoiseBands;
+ 
+     /* Get noise bands */
+--- a/sbr_update_freq_scale.cpp
++++ b/sbr_update_freq_scale.cpp
+@@ -14,6 +14,9 @@
+  * See the License for the specific language governing permissions
+  * and limitations under the License.
+  * -------------------------------------------------------------------
++ *
++ * Modified by theo-pod (t-169): an inconsistent master table is reported as
++ * empty.
+  */
+ /*
+ 
+@@ -284,6 +287,16 @@
+         /* Adjust diff vector to get spec. SBR range */
+         while (k2_diff != 0)
+         {
++            /*
++             * theo-pod (t-169): with too few bands the adjustment walked off
++             * diff_tot; report an empty master table, which the caller
++             * rejects.
++             */
++            if ((i < 0) || (i >= numBands))
++            {
++                *h_num_bands = 0;
++                return;
++            }
+             diff_tot[i] -=  incr;
+             i += incr;
+             k2_diff += incr;

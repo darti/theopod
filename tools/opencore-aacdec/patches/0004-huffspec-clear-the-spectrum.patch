@@ -1,0 +1,45 @@
+theo-pod (t-169): clear the quantized spectrum before decoding a frame
+
+huffspec_fxp() decodes the sections into quantSpec[], then rescales every
+band of the window. Bands that no section covers (a corrupt section table)
+keep the previous frame's values, or whatever the memory shared with
+quantSpec[] holds. Their magnitude is not part of the frame's max, so
+esc_iquant_scaling() takes the table path for them and indexes
+inverseQuantTable[] past its end. The spectrum (1024 Int16) is now zeroed
+first; missing coefficients are zero, as ISO/IEC 14496-3 implies. Found by
+the host fuzzer (ASan global-buffer-overflow in esc_iquant_scaling);
+regression input tools/aacdec-fuzz/regressions/t169-stale-spectrum.bin.
+
+Licence: this patch modifies opencore-aacdec, Copyright (C) 1998-2009
+PacketVideo, licensed under the Apache License, Version 2.0. The patch is
+distributed under the same licence; each modified file keeps its notice and
+states that it was changed.
+
+--- a/huffspec_fxp.cpp
++++ b/huffspec_fxp.cpp
+@@ -14,6 +14,9 @@
+  * See the License for the specific language governing permissions
+  * and limitations under the License.
+  * -------------------------------------------------------------------
++ *
++ * Modified by theo-pod (t-169): the quantized spectrum is cleared before
++ * each frame.
+  */
+ /*
+ 
+@@ -364,6 +367,15 @@
+     }
+ 
+     pSfb      = pSfbStart;
++
++    /*
++     * theo-pod (t-169): the sections may not cover every band of the
++     * window (a corrupt section table), and the rescaling loop below reads
++     * all of them. Without this, leftovers from a previous frame or from the
++     * memory this buffer shares reach esc_iquant_scaling() above the
++     * frame's max and index inverseQuantTable[] past its end.
++     */
++    pv_memset(quantSpec, 0, LN2 * sizeof(quantSpec[0]));
+ 
+     /* decoding spectral values section by section */
+     for (i = nsect; i > 0; i--)

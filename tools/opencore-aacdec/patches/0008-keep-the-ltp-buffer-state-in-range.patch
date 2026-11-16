@@ -1,0 +1,80 @@
+Keep ltp_buffer_state within the layout of the current frame.
+
+The decoder toggles ltp_buffer_state by XOR with frameLength (plain AAC)
+or frameLength + 288 (SBR), so a stream that switches between the two
+leaves values such as 288 or 1024 during an SBR frame. sbr_dec() then
+copies 288 samples to ltp_buffer[state - 1312], before the buffer, which
+overwrote mc_info.bDownSampledSbr in the decoder state. The toggle is now
+explicit, an SBR frame restarts from 0 when the state does not match its
+layout, and long-term prediction (which assumes an offset of at most
+frameLength) is skipped for the SBR layout.
+
+Licence: this patch modifies opencore-aacdec, Copyright (C) 1998-2009
+PacketVideo, licensed under the Apache License, Version 2.0. The patch is
+distributed under the same licence; each modified file keeps its notice and
+states that it was changed.
+
+--- a/pvmp4audiodecoderframe.cpp
++++ b/pvmp4audiodecoderframe.cpp
+@@ -14,6 +14,9 @@
+  * See the License for the specific language governing permissions
+  * and limitations under the License.
+  * -------------------------------------------------------------------
++ *
++ * Modified by theo-pod (t-169): keep ltp_buffer_state within the layout of
++ * the current frame
+  */
+ /*
+ 
+@@ -915,7 +918,14 @@
+                     &(pVars->pns_cur_noise_state));
+             }
+ 
+-            if (pChVars[ch]->pShareWfxpCoef->lt_status.ltp_data_present != FALSE)
++            /*
++             * theo-pod (t-169): long_term_prediction() reads
++             * buffer[index - ltp_buffer_state] for index >= frameLength, so
++             * the SBR layout value (frameLength + 288) reads before the
++             * buffer. Skip the prediction then.
++             */
++            if ((pChVars[ch]->pShareWfxpCoef->lt_status.ltp_data_present != FALSE) &&
++                    (pVars->ltp_buffer_state <= frameLength))
+             {
+                 /*
+                  * LTP - Long Term Prediction
+@@ -1168,6 +1178,18 @@
+                 sbrDecoderData->SbrChannel[0].frameData.sbr_header.sampleRateMode;
+ 
+ 
++            /*
++             *  theo-pod (t-169): a stream that switches between plain AAC
++             *  and SBR frames leaves ltp_buffer_state at a value of the
++             *  other layout; sbr_dec() then copies 288 samples before
++             *  ltp_buffer. Restart the history at 0 in that case.
++             */
++            if ((pVars->ltp_buffer_state != 0) &&
++                    (pVars->ltp_buffer_state != (frameLength + 288)))
++            {
++                pVars->ltp_buffer_state = 0;
++            }
++
+             /* reuse right aac spectrum channel  */
+             {
+                 Int16 *pt_left  =  &(pChVars[LEFT ]->ltp_buffer[pVars->ltp_buffer_state]);
+@@ -1342,11 +1364,14 @@
+ #ifdef AAC_PLUS
+         if (sbrBitStream->NrElements == 0 && pMC_Info->upsamplingFactor == 1)
+         {
+-            pVars->ltp_buffer_state ^= frameLength;
++            /* theo-pod (t-169): toggle explicitly, XOR mixes layouts */
++            pVars->ltp_buffer_state =
++                (pVars->ltp_buffer_state == 0) ? frameLength : 0;
+         }
+         else
+         {
+-            pVars->ltp_buffer_state ^= (frameLength + 288);
++            pVars->ltp_buffer_state =
++                (pVars->ltp_buffer_state == 0) ? (frameLength + 288) : 0;
+         }
+ #else
+         pVars->ltp_buffer_state ^= frameLength;

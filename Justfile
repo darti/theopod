@@ -20,7 +20,7 @@ check:
     LIBCLANG_PATH="{{libclang_path}}" PATH="{{gcc_path}}:${PATH}" RUSTUP_TOOLCHAIN=esp cargo check -p theo-podcasts
 
 # Clippy on the firmware (ESP toolchain) and the host crates.
-lint:
+lint: opencore-aacdec
     LIBCLANG_PATH="{{libclang_path}}" PATH="{{gcc_path}}:${PATH}" RUSTUP_TOOLCHAIN=esp cargo clippy -- -D warnings
     LIBCLANG_PATH="{{libclang_path}}" PATH="{{gcc_path}}:${PATH}" RUSTUP_TOOLCHAIN=esp cargo clippy -p theo-podcasts -- -D warnings
     LIBCLANG_PATH="{{libclang_path}}" PATH="{{gcc_path}}:${PATH}" RUSTUP_TOOLCHAIN=esp cargo clippy --features frame-dump -- -D warnings
@@ -30,7 +30,7 @@ lint:
     LIBCLANG_PATH="{{libclang_path}}" PATH="{{gcc_path}}:${PATH}" RUSTUP_TOOLCHAIN=esp cargo clippy --features sleep-check -- -D warnings
     LIBCLANG_PATH="{{libclang_path}}" PATH="{{gcc_path}}:${PATH}" RUSTUP_TOOLCHAIN=esp cargo clippy --features sd-check -- -D warnings
     THEO_SD_PROVISION=format LIBCLANG_PATH="{{libclang_path}}" PATH="{{gcc_path}}:${PATH}" RUSTUP_TOOLCHAIN=esp cargo clippy --features sd-provision -- -D warnings
-    RUSTUP_TOOLCHAIN=stable cargo clippy -p theo-drivers -p theo-frame-dump -p theo-storage -p theo-podcasts -p frame-png --target {{host_target}} --all-targets -- -D warnings
+    RUSTUP_TOOLCHAIN=stable cargo clippy -p theo-drivers -p theo-frame-dump -p theo-storage -p theo-podcasts -p aacdec-fuzz -p frame-png --target {{host_target}} --all-targets -- -D warnings
 
 build:
     ESP_LOG=info LIBCLANG_PATH="{{libclang_path}}" PATH="{{gcc_path}}:${PATH}" RUSTUP_TOOLCHAIN=esp cargo build --release
@@ -94,21 +94,51 @@ imu-calibrate port="":
 
 # Fetch Helix AAC and MP3 (pinned, RPSL/RCSL, kept under target/) and 30 s AAC/MP3
 # clips (copyrighted, kept under target/), as `audio-bench` needs (t-164);
-# opencore-aacdec (Apache-2.0, AOSP android-4.0.4_r2.1) for t-167.
-audio-bench-inputs:
+# opencore-aacdec (Apache-2.0, AOSP android-4.0.4_r2.1, patched: `opencore-aacdec`) for t-167.
+audio-bench-inputs: opencore-aacdec
     #!/usr/bin/env bash
     set -euo pipefail
     if [ ! -d target/helix/libhelix-aac ] || [ ! -d target/helix/libhelix-mp3 ] || [ ! -d target/helix/utils ]; then
         mkdir -p target/helix
         curl -sSfL https://codeload.github.com/pschatzmann/codec-helix/tar.gz/f6e55a307c7577c5e3dfe1bf424a61075235fa08 | tar xz -C target/helix --strip-components=2 '*/src/libhelix-aac' '*/src/libhelix-mp3' '*/src/utils'
     fi
-    if [ ! -f target/opencore-aacdec/pvmp4audiodecoder_api.h ]; then
-        mkdir -p target/opencore-aacdec
-        curl -sSfL https://android.googlesource.com/platform/frameworks/base/+archive/refs/tags/android-4.0.4_r2.1/media/libstagefright/codecs/aacdec.tar.gz | tar xz -C target/opencore-aacdec
-    fi
     mkdir -p target/audio-bench
     [ -f target/audio-bench/aac.bin ] || python3 -I tools/audio-bench/clip.py aac "$(cat docs/experiments/t106/audio.url)" target/audio-bench
     [ -f target/audio-bench/mp3.bin ] || python3 -I tools/audio-bench/clip.py mp3 https://media.radiofrance-podcast.net/podcast09/11549-21.03.2020-ITEMA_22312642-2020F16177S0081-NET_MFI_13439893-27FF-4D58-8BD5-395C69D6CCE8-22-ee341284cbb67507d5f06879819274e5.mp3 target/audio-bench
+
+# Sources are never committed; refetched when the patch set changes (t-169,
+# ADR-0027).
+# Fetch opencore-aacdec (Apache-2.0, AOSP android-4.0.4_r2.1) and apply tools/opencore-aacdec/patches.
+opencore-aacdec:
+    tools/opencore-aacdec/fetch.sh target/opencore-aacdec
+
+# Runs `seconds` over `jobs` processes (t-169, ADR-0027); seeds come from
+# the bench AAC clip. Crashes land in target/aacdec-fuzz/artifacts: group
+# them with `just aacdec-fuzz-triage`. Needs a clang++ with libFuzzer:
+# `THEO_FUZZ_CXX`, else Homebrew's llvm (Apple's clang has none).
+# Fuzz opencore-aacdec on the host through the bench shim with libFuzzer, ASan and UBSan.
+aacdec-fuzz seconds="600" jobs="8": audio-bench-inputs
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cxx=${THEO_FUZZ_CXX:-$(brew --prefix llvm 2>/dev/null)/bin/clang++}
+    # atos, the macOS default, takes minutes per sanitizer report.
+    export ASAN_SYMBOLIZER_PATH=${ASAN_SYMBOLIZER_PATH:-$(dirname "$cxx")/llvm-symbolizer}
+    out=target/aacdec-fuzz
+    tools/aacdec-fuzz/build-fuzzer.sh "$cxx" "$out"
+    python3 -I tools/aacdec-fuzz/seeds.py target/audio-bench "$out/seeds"
+    mkdir -p "$out/corpus" "$out/artifacts"
+    "$out/fuzz_aacdec" -fork={{jobs}} -ignore_crashes=1 -ignore_ooms=1 -ignore_timeouts=1 -timeout=10 -rss_limit_mb=2048 -max_len=8192 -max_total_time={{seconds}} -artifact_prefix="$out/artifacts/" "$out/corpus" "$out/seeds" 2>&1 | tee "$out/campaign.log"
+    echo "aacdec-fuzz: $(ls "$out/artifacts" | wc -l | tr -d ' ') artifact(s) in $out/artifacts"
+
+# Replay every artifact of `just aacdec-fuzz` and group them by crash site,
+# with the smallest input of each (t-169).
+# Group the opencore-aacdec fuzz artifacts by sanitizer report.
+aacdec-fuzz-triage:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cxx=${THEO_FUZZ_CXX:-$(brew --prefix llvm 2>/dev/null)/bin/clang++}
+    export ASAN_SYMBOLIZER_PATH=${ASAN_SYMBOLIZER_PATH:-$(dirname "$cxx")/llvm-symbolizer}
+    python3 -I tools/aacdec-fuzz/triage.py target/aacdec-fuzz/fuzz_aacdec target/aacdec-fuzz/artifacts
 
 # Flash the decoder benchmark (Helix AAC/MP3, nanomp3-core on core1) and record
 # the log from boot until "audio-bench: done" (t-164, ADR-0026).
@@ -155,8 +185,8 @@ sd-format device sectors="":
     RUSTUP_TOOLCHAIN=stable cargo run -p theo-storage --example format_littlefs --target {{host_target}} -- --format {{quote(device)}} {{ if sectors != "" { "--sectors " + quote(sectors) } else { "" } }}
 
 # Run the HAL-independent unit tests on the host.
-test:
-    RUSTUP_TOOLCHAIN=stable cargo test -p theo-drivers -p theo-frame-dump -p theo-storage -p theo-podcasts -p frame-png --target {{host_target}}
+test: opencore-aacdec
+    RUSTUP_TOOLCHAIN=stable cargo test -p theo-drivers -p theo-frame-dump -p theo-storage -p theo-podcasts -p aacdec-fuzz -p frame-png --target {{host_target}}
     RUSTUP_TOOLCHAIN=stable cargo test -p theo-podcasts --example prepare_image --target {{host_target}}
 
 # Sector-count bounds of the redb catalogue (open, scan, commit and each

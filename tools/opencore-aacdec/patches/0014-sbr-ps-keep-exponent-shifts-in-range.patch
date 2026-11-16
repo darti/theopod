@@ -1,0 +1,729 @@
+Keep SBR and PS exponent shifts within the operand width.
+
+The SBR envelope and PS energies are mantissa/exponent pairs; aligning
+them shifts by exponent differences that a malformed stream drives below
+0 or to 32 and more, undefined in C++ (UBSan reports):
+- calc_sbr_envelope.cpp: sbr_align()/sbr_shl() clamp the shifts to
+  0..31 (the arithmetic result is already 0 or -1 there), as is the
+  quotient of nL/(1 + nL) computed from wrapped noise levels; the energy
+  estimation of a band with ui == li no longer divides by 0, and the
+  high-band energy is renormalised when bit 30 is set (aux2 == -1).
+- sbr_aliasing_reduction.cpp: alias_align(), the same clamp.
+- sbr_envelope_unmapping.cpp: unmap_shr() clamps the envelope and noise
+  exponents of the coupled channel to 31.
+- ps_pwr_transient_detection.cpp: wrapped energies gave a ratio of 1 or
+  more, a negative shift; the gain saturates as in the peakDiff <= nrg
+  branch.
+
+Regression input:
+tools/aacdec-fuzz/regressions/t169-sbr-envelope-shift.bin.
+
+Licence: this patch modifies opencore-aacdec, Copyright (C) 1998-2009
+PacketVideo, licensed under the Apache License, Version 2.0. The patch is
+distributed under the same licence; each modified file keeps its notice and
+states that it was changed.
+
+--- a/calc_sbr_envelope.cpp
++++ b/calc_sbr_envelope.cpp
+@@ -14,6 +14,9 @@
+  * See the License for the specific language governing permissions
+  * and limitations under the License.
+  * -------------------------------------------------------------------
++ *
++ * Modified by theo-pod (t-169): stream exponents are clamped to the range a
++ * shift can express, and an empty band is not divided by.
+  */
+ /*
+  Filename: calc_sbr_envelope.c
+@@ -115,7 +118,24 @@
+ #define Q28fmt(x)   (Int32)(x*((Int32)1<<28) + (x>=0?0.5F:-0.5F))
+ #define Q15fmt(x)   (Int32)(x*((Int32)1<<15) + (x>=0?0.5F:-0.5F))
+ 
++/*
++ * theo-pod (t-169): aligns two mantissas on the larger exponent. Exponents
++ * come from the stream's envelope data, so their difference can reach 32
++ * or more, an undefined shift; the arithmetic result is then 0 or -1,
++ * which a shift by 31 gives.
++ */
++static inline Int32 sbr_align(Int32 man, Int32 shift)
++{
++    return man >> ((shift < 0) ? 0 : ((shift > 31) ? 31 : shift));
++}
+ 
++/* theo-pod (t-169): the same clamp for a left shift by a stream exponent. */
++static inline Int32 sbr_shl(Int32 man, Int32 shift)
++{
++    return man << ((shift < 0) ? 0 : ((shift > 31) ? 31 : shift));
++}
++
++
+ /*----------------------------------------------------------------------------
+ ; LOCAL FUNCTION DEFINITIONS
+ ; Function Prototype declaration
+@@ -449,9 +469,12 @@
+                 nrg = 0;
+                 for (k = c - (ui - li); k < c; k++)
+                 {    /* average the energy in all the QMF bands, */
+-                    nrg += nrg_est_man[k] >> (tmp_q1 - nrg_est_exp[k]); /* for the whole scalefactor band.  */
++                    nrg += sbr_align(nrg_est_man[k], tmp_q1 - nrg_est_exp[k]); /* for the whole scalefactor band.  */
+                 }
+-                nrg /= (ui - li);
++                if (ui > li)    /* theo-pod (t-169): empty band */
++                {
++                    nrg /= (ui - li);
++                }
+                 nrg_exp = tmp_q1;
+ 
+             }
+@@ -500,11 +523,11 @@
+ 
+                 if (tmp_q1 >= 0)
+                 {
+-                    pv_div(nL_man[aux1], nL_man[aux1] + (0x3FFFFFFF >> tmp_q1), &quotient);
++                    pv_div(nL_man[aux1], nL_man[aux1] + (sbr_align(0x3FFFFFFF, tmp_q1)), &quotient);
+                 }
+                 else
+                 {
+-                    tmp_q1 = nL_man[aux1] >> (-tmp_q1);
++                    tmp_q1 = sbr_align(nL_man[aux1], -tmp_q1);
+                     pv_div(tmp_q1, tmp_q1 + 0x3FFFFFFF, &quotient);
+                 }
+ 
+@@ -512,7 +535,8 @@
+                  *  tmp_q1 = nL/(1 + nL)*nrg_ref[c];
+                  */
+ 
+-                tmp_q1 = fxp_mul32_Q30(quotient.quotient >> quotient.shift_factor,  nrg_ref_man[c]);
++                /* theo-pod (t-169): wrapped levels gave a negative shift. */
++                tmp_q1 = fxp_mul32_Q30(sbr_align(quotient.quotient, quotient.shift_factor),  nrg_ref_man[c]);
+ 
+                 if (flag)
+                 {
+@@ -556,11 +580,11 @@
+ 
+                         if (tmp_q2 >= 0)
+                         {
+-                            pv_div(nrg_ref_man[c], nL_man[aux1] + (0x3FFFFFFF >> tmp_q2), &quotient);
++                            pv_div(nrg_ref_man[c], nL_man[aux1] + (sbr_align(0x3FFFFFFF, tmp_q2)), &quotient);
+                         }
+                         else
+                         {
+-                            tmp_q2 = nL_man[aux1] >> (-tmp_q2);
++                            tmp_q2 = sbr_align(nL_man[aux1], -tmp_q2);
+                             pv_div(nrg_ref_man[c], tmp_q2 + 0x3FFFFFFF, &quotient);
+                             tmp_q2 = 0;     /* exponent has been applied to the sum ((man>>exp) + 1)  */
+                         }
+@@ -623,7 +647,7 @@
+                         if (tmp_q2 >= 0)
+                         {
+ 
+-                            tmp_q2 = fxp_mul32_Q30(nrg_est_man[c] + 1, nL_man[aux1] + (0x3FFFFFFF >> tmp_q2));
++                            tmp_q2 = fxp_mul32_Q30(nrg_est_man[c] + 1, nL_man[aux1] + (sbr_align(0x3FFFFFFF, tmp_q2)));
+                             pv_div(nrg_ref_man[c], tmp_q2, &quotient);
+                             /*
+                              *  nrg_est_man[c] is an integer number, while nrg_ref_man[c] and
+@@ -641,7 +665,7 @@
+                         {
+                             if (tmp_q2 > - 10)
+                             {
+-                                tmp_q2 = nL_man[aux1] >> (-tmp_q2);
++                                tmp_q2 = sbr_align(nL_man[aux1], -tmp_q2);
+ 
+                                 tmp_q2 = fxp_mul32_Q30(nrg_est_man[c] + 1, tmp_q2 + 0x3FFFFFFF);
+                             }
+@@ -731,8 +755,8 @@
+ 
+             for (k = limSbc[limiterBand][c]; k < limSbc[limiterBand][c + 1]; k++)
+             {   /*Calculate the average gain for the current limiter band.*/
+-                p_ref_man += (nrg_ref_man[k] >> (p_ref_exp - nrg_ref_exp[k]));
+-                p_est_man += (nrg_est_man[k] >> (p_est_exp - nrg_est_exp[k]));
++                p_ref_man += (sbr_align(nrg_ref_man[k], p_ref_exp - nrg_ref_exp[k]));
++                p_est_man += (sbr_align(nrg_est_man[k], p_est_exp - nrg_est_exp[k]));
+ 
+             }
+ 
+@@ -769,8 +793,8 @@
+ 
+                 tmp_q1 = g_max_exp >= 16 ? g_max_exp : 16;
+ 
+-                tmp_q2 = g_max_man >> (tmp_q1 - g_max_exp);
+-                tmp_q1 = Q28fmt(1.52587890625F) >> (tmp_q1 - 16);
++                tmp_q2 = sbr_align(g_max_man, tmp_q1 - g_max_exp);
++                tmp_q1 = sbr_align(Q28fmt(1.52587890625F), tmp_q1 - 16);
+ 
+                 if (tmp_q2 > tmp_q1)
+                 {
+@@ -794,8 +818,8 @@
+ 
+                 tmp_q1 = g_max_exp >= nrg_gain_exp[k] ? g_max_exp : nrg_gain_exp[k];
+ 
+-                tmp_q2 = g_max_man >> (tmp_q1 - g_max_exp);
+-                tmp_q1 = nrg_gain_man[k] >> (tmp_q1 - nrg_gain_exp[k]);
++                tmp_q2 = sbr_align(g_max_man, tmp_q1 - g_max_exp);
++                tmp_q1 = sbr_align(nrg_gain_man[k], tmp_q1 - nrg_gain_exp[k]);
+                 /*
+                  *  if(g_max <= nrg_gain[k])
+                  */
+@@ -854,7 +878,7 @@
+                 {
+                     tmp_q1 = fxp_mul32_Q28(nrg_gain_man[k], nrg_gain_man[k]);
+                     tmp_q1 = fxp_mul32_Q28(tmp_q1, nrg_est_man[k]);
+-                    p_adj_man += (tmp_q1 >> (p_adj_exp - (nrg_est_exp[k] + (nrg_gain_exp[k] << 1) + 28)));
++                    p_adj_man += sbr_align(tmp_q1, p_adj_exp - (nrg_est_exp[k] + (nrg_gain_exp[k] << 1) + 28));
+                 }
+ 
+                 if (nrg_tone_man[k])
+@@ -865,7 +889,7 @@
+                     if (p_adj_exp - (nrg_tone_exp[k] << 1) < 31)
+                     {
+                         tmp_q1 = fxp_mul32_Q28(nrg_tone_man[k], nrg_tone_man[k]);
+-                        p_adj_man += (tmp_q1 >> (p_adj_exp - (nrg_tone_exp[k] << 1)));
++                        p_adj_man += sbr_align(tmp_q1, p_adj_exp - (nrg_tone_exp[k] << 1));
+                     }
+                 }
+                 else if (!noNoiseFlag)
+@@ -877,7 +901,7 @@
+                     if (p_adj_exp - (noise_level_exp[k] << 1) < 31)
+                     {
+                         tmp_q1 = fxp_mul32_Q28(noise_level_man[k], noise_level_man[k]);
+-                        p_adj_man += (tmp_q1 >> (p_adj_exp - (noise_level_exp[k] << 1)));
++                        p_adj_man += sbr_align(tmp_q1, p_adj_exp - (noise_level_exp[k] << 1));
+                     }
+ 
+                 }
+@@ -893,17 +917,17 @@
+ 
+                 if (root_sq.shift_factor > -28)
+                 {
+-                    boost_gain_q = root_sq.root << (root_sq.shift_factor + 28);
++                    boost_gain_q = sbr_shl(root_sq.root, root_sq.shift_factor + 28);
+                 }
+                 else
+                 {
+-                    boost_gain_q = root_sq.root >> (-28 - root_sq.shift_factor);
++                    boost_gain_q = sbr_align(root_sq.root, -28 - root_sq.shift_factor);
+                 }
+ 
+                 tmp_q1 = root_sq.shift_factor >= -28 ? root_sq.shift_factor : -28;
+ 
+-                tmp_q2 = root_sq.root >> (tmp_q1 - root_sq.shift_factor);
+-                tmp_q1 = Q28fmt(1.584893192f) >> (tmp_q1 + 28);
++                tmp_q2 = sbr_align(root_sq.root, tmp_q1 - root_sq.shift_factor);
++                tmp_q1 = sbr_align(Q28fmt(1.584893192f), tmp_q1 + 28);
+ 
+ 
+                 if (tmp_q2 > tmp_q1)
+@@ -1092,7 +1116,7 @@
+         {
+             tmp_q2 = (-nrg_tone_exp[k]);
+             tmp_q1 = nrg_tone_man[k];
+-            tmp_q2 = tmp_q1 >> tmp_q2;
++            tmp_q2 = sbr_align(tmp_q1, tmp_q2);
+             tmp_q1 = fxp_mul32_by_16(tmp_q2, Q15fmt(0.0163f));
+             nrg_tone_man[k] = tmp_q2;
+             nrg_tone_exp[k] = tmp_q1;
+@@ -1122,12 +1146,12 @@
+                     {
+                         if (tmp_q2 > -32)
+                         {
+-                            *ptrReal = tmp_q1 >> (-tmp_q2);
++                            *ptrReal = sbr_align(tmp_q1, -tmp_q2);
+                         }
+                     }
+                     else
+                     {
+-                        *ptrReal = tmp_q1 << tmp_q2;
++                        *ptrReal = sbr_shl(tmp_q1, tmp_q2);
+                     }
+ 
+                     *phase_index = (*phase_index + 1) & 511;
+@@ -1145,12 +1169,12 @@
+                         {
+                             if (sb_noise_exp > -32)
+                             {
+-                                *ptrReal += tmp_q1 >> (-sb_noise_exp);
++                                *ptrReal += sbr_align(tmp_q1, -sb_noise_exp);
+                             }
+                         }
+                         else
+                         {
+-                            *ptrReal += tmp_q1 << sb_noise_exp;
++                            *ptrReal += sbr_shl(tmp_q1, sb_noise_exp);
+                         }
+                     }
+ 
+@@ -1190,12 +1214,12 @@
+                 {
+                     if (tmp_q2 > -32)
+                     {
+-                        *ptrReal = tmp_q1 >> (-tmp_q2);
++                        *ptrReal = sbr_align(tmp_q1, -tmp_q2);
+                     }
+                 }
+                 else
+                 {
+-                    *ptrReal = tmp_q1 << tmp_q2;
++                    *ptrReal = sbr_shl(tmp_q1, tmp_q2);
+                 }
+ 
+                 *phase_index = (*phase_index + 1) & 511;
+@@ -1226,12 +1250,12 @@
+                     {
+                         if (sb_noise_exp > -32)
+                         {
+-                            *ptrReal += tmp_q1 >> (-sb_noise_exp);
++                            *ptrReal += sbr_align(tmp_q1, -sb_noise_exp);
+                         }
+                     }
+                     else
+                     {
+-                        *ptrReal += tmp_q1 << sb_noise_exp;
++                        *ptrReal += sbr_shl(tmp_q1, sb_noise_exp);
+                     }
+                 }
+                 else
+@@ -1255,12 +1279,12 @@
+                     {
+                         if (tmp_q2 > -32)
+                         {
+-                            *ptrReal = tmp_q1 >> (-tmp_q2);
++                            *ptrReal = sbr_align(tmp_q1, -tmp_q2);
+                         }
+                     }
+                     else
+                     {
+-                        *ptrReal = tmp_q1 << tmp_q2;
++                        *ptrReal = sbr_shl(tmp_q1, tmp_q2);
+                     }
+ 
+                     *phase_index = (*phase_index + 1) & 511;
+@@ -1297,12 +1321,12 @@
+                         {
+                             if (sb_noise_exp > -32)
+                             {
+-                                *ptrReal += tmp_q1 >> (-sb_noise_exp);
++                                *ptrReal += sbr_align(tmp_q1, -sb_noise_exp);
+                             }
+                         }
+                         else
+                         {
+-                            *ptrReal += tmp_q1 << sb_noise_exp;
++                            *ptrReal += sbr_shl(tmp_q1, sb_noise_exp);
+                         }
+                     }
+                     else
+@@ -1323,12 +1347,12 @@
+                 {
+                     if (tmp_q2 > -31)
+                     {
+-                        *ptrReal = tmp_q1 >> (-tmp_q2);
++                        *ptrReal = sbr_align(tmp_q1, -tmp_q2);
+                     }
+                 }
+                 else
+                 {
+-                    *ptrReal = tmp_q1 << tmp_q2;
++                    *ptrReal = sbr_shl(tmp_q1, tmp_q2);
+                 }
+ 
+                 *phase_index = (*phase_index + 1) & 511;
+@@ -1372,12 +1396,12 @@
+                     {
+                         if (sb_noise_exp > -31)
+                         {
+-                            *ptrReal += tmp_q1 >> (-sb_noise_exp);
++                            *ptrReal += sbr_align(tmp_q1, -sb_noise_exp);
+                         }
+                     }
+                     else
+                     {
+-                        *ptrReal += tmp_q1 << sb_noise_exp;
++                        *ptrReal += sbr_shl(tmp_q1, sb_noise_exp);
+                     }
+                 }
+ 
+@@ -1418,12 +1442,12 @@
+                 {
+                     if (tmp_q2 > -31)
+                     {
+-                        *ptrReal = tmp_q1 >> (-tmp_q2);
++                        *ptrReal = sbr_align(tmp_q1, -tmp_q2);
+                     }
+                 }
+                 else
+                 {
+-                    *ptrReal = tmp_q1 << tmp_q2;
++                    *ptrReal = sbr_shl(tmp_q1, tmp_q2);
+                 }
+ 
+                 *phase_index = (*phase_index + 1) & 511;
+@@ -1440,12 +1464,12 @@
+                     {
+                         if (sb_noise_exp > -31)
+                         {
+-                            *ptrReal += tmp_q1 >> (-sb_noise_exp);
++                            *ptrReal += sbr_align(tmp_q1, -sb_noise_exp);
+                         }
+                     }
+                     else
+                     {
+-                        *ptrReal += tmp_q1 << sb_noise_exp;
++                        *ptrReal += sbr_shl(tmp_q1, sb_noise_exp);
+                     }
+                 }
+ 
+@@ -1525,7 +1549,8 @@
+         {
+             aux2 = pv_normalize(tmp2);
+             aux2 -= 1;                  /*  ensure Q30 */
+-            nrg_h = (nrg_h << aux2) >> 33;
++            /* theo-pod (t-169): aux2 is -1 when bit 30 is set. */
++            nrg_h = (aux2 >= 0) ? ((nrg_h << aux2) >> 33) : (nrg_h >> (33 - aux2));
+             tmp2 = (UInt32)(nrg_h);
+             nrg_est_exp[c] = 33 - aux2;
+         }
+@@ -1628,7 +1653,7 @@
+         aux1   =   *(ptrImag);
+         for (k = 0; k < noSubbands; k++)
+         {
+-            *(ptrImag++) = aux1 >> tmp_q1;
++            *(ptrImag++) = sbr_align(aux1, tmp_q1);
+             tmp_q1 = - *(ptrReal++);
+             aux1   =   *(ptrImag);
+         }
+@@ -1685,36 +1710,36 @@
+                     }
+ 
+                     sb_gain_man = fxp_mul32_Q30(fBuf_man[maxSmoothLength][k], Q30fmt(0.33333333333333f));
+-                    sb_gain_man  = sb_gain_man >> (sb_gain_exp - fBuf_exp[maxSmoothLength][k]);
++                    sb_gain_man  = sbr_align(sb_gain_man, sb_gain_exp - fBuf_exp[maxSmoothLength][k]);
+ 
+                     sb_noise_man = fxp_mul32_Q30(fBufN_man[maxSmoothLength][k], Q30fmt(0.33333333333333f));
+-                    sb_noise_man = sb_noise_man >> (sb_noise_exp - fBufN_exp[maxSmoothLength][k]);
++                    sb_noise_man = sbr_align(sb_noise_man, sb_noise_exp - fBufN_exp[maxSmoothLength][k]);
+ 
+                     n = maxSmoothLength - smooth_length;
+ 
+                     tmp_q1 = fxp_mul32_Q30(fBuf_man[n][k], Q30fmt(0.03183050093751f));
+-                    sb_gain_man  += tmp_q1 >> (sb_gain_exp - fBuf_exp[n][k]);
++                    sb_gain_man  += sbr_align(tmp_q1, sb_gain_exp - fBuf_exp[n][k]);
+ 
+                     tmp_q1 = fxp_mul32_Q30(fBufN_man[n][k], Q30fmt(0.03183050093751f));
+-                    sb_noise_man += tmp_q1 >> (sb_noise_exp - fBufN_exp[n++][k]);
++                    sb_noise_man += sbr_align(tmp_q1, sb_noise_exp - fBufN_exp[n++][k]);
+ 
+                     tmp_q1 = fxp_mul32_Q30(fBuf_man[n][k], Q30fmt(0.11516383427084f));
+-                    sb_gain_man  += tmp_q1 >> (sb_gain_exp - fBuf_exp[n][k]);
++                    sb_gain_man  += sbr_align(tmp_q1, sb_gain_exp - fBuf_exp[n][k]);
+ 
+                     tmp_q1 = fxp_mul32_Q30(fBufN_man[n][k], Q30fmt(0.11516383427084f));
+-                    sb_noise_man += tmp_q1 >> (sb_noise_exp - fBufN_exp[n++][k]);
++                    sb_noise_man += sbr_align(tmp_q1, sb_noise_exp - fBufN_exp[n++][k]);
+ 
+                     tmp_q1 = fxp_mul32_Q30(fBuf_man[n][k], Q30fmt(0.21816949906249f));
+-                    sb_gain_man  += tmp_q1 >> (sb_gain_exp - fBuf_exp[n][k]);
++                    sb_gain_man  += sbr_align(tmp_q1, sb_gain_exp - fBuf_exp[n][k]);
+ 
+                     tmp_q1 = fxp_mul32_Q30(fBufN_man[n][k], Q30fmt(0.21816949906249f));
+-                    sb_noise_man += tmp_q1 >> (sb_noise_exp - fBufN_exp[n++][k]);
++                    sb_noise_man += sbr_align(tmp_q1, sb_noise_exp - fBufN_exp[n++][k]);
+ 
+                     tmp_q1 = fxp_mul32_Q30(fBuf_man[n][k], Q30fmt(0.30150283239582f));
+-                    sb_gain_man  += tmp_q1 >> (sb_gain_exp - fBuf_exp[n][k]);
++                    sb_gain_man  += sbr_align(tmp_q1, sb_gain_exp - fBuf_exp[n][k]);
+ 
+                     tmp_q1 = fxp_mul32_Q30(fBufN_man[n][k], Q30fmt(0.30150283239582f));
+-                    sb_noise_man += tmp_q1 >> (sb_noise_exp - fBufN_exp[n][k]);
++                    sb_noise_man += sbr_align(tmp_q1, sb_noise_exp - fBufN_exp[n][k]);
+ 
+                 }
+ 
+@@ -1736,14 +1761,14 @@
+                     sb_gain_exp = -sb_gain_exp;
+                     if (sb_gain_exp < 32)
+                     {
+-                        *ptrReal = (aux1 >> sb_gain_exp);
+-                        *ptrImag = (aux2 >> sb_gain_exp);
++                        *ptrReal = (sbr_align(aux1, sb_gain_exp));
++                        *ptrImag = (sbr_align(aux2, sb_gain_exp));
+                     }
+                 }
+                 else
+                 {
+-                    *ptrReal = (aux1 << sb_gain_exp);
+-                    *ptrImag = (aux2 << sb_gain_exp);
++                    *ptrReal = (sbr_shl(aux1, sb_gain_exp));
++                    *ptrImag = (sbr_shl(aux2, sb_gain_exp));
+                 }
+ 
+ 
+@@ -1775,14 +1800,14 @@
+                     {
+                         if (sb_noise_exp > -32)
+                         {
+-                            *ptrReal += tmp_q1 >> (-sb_noise_exp);
+-                            *ptrImag += tmp_q2 >> (-sb_noise_exp);
++                            *ptrReal += sbr_align(tmp_q1, -sb_noise_exp);
++                            *ptrImag += sbr_align(tmp_q2, -sb_noise_exp);
+                         }
+                     }
+                     else
+                     {
+-                        *ptrReal += tmp_q1 << sb_noise_exp;
+-                        *ptrImag += tmp_q2 << sb_noise_exp;
++                        *ptrReal += sbr_shl(tmp_q1, sb_noise_exp);
++                        *ptrImag += sbr_shl(tmp_q2, sb_noise_exp);
+                     }
+                 }
+ 
+@@ -1914,36 +1939,36 @@
+                     }
+ 
+                     sb_gain_man = fxp_mul32_Q30(fBuf_man[maxSmoothLength][k], Q30fmt(0.33333333333333f));
+-                    sb_gain_man  = sb_gain_man >> (sb_gain_exp - fBuf_exp[maxSmoothLength][k]);
++                    sb_gain_man  = sbr_align(sb_gain_man, sb_gain_exp - fBuf_exp[maxSmoothLength][k]);
+ 
+                     sb_noise_man = fxp_mul32_Q30(fBufN_man[maxSmoothLength][k], Q30fmt(0.33333333333333f));
+-                    sb_noise_man = sb_noise_man >> (sb_noise_exp - fBufN_exp[maxSmoothLength][k]);
++                    sb_noise_man = sbr_align(sb_noise_man, sb_noise_exp - fBufN_exp[maxSmoothLength][k]);
+ 
+                     n = maxSmoothLength - smooth_length;
+ 
+                     tmp_q1 = fxp_mul32_Q30(fBuf_man[n][k], Q30fmt(0.03183050093751f));
+-                    sb_gain_man  += tmp_q1 >> (sb_gain_exp - fBuf_exp[n][k]);
++                    sb_gain_man  += sbr_align(tmp_q1, sb_gain_exp - fBuf_exp[n][k]);
+ 
+                     tmp_q1 = fxp_mul32_Q30(fBufN_man[n][k], Q30fmt(0.03183050093751f));
+-                    sb_noise_man += tmp_q1 >> (sb_noise_exp - fBufN_exp[n++][k]);
++                    sb_noise_man += sbr_align(tmp_q1, sb_noise_exp - fBufN_exp[n++][k]);
+ 
+                     tmp_q1 = fxp_mul32_Q30(fBuf_man[n][k], Q30fmt(0.11516383427084f));
+-                    sb_gain_man  += tmp_q1 >> (sb_gain_exp - fBuf_exp[n][k]);
++                    sb_gain_man  += sbr_align(tmp_q1, sb_gain_exp - fBuf_exp[n][k]);
+ 
+                     tmp_q1 = fxp_mul32_Q30(fBufN_man[n][k], Q30fmt(0.11516383427084f));
+-                    sb_noise_man += tmp_q1 >> (sb_noise_exp - fBufN_exp[n++][k]);
++                    sb_noise_man += sbr_align(tmp_q1, sb_noise_exp - fBufN_exp[n++][k]);
+ 
+                     tmp_q1 = fxp_mul32_Q30(fBuf_man[n][k], Q30fmt(0.21816949906249f));
+-                    sb_gain_man  += tmp_q1 >> (sb_gain_exp - fBuf_exp[n][k]);
++                    sb_gain_man  += sbr_align(tmp_q1, sb_gain_exp - fBuf_exp[n][k]);
+ 
+                     tmp_q1 = fxp_mul32_Q30(fBufN_man[n][k], Q30fmt(0.21816949906249f));
+-                    sb_noise_man += tmp_q1 >> (sb_noise_exp - fBufN_exp[n++][k]);
++                    sb_noise_man += sbr_align(tmp_q1, sb_noise_exp - fBufN_exp[n++][k]);
+ 
+                     tmp_q1 = fxp_mul32_Q30(fBuf_man[n][k], Q30fmt(0.30150283239582f));
+-                    sb_gain_man  += tmp_q1 >> (sb_gain_exp - fBuf_exp[n][k]);
++                    sb_gain_man  += sbr_align(tmp_q1, sb_gain_exp - fBuf_exp[n][k]);
+ 
+                     tmp_q1 = fxp_mul32_Q30(fBufN_man[n][k], Q30fmt(0.30150283239582f));
+-                    sb_noise_man += tmp_q1 >> (sb_noise_exp - fBufN_exp[n][k]);
++                    sb_noise_man += sbr_align(tmp_q1, sb_noise_exp - fBufN_exp[n][k]);
+ 
+                 }
+ 
+@@ -1981,15 +2006,15 @@
+                         }
+                         else
+                         {
+-                            *ptrReal = aux1 >> (-sb_gain_exp - 10);
+-                            *ptrImag = aux2 >> (-sb_gain_exp - 10);
++                            *ptrReal = sbr_align(aux1, -sb_gain_exp - 10);
++                            *ptrImag = sbr_align(aux2, -sb_gain_exp - 10);
+                         }
+                     }
+                 }
+                 else
+                 {
+-                    *ptrReal = aux1 << (sb_gain_exp + 10);
+-                    *ptrImag = aux2 << (sb_gain_exp + 10);
++                    *ptrReal = sbr_shl(aux1, sb_gain_exp + 10);
++                    *ptrImag = sbr_shl(aux2, sb_gain_exp + 10);
+                 }
+ 
+ 
+@@ -2023,15 +2048,15 @@
+                             }
+                             else
+                             {
+-                                *ptrReal += tmp_q1 >> (-sb_noise_exp - 10);
+-                                *ptrImag += tmp_q2 >> (-sb_noise_exp - 10);
++                                *ptrReal += sbr_align(tmp_q1, -sb_noise_exp - 10);
++                                *ptrImag += sbr_align(tmp_q2, -sb_noise_exp - 10);
+                             }
+                         }
+                     }
+                     else
+                     {
+-                        *ptrReal += tmp_q1 << (sb_noise_exp + 10);
+-                        *ptrImag += tmp_q2 << (sb_noise_exp + 10);
++                        *ptrReal += sbr_shl(tmp_q1, sb_noise_exp + 10);
++                        *ptrImag += sbr_shl(tmp_q2, sb_noise_exp + 10);
+                     }
+                 }
+ 
+--- a/ps_pwr_transient_detection.cpp
++++ b/ps_pwr_transient_detection.cpp
+@@ -14,6 +14,9 @@
+  * See the License for the specific language governing permissions
+  * and limitations under the License.
+  * -------------------------------------------------------------------
++ *
++ * Modified by theo-pod (t-169): stream exponents are clamped to the range a
++ * shift can express.
+  */
+ /*
+ 
+@@ -327,7 +330,18 @@
+         else
+         {
+             pv_div(nrg, peakDiff, &result);
+-            *(aPower++) = (result.quotient >> (result.shift_factor)) << 1;    /* in Q31  */
++            /*
++             * theo-pod (t-169): wrapped energies gave a ratio of 1 or more,
++             * a negative shift; saturate as above.
++             */
++            if (result.shift_factor < 0)
++            {
++                *(aPower++) = 0x7FFFFFFF;
++            }
++            else
++            {
++                *(aPower++) = (result.quotient >> (result.shift_factor > 31 ? 31 : result.shift_factor)) << 1;    /* in Q31  */
++            }
+         }
+ 
+     } /* bin */
+--- a/sbr_aliasing_reduction.cpp
++++ b/sbr_aliasing_reduction.cpp
+@@ -14,6 +14,9 @@
+  * See the License for the specific language governing permissions
+  * and limitations under the License.
+  * -------------------------------------------------------------------
++ *
++ * Modified by theo-pod (t-169): stream exponents are clamped to the range a
++ * shift can express.
+  */
+ /*
+ 
+@@ -94,7 +97,17 @@
+ #include    "pv_div.h"
+ #include    "fxp_mul32.h"
+ 
++/*
++ * theo-pod (t-169): aligns a mantissa on a larger exponent. The exponents
++ * come from the stream, so the difference can be negative or reach 32 or
++ * more, an undefined shift; clamp it to the range a shift can express.
++ */
++static inline Int32 alias_align(Int32 man, Int32 shift)
++{
++    return man >> ((shift < 0) ? 0 : ((shift > 31) ? 31 : shift));
++}
+ 
++
+ /*----------------------------------------------------------------------------
+ ; MACROS
+ ; Define module specific macros here
+@@ -249,14 +262,14 @@
+              *  est_total += nrg_est[k]
+              *  ref_total += nrg_est[k]*nrg_gain[k]*nrg_gain[k
+              */
+-            est_total += nrg_est_man[k] >> (tmp_q1 - nrg_est_exp[k]);
++            est_total += alias_align(nrg_est_man[k], tmp_q1 - nrg_est_exp[k]);
+ 
+             if (tmp_q2 - (nrg_est_exp[k] + (nrg_gain_exp[k] << 1)) < 60)
+             {
+                 nrg_gain_man[k] = fxp_mul32_Q28(nrg_gain_man[k], nrg_gain_man[k]);
+                 nrg_gain_exp[k] = (nrg_gain_exp[k] << 1) + 28;
+                 tmp_q3          = fxp_mul32_Q28(nrg_gain_man[k], nrg_est_man[k]);
+-                ref_total_man    += tmp_q3 >> (tmp_q2 - (nrg_est_exp[k] + nrg_gain_exp[k]));
++                ref_total_man    += alias_align(tmp_q3, tmp_q2 - (nrg_est_exp[k] + nrg_gain_exp[k]));
+             }
+         }
+ 
+@@ -292,8 +305,8 @@
+             tmp_q3 = fxp_mul32_Q30(alpha, quotient.quotient);
+             tmp_q4 = fxp_mul32_Q30(Q30fmt(1.0f) - alpha, nrg_gain_man[k]);
+ 
+-            nrg_gain_man[k] = (tmp_q3 >> (tmp_q1 - tmp_q2)) +
+-                              (tmp_q4 >> (tmp_q1 - nrg_gain_exp[k]));
++            nrg_gain_man[k] = (alias_align(tmp_q3, tmp_q1 - tmp_q2)) +
++                              (alias_align(tmp_q4, tmp_q1 - nrg_gain_exp[k]));
+ 
+             nrg_gain_exp[k] = tmp_q1;
+         }
+@@ -322,7 +335,7 @@
+         for (k = startGroup; k < stopGroup; k++)
+         {
+             tmp_q2 =  fxp_mul32_Q28(nrg_gain_man[k], nrg_est_man[k]);
+-            bst_man +=  tmp_q2 >> (bst_exp - nrg_gain_exp[k] - nrg_est_exp[k]);
++            bst_man +=  alias_align(tmp_q2, bst_exp - nrg_gain_exp[k] - nrg_est_exp[k]);
+         }
+ 
+         bst_exp += 28;  /* compensate for shift down */
+--- a/sbr_envelope_unmapping.cpp
++++ b/sbr_envelope_unmapping.cpp
+@@ -14,6 +14,9 @@
+  * See the License for the specific language governing permissions
+  * and limitations under the License.
+  * -------------------------------------------------------------------
++ *
++ * Modified by theo-pod (t-169): stream exponents are clamped to the range a
++ * shift can express.
+  */
+ /*
+ 
+@@ -147,6 +150,16 @@
+ ; Declare variables used in this module but defined elsewhere
+ ----------------------------------------------------------------------------*/
+ 
++/*
++ * theo-pod (t-169): Qfmt(1.0) >> exp, the exponent of a stream
++ * envelope clamped to 31 (the result is already 0 there); a larger
++ * shift is undefined.
++ */
++static inline Int32 unmap_shr(Int32 exp)
++{
++    return Qfmt(1.000F) >> ((exp > 31) ? 31 : exp);
++}
++
+ /*----------------------------------------------------------------------------
+ ; FUNCTION CODE
+ ----------------------------------------------------------------------------*/
+@@ -200,7 +213,7 @@
+                 }
+                 else        /*  1/(1+2^-m) == 1 - 2^-m ;  for m >= 10  */
+                 {
+-                    iEnvelopeRight_man[i] -= (Qfmt(1.000F) >> iEnvelopeRight_exp[i]);
++                    iEnvelopeRight_man[i] -= unmap_shr(iEnvelopeRight_exp[i]);
+                 }
+                 iEnvelopeRight_exp[i] = iEnvelopeLeft_exp[i] - iEnvelopeRight_exp[i];
+             }
+@@ -276,7 +289,7 @@
+                     }
+                     else        /*  1/(1+2^-m) == 1 - 2^-m ;  for m >= 10  */
+                     {
+-                        iEnvelopeRight_man[i] -= (Qfmt(1.000F) >> iEnvelopeRight_exp[i]);
++                        iEnvelopeRight_man[i] -= unmap_shr(iEnvelopeRight_exp[i]);
+                     }
+                     iEnvelopeRight_exp[i] = iEnvelopeLeft_exp[i] - iEnvelopeRight_exp[i];
+ 
+@@ -329,7 +342,7 @@
+                     }
+                     else        /*  1/(1+2^-m) == 1 - 2^-m ;  for m >= 11  */
+                     {
+-                        iEnvelopeRight_man[i] = Qfmt(1.000F) - (Qfmt(1.000F) >> iEnvelopeRight_exp[i]);
++                        iEnvelopeRight_man[i] = Qfmt(1.000F) - unmap_shr(iEnvelopeRight_exp[i]);
+                     }
+                 }
+                 else
+@@ -395,7 +408,7 @@
+             }
+             else        /*  1/(1+2^-m) == 1 - 2^-m ;  for m >= 10  */
+             {
+-                noiseFloorRight_man[i] = Qfmt(1.000F) - (Qfmt(1.000F) >> noiseFloorRight_exp[i]);
++                noiseFloorRight_man[i] = Qfmt(1.000F) - unmap_shr(noiseFloorRight_exp[i]);
+             }
+         }
+         else

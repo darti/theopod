@@ -1,0 +1,103 @@
+Check the SBR frame borders.
+
+extractFrameInfo() trusted the frame grid: up to 8 envelopes (FIXFIX)
+or 7 (VARVAR) for tables of MAX_ENVELOPES (5), a
+bs_pointer past the envelopes (middleBorder, lA indexing before tE[]),
+and relative borders that ran past the trailing one. Decreasing borders
+made the envelope adjustment and the energy estimation address QMF slots
+past their buffers, and write over the SBR frame data (heap overflows in
+calc_sbr_envelope.cpp and decode_noise_floorlevels.cpp). The frame is
+now rejected (ISO/IEC 14496-3, 4.6.18.3.3: borders do not decrease).
+
+Regression input:
+tools/aacdec-fuzz/regressions/t169-sbr-frame-borders.bin.
+
+Licence: this patch modifies opencore-aacdec, Copyright (C) 1998-2009
+PacketVideo, licensed under the Apache License, Version 2.0. The patch is
+distributed under the same licence; each modified file keeps its notice and
+states that it was changed.
+
+--- a/extractframeinfo.cpp
++++ b/extractframeinfo.cpp
+@@ -14,6 +14,9 @@
+  * See the License for the specific language governing permissions
+  * and limitations under the License.
+  * -------------------------------------------------------------------
++ *
++ * Modified by theo-pod (t-169): the envelope borders are checked against the
++ * envelope count and order.
+  */
+ /*
+ 
+@@ -206,6 +209,12 @@
+             temp = buf_getbits(hBitBuf, SBR_ENV_BITS);   /* 2 bits */
+ 
+             bs_num_env = 1 << temp;
++
++            /* theo-pod (t-169): f[], tE[] and the tables hold MAX_ENVELOPES. */
++            if (bs_num_env > MAX_ENVELOPES)
++            {
++                return SBRDEC_INVALID_BITSTREAM;
++            }
+ 
+ 
+             f[0] = buf_getbits(hBitBuf, SBR_RES_BITS);   /* 1 bit */
+@@ -277,6 +286,12 @@
+             bs_num_rel_1  = buf_getbits(hBitBuf, SBR_NUM_BITS);
+ 
+             bs_num_env = bs_num_rel_0 + bs_num_rel_1 + 1;
++
++            /* theo-pod (t-169): f[], tE[] and the tables hold MAX_ENVELOPES. */
++            if (bs_num_env > MAX_ENVELOPES)
++            {
++                return SBRDEC_INVALID_BITSTREAM;
++            }
+ 
+             for (k = 0; k < bs_num_rel_0; k++)
+             {                                                 /* 2 bits */
+@@ -364,6 +379,20 @@
+         for (k = 0; k <= bs_num_env - env - 1; k++)
+         {
+             tE[env] -= relBordTrail[k];
++        }
++    }
++
++    /*
++     * theo-pod (t-169): the borders must not decrease (ISO/IEC 14496-3,
++     * 4.6.18.3.3). Relative borders past the trailing one made envelopes
++     * run past the trailing border, and the envelope adjustment wrote QMF
++     * slots past its buffers, over the SBR frame data.
++     */
++    for (env = 0; env < bs_num_env; env++)
++    {
++        if (tE[env + 1] < tE[env])
++        {
++            return SBRDEC_INVALID_BITSTREAM;
+         }
+     }
+ 
+@@ -404,6 +433,12 @@
+     };
+ 
+ 
++    /* theo-pod (t-169): bs_pointer past the envelopes indexed before tE[]. */
++    if ((middleBorder < 0) || (middleBorder > bs_num_env))
++    {
++        return SBRDEC_INVALID_BITSTREAM;
++    }
++
+     tQ[0] = tE[0];
+     if (bs_num_env > 1)
+     {
+@@ -458,6 +493,11 @@
+             break;
+     };
+ 
++    if (lA > bs_num_env)    /* theo-pod (t-169): as middleBorder */
++    {
++        return SBRDEC_INVALID_BITSTREAM;
++    }
++
+     /*
+      * Build the frameInfo vector...
+      */

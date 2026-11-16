@@ -1,0 +1,101 @@
+Keep the transforms inside their windows and shift ranges.
+
+- trans4m_freq_2_time_fxp.cpp: the EIGHT_SHORT_SEQUENCE overlap loops
+  (both functions) prefetched the next window coefficient on their last
+  iteration, one Int32 past the Short_Window tables (global overflow);
+  the last iteration no longer reads it.
+- trans4m_time_2_freq_fxp.cpp: long_term_prediction() returns a Q format
+  of 0 for a prediction that already fits 16 bits, and the window then
+  shifted by -1 (UBSan); it is treated as 1 (no shift).
+
+Regression inputs:
+tools/aacdec-fuzz/regressions/t169-short-window-prefetch.bin and
+t169-ltp-q-format.bin.
+
+Licence: this patch modifies opencore-aacdec, Copyright (C) 1998-2009
+PacketVideo, licensed under the Apache License, Version 2.0. The patch is
+distributed under the same licence; each modified file keeps its notice and
+states that it was changed.
+
+--- a/trans4m_freq_2_time_fxp.cpp
++++ b/trans4m_freq_2_time_fxp.cpp
+@@ -16,6 +16,7 @@
+  * -------------------------------------------------------------------
+  *
+  * Modified by theo-pod (t-169): keep the IMDCT output shifts within 0..31
++ * and do not read the window tables past their end.
+  */
+ /*
+ 
+@@ -1237,7 +1238,8 @@
+                     *(pOverlap_and_Add_Buffer_1++)  =  fxp_mul_16_by_16(dat1, win1) >> shift;
+ 
+                     dat1 = *(pFreq_2_Time_data_1++);
+-                    win1 = *(pShort_Window_1++);
++                    /* theo-pod (t-169): no prefetch past the window table. */
++                    win1 = (i > 1) ? *(pShort_Window_1++) : 0;
+                 }
+ 
+                 /* -------- segment C ---------------*/
+@@ -1371,7 +1373,8 @@
+                 *(pOverlap_and_Add_Buffer_1++) += temp;
+ 
+                 dat1 = *(pFreq_2_Time_data_2++);
+-                win1 = *(pShort_Window_2--);
++                /* theo-pod (t-169): no prefetch past the window table. */
++                win1 = (i > 1) ? *(pShort_Window_2--) : 0;
+             }
+ 
+         }   /* if (exp < 16) */
+@@ -2267,7 +2270,8 @@
+                     *(pOverlap_and_Add_Buffer_1++)  =  fxp_mul_16_by_16(dat1, win1) >> shift;
+ 
+                     dat1 = *(pFreq_2_Time_data_1++);
+-                    win1 = *(pShort_Window_1++);
++                    /* theo-pod (t-169): no prefetch past the window table. */
++                    win1 = (i > 1) ? *(pShort_Window_1++) : 0;
+                 }
+ 
+                 /* -------- segment C ---------------*/
+@@ -2405,7 +2409,8 @@
+                 *(pOverlap_and_Add_Buffer_1++) += temp;
+ 
+                 dat1 = *(pFreq_2_Time_data_2++);
+-                win1 = *(pShort_Window_2--);
++                /* theo-pod (t-169): no prefetch past the window table. */
++                win1 = (i > 1) ? *(pShort_Window_2--) : 0;
+             }
+ 
+ 
+--- a/trans4m_time_2_freq_fxp.cpp
++++ b/trans4m_time_2_freq_fxp.cpp
+@@ -14,6 +14,9 @@
+  * See the License for the specific language governing permissions
+  * and limitations under the License.
+  * -------------------------------------------------------------------
++ *
++ * Modified by theo-pod (t-169): a Q format below 1 from the LTP is treated
++ * as 1.
+  */
+ /*
+ 
+@@ -385,7 +388,18 @@
+     const   Int16 *pLong_Window_2;
+     const   Int16 *pShort_Window_1;
+     const   Int16 *pShort_Window_2;
+-    Int     shift = *pQ_format - 1;
++    Int     shift;
++
++    /*
++     * theo-pod (t-169): long_term_prediction() returns 0 for a prediction
++     * that already fits 16 bits, which made the shift below -1. Treat it
++     * as 1: no shift, and the output Q format follows.
++     */
++    if (*pQ_format < 1)
++    {
++        *pQ_format = 1;
++    }
++    shift = *pQ_format - 1;
+ 
+     const Int16 * Long_Window_fxp[NUM_WINDOW_SHAPES];
+     const Int16 * Short_Window_fxp[NUM_WINDOW_SHAPES];

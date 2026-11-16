@@ -1,0 +1,11 @@
+[package]
+name = "aacdec-fuzz"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Host fuzz harness and sanitizer regression tests for opencore-aacdec (t-169)"
+
+[dev-dependencies]
+speculoos.workspace = true

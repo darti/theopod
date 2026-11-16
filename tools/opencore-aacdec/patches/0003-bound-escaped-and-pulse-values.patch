@@ -1,0 +1,95 @@
+theo-pod (t-169): keep quantized values within the inverse quantiser's range
+
+unpack_idx_esc() reads escape prefixes with no bound: a run of ones (a
+corrupt stream, or the zero bits returned past the end of the buffer) makes
+N grow past 32, getbits() shifts by a negative amount and the escaped value
+overflows. ISO/IEC 14496-3 allows at most 8 prefix ones (N <= 12, values
+below 8192); the prefix loop now stops there. pulse_nc() adds up to 15 to
+an escaped value; the sum is clamped to 8191. Larger values index
+inverseQuantTable[] (1025 entries, inputs below 8192) past its end in
+esc_iquant_scaling(). Found by the host fuzzer (UBSan shift exponent in
+getbits.h from unpack_idx_esc, ASan global-buffer-overflow in
+esc_iquant_scaling); regression input
+tools/aacdec-fuzz/regressions/t169-unbounded-escape.bin.
+
+Licence: this patch modifies opencore-aacdec, Copyright (C) 1998-2009
+PacketVideo, licensed under the Apache License, Version 2.0. The patch is
+distributed under the same licence; each modified file keeps its notice and
+states that it was changed.
+
+--- a/pulse_nc.cpp
++++ b/pulse_nc.cpp
+@@ -14,6 +14,9 @@
+  * See the License for the specific language governing permissions
+  * and limitations under the License.
+  * -------------------------------------------------------------------
++ *
++ * Modified by theo-pod (t-169): pulse sums are kept within the inverse
++ * quantiser's range.
+  */
+ /*
+ 
+@@ -275,6 +278,14 @@
+         if (temp > 0)
+         {
+             temp += *(pPulseAmp++);
++            /*
++             * theo-pod (t-169): keep the sum within the inverse quantiser's
++             * range (|x| <= 8191) after an escaped value.
++             */
++            if (temp > 8191)
++            {
++                temp = 8191;
++            }
+             *pCoef = (Int16)temp;
+             if (temp > *max)
+             {
+@@ -284,6 +295,10 @@
+         else
+         {
+             temp -= *(pPulseAmp++);
++            if (temp < -8191)
++            {
++                temp = -8191;
++            }
+             *pCoef = (Int16)temp;
+             if (-temp > *max)
+             {
+--- a/unpack_idx.cpp
++++ b/unpack_idx.cpp
+@@ -14,6 +14,9 @@
+  * See the License for the specific language governing permissions
+  * and limitations under the License.
+  * -------------------------------------------------------------------
++ *
++ * Modified by theo-pod (t-169): escape sequences are bounded to the 13-bit
++ * range.
+  */
+ /*
+ 
+@@ -588,7 +591,11 @@
+             esc_seq = get1bits(pInputStream);
+ 
+         }
+-        while (esc_seq != 0);
++        /*
++         * theo-pod (t-169): an escape prefix has at most 8 ones (N <= 12),
++         * so escaped values stay below 8192, the inverse quantiser's range.
++         */
++        while ((esc_seq != 0) && (N < 12));
+ 
+         esc_seq  = getbits(N, pInputStream);
+ 
+@@ -626,7 +633,11 @@
+             esc_seq = get1bits(pInputStream);
+ 
+         }
+-        while (esc_seq != 0);
++        /*
++         * theo-pod (t-169): an escape prefix has at most 8 ones (N <= 12),
++         * so escaped values stay below 8192, the inverse quantiser's range.
++         */
++        while ((esc_seq != 0) && (N < 12));
+ 
+         esc_seq  = getbits(N, pInputStream);
+ 

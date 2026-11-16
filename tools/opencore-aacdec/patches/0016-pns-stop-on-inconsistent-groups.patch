@@ -1,0 +1,43 @@
+Stop the PNS and intensity walk on an inconsistent group table.
+
+After a corrupt frame, the window group table (group[]) could fail to
+advance or run past the windows; pns_intensity_right.cpp then read past
+mask[] and into the decoder state. The walk stops when a group end does
+not advance or exceeds num_win.
+
+Regression input: tools/aacdec-fuzz/regressions/t169-pns-groups.bin.
+
+Licence: this patch modifies opencore-aacdec, Copyright (C) 1998-2009
+PacketVideo, licensed under the Apache License, Version 2.0. The patch is
+distributed under the same licence; each modified file keeps its notice and
+states that it was changed.
+
+--- a/pns_intensity_right.cpp
++++ b/pns_intensity_right.cpp
+@@ -14,6 +14,9 @@
+  * See the License for the specific language governing permissions
+  * and limitations under the License.
+  * -------------------------------------------------------------------
++ *
++ * Modified by theo-pod (t-169): the PNS/intensity walk stops on an
++ * inconsistent group table.
+  */
+ /*
+ 
+@@ -475,6 +478,16 @@
+         -----------------------------------------------------------*/
+         partition = *(pGroup++);
+ 
++        /*
++         * theo-pod (t-169): a group table left inconsistent by a corrupt
++         * frame did not advance or ran past the windows, and the walk read
++         * past mask[] and the decoder state.
++         */
++        if ((partition <= window_start) || (partition > pFrameInfo->num_win))
++        {
++            break;
++        }
++
+         band_start = 0;
+ 
+         wins_in_group = (partition - window_start);

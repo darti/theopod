@@ -1,0 +1,154 @@
+Set up the PS buffers for explicit PS and for 64-bit hosts.
+
+- sbr_applied.cpp: with PS signalled explicitly (the extension of a
+  mono SBR element), sbr_dec() ran the PS tool without its buffers:
+  ps_allocate_decoder() had only run in the implicit branch, and the
+  hybrid filter bank pointer was NULL (SEGV in sbr_dec.cpp). The explicit
+  branch now allocates them and selects the HQ path, as the other one.
+- ps_allocate_decoder.cpp, ps_hybrid_filter_bank_allocation.cpp: the
+  pointer arrays are carved out of Int32 buffers and sized in Int32
+  words. On a 64-bit host (the fuzzing host) they overlapped and were
+  misaligned; they are now aligned, and the serial delay arrays are
+  sized as pointers and moved past ptr7 inside the unused right channel.
+  The 32-bit firmware layout is unchanged: this is a host artefact, not a
+  firmware bug.
+
+Regression input: tools/aacdec-fuzz/regressions/t169-explicit-ps.bin.
+
+Licence: this patch modifies opencore-aacdec, Copyright (C) 1998-2009
+PacketVideo, licensed under the Apache License, Version 2.0. The patch is
+distributed under the same licence; each modified file keeps its notice and
+states that it was changed.
+
+--- a/ps_allocate_decoder.cpp
++++ b/ps_allocate_decoder.cpp
+@@ -14,6 +14,9 @@
+  * See the License for the specific language governing permissions
+  * and limitations under the License.
+  * -------------------------------------------------------------------
++ *
++ * Modified by theo-pod (t-169): the PS pointer arrays are sized and aligned
++ * for pointers wider than Int32.
+  */
+ /*
+ 
+@@ -89,6 +92,7 @@
+ 
+ #ifdef PARAMETRICSTEREO
+ 
++#include    <stdint.h>  /* theo-pod (t-169): uintptr_t */
+ #include    "s_sbr_channel.h"
+ #include    "aac_mem_funcs.h"
+ #include    "ps_hybrid_filter_bank_allocation.h"
+@@ -285,6 +289,20 @@
+         h_ps_dec->aaImagDelayBufferSubQmf[i] = (Int32 *)ptr1;
+         ptr1 += DELAY_ALLPASS;
+ 
++    }
++
++    /*
++     * theo-pod (t-169): the word counts above take a pointer for one Int32,
++     * so on a 64-bit host the serial delay pointer arrays overlapped each
++     * other and were misaligned. There, move these buffers past ptr7 (still
++     * inside the unused right channel, before its synthesis history V[]),
++     * align them and size the pointer arrays as pointers. The 32-bit
++     * firmware layout is unchanged.
++     */
++    if (sizeof(Int32 *) > sizeof(Int32))
++    {
++        ptr2 = (Int32 *)(((uintptr_t)ptr7 + sizeof(Int32 *) - 1) & ~(uintptr_t)(sizeof(Int32 *) - 1));
++        ptr3 = ptr2 + 504 + 2 * (3 + 4 + 5) * (sizeof(Int32 *) / sizeof(Int32) - 1);
+     }
+ 
+     for (i = 0 ; i < NO_SERIAL_ALLPASS_LINKS ; i++) /*  NO_SERIAL_ALLPASS_LINKS == 3 */
+@@ -293,16 +311,16 @@
+         h_ps_dec->aDelayRBufIndexSer[i] = 0;
+ 
+         h_ps_dec->aaaRealDelayRBufferSerQmf[i] = (Int32 **)ptr2;
+-        ptr2 += aRevLinkDelaySer[i];
++        ptr2 += aRevLinkDelaySer[i] * sizeof(Int32 *) / sizeof(Int32);
+ 
+         h_ps_dec->aaaImagDelayRBufferSerQmf[i] = (Int32 **)ptr2;
+-        ptr2 += aRevLinkDelaySer[i];
++        ptr2 += aRevLinkDelaySer[i] * sizeof(Int32 *) / sizeof(Int32);
+ 
+         h_ps_dec->aaaRealDelayRBufferSerSubQmf[i] = (Int32 **)ptr3;
+-        ptr3 += aRevLinkDelaySer[i];
++        ptr3 += aRevLinkDelaySer[i] * sizeof(Int32 *) / sizeof(Int32);
+ 
+         h_ps_dec->aaaImagDelayRBufferSerSubQmf[i] = (Int32 **)ptr3;
+-        ptr3 += aRevLinkDelaySer[i];
++        ptr3 += aRevLinkDelaySer[i] * sizeof(Int32 *) / sizeof(Int32);
+ 
+         for (j = 0; j < aRevLinkDelaySer[i]; j++)
+         {
+--- a/ps_hybrid_filter_bank_allocation.cpp
++++ b/ps_hybrid_filter_bank_allocation.cpp
+@@ -14,6 +14,9 @@
+  * See the License for the specific language governing permissions
+  * and limitations under the License.
+  * -------------------------------------------------------------------
++ *
++ * Modified by theo-pod (t-169): the PS pointer arrays are sized and aligned
++ * for pointers wider than Int32.
+  */
+ /*
+ 
+@@ -86,6 +89,7 @@
+ #ifdef AAC_PLUS
+ 
+ #ifdef PARAMETRICSTEREO
++#include    <stdint.h>  /* theo-pod (t-169): uintptr_t */
+ #include    "aac_mem_funcs.h"
+ #include    "ps_hybrid_filter_bank_allocation.h"
+ #include    "ps_all_pass_filter_coeff.h"
+@@ -144,6 +148,9 @@
+ 
+     *phHybrid = (HYBRID *)NULL;
+ 
++    /* theo-pod (t-169): HYBRID holds pointers, align it as above. */
++    ptr = (Int32 *)(((uintptr_t)ptr + sizeof(Int32 *) - 1) & ~(uintptr_t)(sizeof(Int32 *) - 1));
++
+     hs = (HYBRID *)ptr;
+ 
+     ptr += sizeof(HYBRID) / sizeof(*ptr);
+@@ -173,6 +180,13 @@
+     hs->nQmfBands     = noBands;
+     hs->qmfBufferMove = HYBRID_FILTER_LENGTH - 1;
+ 
++    /*
++     * theo-pod (t-169): the pointer arrays are carved out of an Int32 buffer;
++     * align them for pointers wider than Int32 (64-bit hosts). A no-op on
++     * the 32-bit firmware.
++     */
++    ptr = (Int32 *)(((uintptr_t)ptr + sizeof(Int32 *) - 1) & ~(uintptr_t)(sizeof(Int32 *) - 1));
++
+     hs->mQmfBufferReal = (Int32 **)ptr;
+     ptr += noBands * sizeof(ptr) / sizeof(*ptr);
+ 
+--- a/sbr_applied.cpp
++++ b/sbr_applied.cpp
+@@ -16,7 +16,7 @@
+  * -------------------------------------------------------------------
+  *
+  * Modified by theo-pod (t-169): without frequency tables, SBR falls back to
+- * upsampling.
++ * upsampling. Explicitly signalled PS allocates its buffers.
+  */
+ /*
+ 
+@@ -236,6 +236,14 @@
+                 {
+                     sbrEnablePS = 1;  /* Force this condition as it was explicititly declared */
+                     pVars->mc_info.psPresentFlag  = sbrEnablePS;
++
++                    /*
++                     * theo-pod (t-169): sbr_dec() then runs the PS tool, so
++                     * its buffers must be set up as in the branch above (the
++                     * hybrid filter bank was NULL).
++                     */
++                    ps_allocate_decoder(self, 32);
++                    sbrDec->LC_aacP_DecoderFlag = OFF;
+ 
+                 }
+             }

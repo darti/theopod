@@ -158,6 +158,10 @@ sd-format device sectors="":
 test:
     RUSTUP_TOOLCHAIN=stable cargo test -p theo-drivers -p theo-frame-dump -p theo-storage -p theo-podcasts -p frame-png --target {{host_target}}
     RUSTUP_TOOLCHAIN=stable cargo test -p theo-podcasts --example prepare_image --target {{host_target}}
+    # The vendored esp-radio's TX gate (t-172) is dependency-free: test it alone.
+    mkdir -p target/host
+    RUSTUP_TOOLCHAIN=stable rustc --edition 2024 -D warnings --test vendor/esp-radio/src/wifi/tx_gate.rs -o target/host/tx_gate_tests
+    target/host/tx_gate_tests
 
 # Sector-count bounds of the redb catalogue (open, scan, commit and each
 # podcast request at the scale target, ADR-0022; the first open of a fresh

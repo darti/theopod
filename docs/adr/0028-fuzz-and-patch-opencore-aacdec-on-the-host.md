@@ -1,4 +1,4 @@
-# ADR-0027: Fuzz opencore-aacdec on the host and patch what it finds
+# ADR-0028: Fuzz opencore-aacdec on the host and patch what it finds
 
 - Status: Accepted
 - Date: 2026-11-15

@@ -107,12 +107,12 @@ audio-bench-inputs: opencore-aacdec
     [ -f target/audio-bench/mp3.bin ] || python3 -I tools/audio-bench/clip.py mp3 https://media.radiofrance-podcast.net/podcast09/11549-21.03.2020-ITEMA_22312642-2020F16177S0081-NET_MFI_13439893-27FF-4D58-8BD5-395C69D6CCE8-22-ee341284cbb67507d5f06879819274e5.mp3 target/audio-bench
 
 # Sources are never committed; refetched when the patch set changes (t-169,
-# ADR-0027).
+# ADR-0028).
 # Fetch opencore-aacdec (Apache-2.0, AOSP android-4.0.4_r2.1) and apply tools/opencore-aacdec/patches.
 opencore-aacdec:
     tools/opencore-aacdec/fetch.sh target/opencore-aacdec
 
-# Runs `seconds` over `jobs` processes (t-169, ADR-0027); seeds come from
+# Runs `seconds` over `jobs` processes (t-169, ADR-0028); seeds come from
 # the bench AAC clip. Crashes land in target/aacdec-fuzz/artifacts: group
 # them with `just aacdec-fuzz-triage`. Needs a clang++ with libFuzzer:
 # `THEO_FUZZ_CXX`, else Homebrew's llvm (Apple's clang has none).
@@ -188,6 +188,10 @@ sd-format device sectors="":
 test: opencore-aacdec
     RUSTUP_TOOLCHAIN=stable cargo test -p theo-drivers -p theo-frame-dump -p theo-storage -p theo-podcasts -p aacdec-fuzz -p frame-png --target {{host_target}}
     RUSTUP_TOOLCHAIN=stable cargo test -p theo-podcasts --example prepare_image --target {{host_target}}
+    # The vendored esp-radio's TX gate (t-172) is dependency-free: test it alone.
+    mkdir -p target/host
+    RUSTUP_TOOLCHAIN=stable rustc --edition 2024 -D warnings --test vendor/esp-radio/src/wifi/tx_gate.rs -o target/host/tx_gate_tests
+    target/host/tx_gate_tests
 
 # Sector-count bounds of the redb catalogue (open, scan, commit and each
 # podcast request at the scale target, ADR-0022; the first open of a fresh

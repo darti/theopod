@@ -130,7 +130,7 @@ esp-alloc. Details and sources: side-session notes `t-164-decoders.md`.
      been fuzzed, while its input is downloaded and untrusted: a host
      fuzzing harness of the raw/ADTS decode path (the shim's entry point,
      built with the host compiler and sanitizers) had to run before
-     playback ships. ADR-0027 records it: four campaigns, 18 patches to
+     playback ships. ADR-0028 records it: four campaigns, 18 patches to
      the fetched sources, each with a regression input.
      `esp_audio_codec` stays the fallback.
    - *MP3: `nanomp3-core` 0.2* (MIT/Apache, pure Rust, `no_std`, no
@@ -296,7 +296,7 @@ unit; `nanomp3-core` still pinned at opt-level 1), same harness and clips:
   repeated.
 - Both RPSL/RCSL decoders now have a licence-clean equivalent at the same
   CPU cost: opencore-aacdec (Apache-2.0; unmaintained, dropped from AOSP in 2012, fuzzed
-  and patched since, ADR-0027; inputs to treat as untrusted) and `nanomp3-core` (MIT/Apache, pure
+  and patched since, ADR-0028; inputs to treat as untrusted) and `nanomp3-core` (MIT/Apache, pure
   Rust, no `unsafe`). The decision above now uses them (t-168); the AAC
   patent licence is needed whichever decoder is used.
 
@@ -423,7 +423,7 @@ licence choice; the decision takes that path (t-168).
   through its C build, including a fuzzing harness of the raw/ADTS path: the
   code is unmaintained and had never been fuzzed, and podcast files are
   untrusted input. Bugs found there are ours to patch (vendored patches on
-  top of the fetched tag, Apache-2.0 notices kept; ADR-0027). `esp_audio_codec` is
+  top of the fetched tag, Apache-2.0 notices kept; ADR-0028). `esp_audio_codec` is
   Espressif-only and closed.
 - The AAC decoder state (108 KB) takes PSRAM, not internal RAM, and must be
   constructed in place.

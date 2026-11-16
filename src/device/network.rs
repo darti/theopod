@@ -435,11 +435,13 @@ impl<B: Read> theo_podcasts::body::BodyRead for Body<'_, B> {
             .await
             .map_err(|_| {
                 log::warn!(
-                    "network: body stalled after {} B in {} s, last store {} ms, slowest {} ms",
+                    "network: body stalled after {} B in {} s, last store {} ms, slowest {} ms, at {} ms, internal heap free {} B",
                     self.total,
                     self.started.elapsed().as_secs(),
                     t.last_store.get(),
                     t.slowest.get(),
+                    Instant::now().as_millis(),
+                    internal_free(),
                 );
                 Error::Network
             })?
@@ -453,7 +455,7 @@ impl<B: Read> theo_podcasts::body::BodyRead for Body<'_, B> {
         if total >> 20 != self.total >> 20 {
             let mark = t.mark.replace(Some(Instant::now())).unwrap_or(self.started);
             log::debug!(
-                "network: {} MiB in {} s, last MiB: wall {} ms, read {} ms, store {} ms, {} reads, slowest store {} ms",
+                "network: {} MiB in {} s, last MiB: wall {} ms, read {} ms, store {} ms, {} reads, slowest store {} ms, internal heap free {} B",
                 total >> 20,
                 self.started.elapsed().as_secs(),
                 mark.elapsed().as_millis(),
@@ -461,6 +463,7 @@ impl<B: Read> theo_podcasts::body::BodyRead for Body<'_, B> {
                 t.store_us.take() / 1000,
                 t.reads.take(),
                 t.slowest.get(),
+                internal_free(),
             );
         }
         self.total = total;
@@ -643,9 +646,15 @@ async fn start(wifi: WIFI<'static>) -> Result<(), Error> {
         .with_static_rx_buf_num(16)
         .with_dynamic_rx_buf_num(32)
         .with_dynamic_tx_buf_num(4)
+        // Inert while AMPDU RX is off (below); kept for when it returns.
         .with_rx_ba_win(16)
         .with_rx_queue_size(16)
         .with_tx_queue_size(2)
+        // AMPDU RX off: the blob's reorder path kept all 32 dynamic RX
+        // buffers after ~30 s of download, so no frame (not even a beacon)
+        // was received again until reset. Without it, full episodes
+        // download at ~187 KB/s (t-172, ADR-0027).
+        .with_ampdu_rx_enable(false)
         .with_initial_config(Config::Station(station));
     let mut controller = WifiController::new(wifi, config).map_err(|_| Error::Network)?;
     static RESOURCES: StaticCell<StackResources<4>> = StaticCell::new();
@@ -659,6 +668,27 @@ async fn start(wifi: WIFI<'static>) -> Result<(), Error> {
     match select(runner.run(), work(&mut controller, stack, &mut buffers)).await {
         Either::First(never) => match never {},
         Either::Second(result) => result,
+    }
+}
+/// Free internal heap: the Wi-Fi driver's RX/TX buffers come from it.
+fn internal_free() -> usize {
+    esp_alloc::HEAP.free_caps(esp_alloc::MemoryCapability::Internal.into())
+}
+/// Controller, stack and internal-heap facts for a failure log (t-172).
+struct LinkState<'a, 'c>(&'a WifiController<'c>, embassy_net::Stack<'a>);
+impl core::fmt::Display for LinkState<'_, '_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let Self(controller, stack) = self;
+        write!(
+            f,
+            "at {} ms: station connected {}, rssi {:?}, link up {}, config up {}, internal heap free {} B",
+            Instant::now().as_millis(),
+            controller.is_connected(),
+            controller.rssi(),
+            stack.is_link_up(),
+            stack.is_config_up(),
+            internal_free(),
+        )
     }
 }
 async fn work(
@@ -683,9 +713,25 @@ async fn work(
             RF_READY.store(false, Ordering::Release);
             STATUS.store(2, Ordering::Release);
             match bounded(20, controller.connect_async()).await {
-                Ok(Ok(_)) => (),
+                Ok(Ok(info)) => log::info!(
+                    "wifi: connected, channel {}, {}",
+                    info.channel,
+                    LinkState(controller, stack)
+                ),
                 Err(Error::Stopped) => return Err(Error::Stopped),
-                _ => {
+                Ok(Err(error)) => {
+                    log::warn!(
+                        "wifi: connect failed: {error:?}; {}",
+                        LinkState(controller, stack)
+                    );
+                    idle(30).await?;
+                    continue;
+                }
+                Err(error) => {
+                    log::warn!(
+                        "wifi: connect {error:?} (20 s); {}",
+                        LinkState(controller, stack)
+                    );
                     idle(30).await?;
                     continue;
                 }
@@ -694,34 +740,62 @@ async fn work(
             match bounded(20, stack.wait_config_up()).await {
                 Ok(()) => (),
                 Err(Error::Stopped) => return Err(Error::Stopped),
-                _ => {
+                Err(error) => {
+                    log::warn!(
+                        "wifi: DHCP {error:?} (20 s); {}",
+                        LinkState(controller, stack)
+                    );
                     idle(30).await?;
                     continue;
                 }
             }
             SYNC.store(true, Ordering::Release);
         }
-        let result = if SYNC.swap(false, Ordering::AcqRel) || Instant::now() >= next_sync {
-            STATUS.store(4, Ordering::Release);
-            let result = synchronize(stack, buffers).await;
-            if result.is_ok() {
-                next_sync = Instant::now() + Duration::from_secs(6 * 3600);
-            } else {
-                SYNC.store(true, Ordering::Release);
+        // Diagnostic (t-172): report a Wi-Fi drop when it happens, not when
+        // a transfer later times out. It never ends the transfer itself. It
+        // takes one of esp-radio's 2 event subscriber slots (default
+        // `event_channel_subscribers`), whose exhaustion panics: nothing else
+        // may wait on controller events while a job runs.
+        let shared: &WifiController<'_> = controller;
+        let watch = async {
+            match shared.wait_for_disconnect_async().await {
+                Ok(info) => log::warn!(
+                    "wifi: disconnected: {:?}, rssi {}; {}",
+                    info.reason,
+                    info.rssi,
+                    LinkState(shared, stack)
+                ),
+                Err(error) => log::warn!("wifi: disconnect watch {error:?}"),
             }
-            result.map(|_| true)
-        } else if !waiting {
-            STATUS.store(5, Ordering::Release);
-            worker::download_one(
-                &mut AudioIo {
-                    stack,
-                    buffers: &mut *buffers,
-                },
-                &mut download_after,
-            )
-            .await
-        } else {
-            Ok(false)
+            core::future::pending::<core::convert::Infallible>().await
+        };
+        let job = async {
+            if SYNC.swap(false, Ordering::AcqRel) || Instant::now() >= next_sync {
+                STATUS.store(4, Ordering::Release);
+                let result = synchronize(stack, buffers).await;
+                if result.is_ok() {
+                    next_sync = Instant::now() + Duration::from_secs(6 * 3600);
+                } else {
+                    SYNC.store(true, Ordering::Release);
+                }
+                result.map(|_| true)
+            } else if !waiting {
+                STATUS.store(5, Ordering::Release);
+                worker::download_one(
+                    &mut AudioIo {
+                        stack,
+                        buffers: &mut *buffers,
+                    },
+                    &mut download_after,
+                )
+                .await
+            } else {
+                Ok(false)
+            }
+        };
+        let result = match select(job, watch).await {
+            Either::First(result) => result,
+            Either::Second(never) => match never {},
         };
         match result {
             Ok(true) => {
@@ -741,7 +815,10 @@ async fn work(
                 return Err(Error::Stopped);
             }
             Err(error) => {
-                log::warn!("network: {error:?}, retrying");
+                log::warn!(
+                    "network: {error:?}, retrying; {}",
+                    LinkState(controller, stack)
+                );
                 // Ordinary network/protocol errors recover partials; storage
                 // failures remain disabled and never become a fresh mount.
                 domain(Command::Abort).await?;

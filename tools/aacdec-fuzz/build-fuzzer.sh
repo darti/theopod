@@ -20,7 +20,7 @@ defines=(-DAAC_PLUS -DHQ_SBR -DPARAMETRICSTEREO
 	-DOSCL_IMPORT_REF= -DOSCL_EXPORT_REF= '-DOSCL_UNUSED_ARG(x)=(void)(x)')
 # Negative left shifts (shift-base) are this fixed-point code's idiom:
 # defined in C++20 and two's complement in GCC, which builds the firmware.
-# Signed overflow wraps (-fwrapv, as in the firmware build, ADR-0027).
+# Signed overflow wraps (-fwrapv, as in the firmware build, ADR-0028).
 sanitize=(-fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-sanitize=shift-base
 	-fno-sanitize=signed-integer-overflow)
 flags=(-g -O1 -fno-omit-frame-pointer -fwrapv -fno-exceptions -fno-rtti -Wno-narrowing -w

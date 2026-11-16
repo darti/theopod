@@ -1,5 +1,5 @@
 //! Builds opencore-aacdec, the bench shim and the fuzz driver for the host,
-//! with ASan and UBSan, for the regression tests (t-169, ADR-0027).
+//! with ASan and UBSan, for the regression tests (t-169, ADR-0028).
 //!
 //! The Apache-2.0 sources are fetched and patched into
 //! `target/opencore-aacdec` by `just opencore-aacdec`; they are never
@@ -29,7 +29,7 @@ const DEFINES: &[&str] = &[
 /// Sanitizers; must match `sanitize` in `build-fuzzer.sh`. Negative left
 /// shifts (`shift-base`) are this fixed-point code's idiom: defined in C++20
 /// and two's complement in GCC, which builds the firmware. Signed overflow
-/// wraps (`-fwrapv`, as in the firmware build, ADR-0027).
+/// wraps (`-fwrapv`, as in the firmware build, ADR-0028).
 const SANITIZE: &[&str] = &[
     "-fsanitize=address,undefined",
     "-fno-sanitize-recover=undefined",

@@ -1,4 +1,4 @@
-//! Sanitizer regression tests for opencore-aacdec (t-169, ADR-0027).
+//! Sanitizer regression tests for opencore-aacdec (t-169, ADR-0028).
 //!
 //! The decoder (Apache-2.0, AOSP `android-4.0.4_r2.1`, patched by
 //! `tools/opencore-aacdec/patches`) is built for the host with ASan and

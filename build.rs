@@ -120,7 +120,7 @@ fn audio_bench() {
 /// HE-AAC v1/v2 for `audio-bench` (t-167).
 ///
 /// `just audio-bench-inputs` fetches it from AOSP into `target/opencore-aacdec`
-/// and applies `tools/opencore-aacdec/patches` (t-169, ADR-0027); the Android
+/// and applies `tools/opencore-aacdec/patches` (t-169, ADR-0028); the Android
 /// wrapper `SoftAAC.cpp` is left out, `theo_opencore.cpp` replaces it.
 fn opencore(root: &std::path::Path, shim: &std::path::Path, out: &std::path::Path) {
     let dir = root.join("target/opencore-aacdec");
@@ -141,7 +141,7 @@ fn opencore(root: &std::path::Path, shim: &std::path::Path, out: &std::path::Pat
         let status = std::process::Command::new("xtensa-esp32s3-elf-g++")
             .args(["-O2", "-mlongcalls", "-ffunction-sections"])
             // The fixed-point code relies on wrapping signed arithmetic
-            // (ADR-0027).
+            // (ADR-0028).
             .arg("-fwrapv")
             .args(["-fno-exceptions", "-fno-rtti", "-Wno-narrowing"])
             .args(["-DAAC_PLUS", "-DHQ_SBR", "-DPARAMETRICSTEREO"])

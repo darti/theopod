@@ -1,5 +1,5 @@
 [workspace]
-exclude = ["vendor/littlefs"]
+exclude = ["vendor/littlefs", "vendor/esp-radio"]
 members = ["crates/theo-drivers", "crates/theo-frame-dump", "crates/theo-storage", "crates/theo-podcasts", "tools/aacdec-fuzz", "tools/frame-png"]
 
 [workspace.package]
@@ -53,7 +53,7 @@ license.workspace = true
 
 [dependencies]
 nanomp3-core = { version = "0.2", default-features = false, optional = true }
-esp-radio = { version = "=1.0.0-beta.1", features = ["esp32s3", "wifi", "esp-alloc", "unstable"] }
+esp-radio = { version = "=1.0.0-beta.1", features = ["esp32s3", "wifi", "esp-alloc", "unstable", "log-04"] }
 embassy-net = { version = "0.9", features = ["tcp", "dhcpv4", "dns", "medium-ethernet"] }
 reqwless = { version = "0.14", default-features = false, features = [] }
 embedded-tls = { git = "https://github.com/embassy-rs/embedded-tls", rev = "6487c62bb084c33361822022e21836ddfd48388f", default-features = false, features = ["webpki", "p256", "p384", "ed25519", "rsa"] }
@@ -143,3 +143,9 @@ opt-level = 1
 
 [profile.dev.package.esp-radio]
 opt-level = 3
+
+# Temporary esp-radio correction (t-172): a missing tx-done callback leaked
+# the TX in-flight count and stopped all Wi-Fi traffic until reset.
+# Provenance/removal criteria: vendor/esp-radio/THEO-PATCH.md.
+[patch.crates-io]
+esp-radio = { path = "vendor/esp-radio" }

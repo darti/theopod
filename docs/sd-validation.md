@@ -75,10 +75,11 @@ expired blocking requests without using an Embassy timer. Independent review
 found no blocking findings. `just audit` passes with the working tree's
 pulldown-cmark 0.13.5 update from the concurrent release work.
 
-Further on-board tests are recorded below. Physical card removal, actually
-filling the 59,700 MiB medium, and interrupting SD power remain unperformed.
-The historical FAT matrix does not substitute for those physical tests.
-Keep t-103 open for its remaining scope.
+Further on-board tests are recorded below. The historical FAT matrix does
+not substitute for physical tests: a power cut and a card removal during
+writes were performed on 2026-11-27, and a truly full or write-protected
+card was judged not feasible physically (see "Physical tests on current
+main — 2026-11-27").
 
 ### Automated hardware validation requested by the user
 
@@ -323,3 +324,97 @@ a volume with 4 MiB of media costs 516 extra sector reads, about one per two
 data blocks. All board evidence above is from a log-only volume; a card
 holding downloaded episodes has not been measured.
 
+### Physical tests on current main — 2026-11-27 (t-103)
+
+Source: `main` at `b3b6a42`, plus the `sd-check stress` diagnostic added by
+this change. Same onboard card (122,265,600 sectors, card id `c9000031f6`),
+now a region card (layout v3, podcast catalogue opens), whereas all
+evidence above was gathered on the legacy whole-card volume. No
+provisioning, `sd-provision-v3` or formatting was performed. The user
+performed every physical action; the board was powered by USB only (no
+battery).
+
+#### First append after the 2026-11-02 regression
+
+`target/t-103-2026-11-27-observe.log` (`just sd-check observe`, boot after a
+flash reset): mount 114.454 ms (158 physical reads), tail 6.298 ms, first
+append **26.593 ms** (7 physical reads, 15 writes), then 30.124 / 30.949 ms.
+The 500 ms first append (188 reads) of 2026-11-02 is not reproduced. That
+figure came from the legacy whole-card volume, so this shows no regression
+on current main, not an isolated fix of the earlier cause. The power-cut and removal recoveries below supply the post-recovery case: their
+first appends took 49.505 ms and 45.687 ms.
+
+These figures include `SectorIo::check` on cache hits; for the board
+re-measurement requested in the 2026-11-11 review follow-up they show only
+that aggregate timings did not regress. Its cost is not separable: the counters see physical reads only, not cache
+hits. Its failure path (a hit refused after the deadline or after
+poisoning) was not triggered on the board; the host mutation test remains
+the evidence for it.
+
+#### Stress workload
+
+`just sd-check stress` appends isolated 2 KiB batches to the `sdtest2`
+rotation files (bounded to 4 KiB + 128 KiB by rotation) whenever the
+storage task is idle, 1 ms apart. Live logs and podcast requests keep
+priority. The card is therefore writing most of the time (about 35 ms of
+every 36 ms), so a physical action lands on an active write with high
+probability, without proof that it interrupts a particular sector program.
+
+A first version looped inside the storage task and starved podcast
+requests: one waited past its 2.5 s timeout, dropping its guard poisoned
+the session and the next append failed in the middle of its writes
+(its capture was overwritten by the next run). That failure came from the
+diagnostic, not from the card. The corrected version, which this file
+contains, then ran 2,634 appends with no failure (median 34.5 ms, p99 53.2 ms, max
+74.7 ms) alongside 1,776 podcast requests
+(`target/t-103-2026-11-27-stress-flash.log`).
+
+Unlike `rotate`, `stress` does not refuse existing fixtures: it appends to
+them, so `just sd-check rotate` refuses to run until `sdtest2.log` and
+`sdtest2.1` are removed. Captures under `target/` are local and not
+committed; the figures here are quoted from them.
+
+#### Physical tests
+
+Capture: `target/t-103-2026-11-27-powercut.log` (`tools/passive-monitor.py`,
+no reset on open; its first lines are cut mid-record because it attached
+to a running board).
+
+| Physical action | Observed result | Limits |
+| --- | --- | --- |
+| Abrupt USB unplug (power cut) during the stress workload, 14:18:48 | 367,864 appends committed since 10:39 without error (about 718 MiB written through rotation); the port vanished after the commit message of append 367,864 and before any measurement for 367,865. Replugged 14:18:55: mount 141.508 ms (193 reads), previous `theo.log` 48,202 bytes readable, catalogue reopened, first append 49.505 ms, then 440 appends with no error (median 34.1 ms, max 54.5 ms) | One cut. Whether it fell inside a sector program, between the commit print and the next request, or in the 1 ms gap cannot be told from the log. The `sdtest2` content was not reread byte for byte; LittleFS kept appending and rotating them, so atomicity of the interrupted record was not verified. Supply cut by unplugging USB, not a controlled SD-rail cut |
+| Card removal with power on, during the stress workload, then USB off, reinsertion, USB on | Append 927 failed in the middle of its writes (14 write attempts, 0 reads) with `Io`; storage disabled until reboot; `podcasts network stopped: Storage`; five later rotation changes were logged (Deg90/Deg180), no panic or reset; the user confirmed touch and rotation. Reboot 14:20:04: mount 134.666 ms, previous `theo.log` 51,766 bytes readable, first append 45.687 ms, then 436 appends with no error (max 59.0 ms) | One removal. Unlike 2026-11-02 (failure on the first read), this one failed during writes; whether the card was programming at the moment of contact loss is not observable |
+
+#### Not feasible physically
+
+- **Truly full card:** the 59,700 MiB LittleFS volume cannot be filled by
+  the firmware in a reasonable time (logs are bounded to 128 KiB plus one
+  archive), nor from a Mac without destroying the volume; a smaller card
+  would have to be formatted, which was excluded.
+- **Write-protected card:** microSD has no lock tab; an adapter's tab is
+  read by the host, and this SPI slot has no such contact. Real protection
+  needs the card's CSD `TMP_WRITE_PROTECT` bit, which modifies the card.
+
+For these two, the evidence remains fault injection only: on-board
+`full`/`readonly` injections (2026-10-29 table above) and the host
+`full_littlefs_volume_keeps_failed_append_pending` regression on a really
+full 128 KiB LittleFS volume.
+
+#### Fault injection vs physical evidence
+
+| Scenario | Physical | Injection / host |
+| --- | --- | --- |
+| Power loss during writes | One USB cut during the active-write workload; sector-level timing and record atomicity unverified | Host torn-sector tests |
+| Removal during a write | One removal; append 927 failed during its writes (above); removal during logging on 2026-11-02 | `removed` injection |
+| Full media | Not feasible | `full` injection; real NoSpace on a 128 KiB host volume |
+| Write-protected media | Not feasible | `readonly` injection |
+| Blocked write | — | `timeout` injection |
+
+#### Final state
+
+Normal release firmware (no diagnostic feature) was reflashed:
+`target/t-103-2026-11-27-normal.log` shows the region card mounted, the
+catalogue open, the previous `theo.log` at 55,007 bytes and storage
+mounted, with no disable or panic. The isolated `sdtest2.log`/`sdtest2.1`
+fixtures stay on the log volume (at most 4 KiB + 128 KiB). The stress runs
+wrote about 720 MiB through them, a wear cost accepted for this test.

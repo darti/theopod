@@ -117,7 +117,11 @@ Diagnostics report worker operation times, sampled core-1 stack margin and
 per-request sector counters (reads, writes, syncs, I/O time, hottest sector);
 this sample is not an exhaustive stack high-water measurement. `just sd-check rotate` exercises the real rotation
 path using isolated `sdtest2.log`/`sdtest2.1` fixtures; it refuses existing fixture
-files and leaves the generated files for inspection. `just sd-sleep-check`
+files and leaves the generated files for inspection. `just sd-check stress`
+appends to the same fixtures whenever the storage task is idle, so a
+physical power cut or card removal lands on an active write; it injects no
+fault, writes almost continuously (card wear) and makes `rotate` refuse until
+the fixtures are removed. `just sd-sleep-check`
 performs three actual deep-sleep/timer-wake cycles with a passive monitor.
 Restore normal firmware with `just flash` after diagnostic tests.
 

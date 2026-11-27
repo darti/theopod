@@ -604,9 +604,9 @@ pub(super) fn identify(
 #[path = "sd_worker.rs"]
 mod worker;
 pub(super) use worker::PODCAST_BUDGET;
-#[cfg(feature = "sd-check")]
-pub use worker::test_rotation;
 pub use worker::{
     PodcastRequest, SdStorage, append_log, disable, domain, guard, init, mount, provisions_v3,
     report_log_tail,
 };
+#[cfg(feature = "sd-check")]
+pub use worker::{stress_append, test_rotation};

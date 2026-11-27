@@ -102,6 +102,8 @@ async fn persist(mut volume: Option<SdStorage>) {
             volume = None;
         }
     }
+    #[cfg(feature = "sd-check")]
+    let mut stressed: u32 = 0;
     let mut pending = LogBuffer::<QUEUE_SIZE>::new();
     let mut scheduler = Scheduler::default();
     let mut data = None;
@@ -172,6 +174,27 @@ async fn persist(mut volume: Option<SdStorage>) {
                 RESPONSE.signal(result);
             }
             None => {
+                // Stress stays in the idle arm: every `continue` re-polls the
+                // control, log and podcast work above first (t-103).
+                #[cfg(feature = "sd-check")]
+                if option_env!("THEO_SD_FAULT") == Some("stress")
+                    && let Some(storage) = volume.as_mut()
+                {
+                    match sd::stress_append(storage).await {
+                        Ok(()) => {
+                            stressed = stressed.wrapping_add(1);
+                            esp_println::println!("INFO - SD stress appends committed: {stressed}");
+                        }
+                        Err(error) => {
+                            esp_println::println!(
+                                "WARN - SD stress writes stopped after {stressed}: {error:?}"
+                            );
+                            volume = None;
+                        }
+                    }
+                    Timer::after_millis(1).await;
+                    continue;
+                }
                 match select(
                     select(
                         Timer::after_millis(1000),

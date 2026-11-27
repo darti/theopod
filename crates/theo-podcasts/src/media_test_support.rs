@@ -280,6 +280,8 @@ pub(crate) struct Disk {
     pub limit: u32,
     /// `(first sector, sectors)` of each `write_sectors` call.
     pub batches: std::vec::Vec<(u32, usize)>,
+    /// Fails the sector write numbered `n` (counting from 0), and no other.
+    pub fail_at: Option<usize>,
 }
 impl Disk {
     pub fn counting(limit: u32) -> Self {
@@ -291,6 +293,7 @@ impl Disk {
             highest: None,
             limit,
             batches: std::vec::Vec::new(),
+            fail_at: None,
         }
     }
     pub fn storing(limit: u32) -> Self {
@@ -320,6 +323,10 @@ impl theo_storage::sector::SectorIo for Disk {
     ) -> Result<(), theo_storage::sector::SectorError> {
         if sector >= self.limit {
             return Err(theo_storage::sector::SectorError::Io);
+        }
+        if self.fail_at == Some(self.writes) {
+            self.fail_at = None;
+            return Err(littlefs_rust::Error::Io);
         }
         self.writes += 1;
         self.highest = self.highest.max(Some(sector));

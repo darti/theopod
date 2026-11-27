@@ -1285,6 +1285,7 @@ unsafe extern "C" fn recv_cb_ap(
 
 // Theo patch (t-172): the count lives in a gate that heals a leaked count.
 static WIFI_TX_GATE: tx_gate::TxGate = tx_gate::TxGate::new();
+static WIFI_HEAL_LOG: tx_gate::HealLog = tx_gate::HealLog::new();
 
 fn decrement_inflight_counter() {
     WIFI_TX_GATE.done();
@@ -1446,10 +1447,14 @@ impl InterfaceType {
             tx_gate::Admit::Send => true,
             tx_gate::Admit::Hold => false,
             tx_gate::Admit::Healed => {
-                warn!(
-                    "TX held {} ms without a tx-done callback, in-flight count reset",
-                    tx_gate::HEAL_MS
-                );
+                // Rate-limited (t-179): at most one warning per minute.
+                if let Some(count) = WIFI_HEAL_LOG.record(now_ms) {
+                    warn!(
+                        "TX held {} ms without a tx-done callback, in-flight count reset ({} heal(s) since the last warning, this one included)",
+                        tx_gate::HEAL_MS,
+                        count
+                    );
+                }
                 true
             }
         }

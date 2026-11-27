@@ -36,10 +36,16 @@ has the same code.
   most one extra queued frame, which `esp_wifi_internal_tx` rejects when
   its buffers are full (the driver already handles that error). Any send
   below the limit clears a hold start that a racing callback left behind.
+- `src/wifi/tx_gate.rs` also holds `HealLog` (t-179), which rate-limits
+  the heal warning: the first heal is logged at once, later ones are
+  counted and logged with the first heal after `REPORT_MS` (60 s), as
+  "N heal(s) since the last warning". Racing callers are safe (CAS on the
+  window start). Heals after the last warning are only reported by the next
+  heal. A download once logged 54 warnings in 16 min.
 - `src/wifi/tx_gate_tests.rs` (new): host tests, run by `just test`
   through `rustc --test` (the crate itself does not build on the host).
 - `src/wifi/mod.rs`: `WIFI_TX_INFLIGHT` is replaced by the gate, and
-  `can_send()` asks it and logs a warning when it heals.
+  `can_send()` asks it and logs a rate-limited warning when it heals.
 
 ## Removal
 

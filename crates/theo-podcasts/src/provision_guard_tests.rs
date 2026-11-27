@@ -54,14 +54,14 @@ fn card_id_displays_as_ten_hex_digits() {
 #[test]
 fn authorizes_the_target_card_when_blank_or_legacy() {
     assert_eq!(
-        TARGET.authorizes(SECTORS, Some(CARD), &BLANK, &BLANK, None),
+        TARGET.authorizes(SECTORS, Some(CARD), &BLANK, &BLANK, None, None),
         Ok(())
     );
     // A whole-card LittleFS superblock is not a descriptor.
     let mut legacy = [0xa5; 512];
     legacy[8..16].copy_from_slice(b"littlefs");
     assert_eq!(
-        TARGET.authorizes(SECTORS, Some(CARD), &legacy, &legacy, None),
+        TARGET.authorizes(SECTORS, Some(CARD), &legacy, &legacy, None, None),
         Ok(())
     );
 }
@@ -70,16 +70,16 @@ fn authorizes_the_target_card_when_blank_or_legacy() {
 fn authorizes_refuses_another_size_or_card() {
     // Regression (t-133): a same-size card swapped in must not be erased.
     assert_eq!(
-        TARGET.authorizes(SECTORS - 1, Some(CARD), &BLANK, &BLANK, None),
+        TARGET.authorizes(SECTORS - 1, Some(CARD), &BLANK, &BLANK, None, None),
         Err(Refusal::Size(SECTORS - 1))
     );
     let other = CardId::new(0x1b, 0x1234_abce);
     assert_eq!(
-        TARGET.authorizes(SECTORS, Some(other), &BLANK, &BLANK, None),
+        TARGET.authorizes(SECTORS, Some(other), &BLANK, &BLANK, None, None),
         Err(Refusal::Card(Some(other)))
     );
     assert_eq!(
-        TARGET.authorizes(SECTORS, None, &BLANK, &BLANK, None),
+        TARGET.authorizes(SECTORS, None, &BLANK, &BLANK, None, None),
         Err(Refusal::Card(None))
     );
 }
@@ -87,25 +87,25 @@ fn authorizes_refuses_another_size_or_card() {
 #[test]
 fn authorizes_refuses_a_card_with_any_descriptor() {
     assert_eq!(
-        TARGET.authorizes(SECTORS, Some(CARD), &v3(), &v3(), None),
+        TARGET.authorizes(SECTORS, Some(CARD), &v3(), &v3(), None, None),
         Err(Refusal::AlreadyV3)
     );
     // One published copy is a complete layout (regions precede descriptors).
     assert_eq!(
-        TARGET.authorizes(SECTORS, Some(CARD), &v3(), &BLANK, None),
+        TARGET.authorizes(SECTORS, Some(CARD), &v3(), &BLANK, None, None),
         Err(Refusal::AlreadyV3)
     );
     let mut v1 = BLANK;
     v1[..8].copy_from_slice(b"THEOSD01");
     // A v1 card is refused, not upgraded (ADR-0021).
     assert!(matches!(
-        TARGET.authorizes(SECTORS, Some(CARD), &v1, &BLANK, None),
+        TARGET.authorizes(SECTORS, Some(CARD), &v1, &BLANK, None, None),
         Err(Refusal::Descriptor(_))
     ));
     let mut corrupt = v3();
     corrupt[100] ^= 1;
     assert_eq!(
-        TARGET.authorizes(SECTORS, Some(CARD), &corrupt, &BLANK, None),
+        TARGET.authorizes(SECTORS, Some(CARD), &corrupt, &BLANK, None, None),
         Err(Refusal::Descriptor(LayoutError::Checksum))
     );
 }
@@ -125,20 +125,20 @@ fn authorizes_a_v2_card_only_when_it_is_the_target() {
     // Regression (t-133): v2 cards must be re-provisionable to v3.
     let v2 = versioned(b"THEOSD02", 2);
     assert_eq!(
-        TARGET.authorizes(SECTORS, Some(CARD), &v2, &v2, None),
+        TARGET.authorizes(SECTORS, Some(CARD), &v2, &v2, None, None),
         Ok(())
     );
     assert_eq!(
-        TARGET.authorizes(SECTORS, Some(CARD), &v2, &BLANK, None),
+        TARGET.authorizes(SECTORS, Some(CARD), &v2, &BLANK, None, None),
         Ok(())
     );
     let other = CardId::new(0x1b, 0x1234_abce);
     assert_eq!(
-        TARGET.authorizes(SECTORS, Some(other), &v2, &v2, None),
+        TARGET.authorizes(SECTORS, Some(other), &v2, &v2, None, None),
         Err(Refusal::Card(Some(other)))
     );
     assert_eq!(
-        TARGET.authorizes(SECTORS - 1, Some(CARD), &v2, &v2, None),
+        TARGET.authorizes(SECTORS - 1, Some(CARD), &v2, &v2, None, None),
         Err(Refusal::Size(SECTORS - 1))
     );
 }
@@ -148,12 +148,12 @@ fn authorizes_refuses_an_unknown_version() {
     // Regression guard (t-133): only obsolete layouts may be replaced.
     let v4 = versioned(b"THEOSD03", 4);
     assert_eq!(
-        TARGET.authorizes(SECTORS, Some(CARD), &v4, &v4, None),
+        TARGET.authorizes(SECTORS, Some(CARD), &v4, &v4, None, None),
         Err(Refusal::Descriptor(LayoutError::Version))
     );
     let v2 = versioned(b"THEOSD02", 2);
     assert_eq!(
-        TARGET.authorizes(SECTORS, Some(CARD), &v2, &v3(), None),
+        TARGET.authorizes(SECTORS, Some(CARD), &v2, &v3(), None, None),
         Err(Refusal::Descriptor(LayoutError::Conflict))
     );
 }
@@ -165,7 +165,7 @@ fn authorizes_refuses_an_unknown_theosd_descriptor() {
     let future = versioned(b"THEOSD04", 4);
     for (first, second) in [(&future, &future), (&future, &BLANK), (&BLANK, &future)] {
         assert_eq!(
-            TARGET.authorizes(SECTORS, Some(CARD), first, second, None),
+            TARGET.authorizes(SECTORS, Some(CARD), first, second, None, None),
             Err(Refusal::Descriptor(LayoutError::Version))
         );
     }
@@ -205,19 +205,19 @@ fn authorizes_a_v3_card_whose_catalogue_is_corrupt() {
     let no_magic = catalogue(4096, [0; 512]);
     for (name, head) in [("no records", &no_records), ("no magic", &no_magic)] {
         assert_eq!(
-            TARGET.authorizes(SECTORS, Some(CARD), &v3(), &v3(), Some(head)),
+            TARGET.authorizes(SECTORS, Some(CARD), &v3(), &v3(), Some(head), None),
             Ok(()),
             "{name}"
         );
         // Still only the exact target card.
         let other = CardId::new(0x1b, 0x1234_abce);
         assert_eq!(
-            TARGET.authorizes(SECTORS, Some(other), &v3(), &v3(), Some(head)),
+            TARGET.authorizes(SECTORS, Some(other), &v3(), &v3(), Some(head), None),
             Err(Refusal::Card(Some(other))),
             "{name}"
         );
         assert_eq!(
-            TARGET.authorizes(SECTORS - 1, Some(CARD), &v3(), &v3(), Some(head)),
+            TARGET.authorizes(SECTORS - 1, Some(CARD), &v3(), &v3(), Some(head), None),
             Err(Refusal::Size(SECTORS - 1)),
             "{name}"
         );
@@ -233,9 +233,92 @@ fn authorizes_refuses_a_v3_card_whose_catalogue_is_healthy_or_unread() {
         ("unread", None),
     ] {
         assert_eq!(
-            TARGET.authorizes(SECTORS, Some(CARD), &v3(), &v3(), head.as_ref()),
+            TARGET.authorizes(SECTORS, Some(CARD), &v3(), &v3(), head.as_ref(), None),
             Err(Refusal::AlreadyV3),
             "{name}"
         );
     }
+}
+
+fn schema_refused(
+    card: Option<CardId>,
+    sectors: u64,
+    head: Option<&CatalogueHead>,
+    opened: Option<CatalogueError>,
+) -> Result<(), Refusal> {
+    TARGET.authorizes(sectors, card, &v3(), &v3(), head, opened)
+}
+
+#[test]
+fn authorizes_a_v3_card_whose_catalogue_open_is_refused_as_schema() {
+    // Regression (t-152): an unknown schema or a missing table keeps
+    // podcasts offline, and the card used to be refused as `AlreadyV3`.
+    let head = catalogue(4096, redb_file());
+    assert_eq!(
+        schema_refused(
+            Some(CARD),
+            SECTORS,
+            Some(&head),
+            Some(CatalogueError::Schema)
+        ),
+        Ok(())
+    );
+}
+
+#[test]
+fn authorizes_refuses_other_open_outcomes_and_other_cards() {
+    // Regression guard (t-152): only `Schema` joins corruption. A device
+    // failure or a healthy open never erases; the exact card and size
+    // still apply.
+    let head = catalogue(4096, redb_file());
+    for opened in [
+        None,
+        Some(CatalogueError::Storage),
+        Some(CatalogueError::Corrupt),
+        Some(CatalogueError::Full),
+        Some(CatalogueError::Disabled),
+    ] {
+        assert_eq!(
+            schema_refused(Some(CARD), SECTORS, Some(&head), opened),
+            Err(Refusal::AlreadyV3),
+            "{opened:?}"
+        );
+    }
+    let schema = Some(CatalogueError::Schema);
+    let other = CardId::new(0x1b, 0x1234_abce);
+    assert_eq!(
+        schema_refused(Some(other), SECTORS, Some(&head), schema),
+        Err(Refusal::Card(Some(other)))
+    );
+    assert_eq!(
+        schema_refused(None, SECTORS, Some(&head), schema),
+        Err(Refusal::Card(None))
+    );
+    assert_eq!(
+        schema_refused(Some(CARD), SECTORS - 1, Some(&head), schema),
+        Err(Refusal::Size(SECTORS - 1))
+    );
+    // Without the head read the card stays refused, schema or not.
+    assert_eq!(
+        schema_refused(Some(CARD), SECTORS, None, schema),
+        Err(Refusal::AlreadyV3)
+    );
+    // A schema error never overrides an unusable descriptor.
+    let mut corrupt = v3();
+    corrupt[100] ^= 1;
+    assert_eq!(
+        TARGET.authorizes(SECTORS, Some(CARD), &corrupt, &BLANK, Some(&head), schema),
+        Err(Refusal::Descriptor(LayoutError::Checksum))
+    );
+}
+
+#[test]
+fn should_probe_only_a_region_holding_a_database() {
+    // Regression (t-152): opening an empty region creates the catalogue,
+    // and a corrupt one is decided from the raw head.
+    let sectors = theo_storage::card_layout::DATABASE_SECTORS;
+    assert!(should_probe(&catalogue(4096, redb_file()), sectors));
+    assert!(!should_probe(&catalogue(0, [0; 512]), sectors));
+    assert!(!should_probe(&catalogue(4096, [0; 512]), sectors));
+    assert!(!should_probe(&[[0xa5; 512]; 3], sectors));
 }

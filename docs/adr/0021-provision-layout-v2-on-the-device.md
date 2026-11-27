@@ -2,7 +2,7 @@
 
 - Status: Implemented; provisioning validated on the board. Amended by ADR-0022: layout v3, `provision_v3` writes an empty redb length record
 - Date: 2026-11-11
-- Related: t-133, t-121; ADR-0015, ADR-0018, ADR-0020
+- Related: t-133, t-121, t-152; ADR-0015, ADR-0018, ADR-0020
 
 ## Context
 

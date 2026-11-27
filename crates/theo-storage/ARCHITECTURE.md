@@ -30,7 +30,7 @@ Used by the firmware (`src/device/sd_worker.rs`) and `theo-podcasts`.
   once the catalogue's tables are durable. Every other generation keeps the
   current fresh-ness, so a torn record write reopens with the old or new
   state. `region_is_corrupt` classifies a region from its raw head sectors
-  (provisioning guard). `unsafe fn new` carries a single-execution-context
+  (provisioning guard); `region_has_database` tells whether a region holds a redb file. `unsafe fn new` carries a single-execution-context
   contract (the backend claims `Send + Sync` for redb without being
   thread-safe; `FreshFlag` shares its state and is `!Send`).
 - `test_disk.rs` (`test-disk` feature): sparse in-memory `SectorIo` with

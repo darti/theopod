@@ -232,6 +232,28 @@ pub fn region_is_corrupt(
     }
 }
 
+/// Whether a database region of `sectors` sectors holds a redb file that
+/// the catalogue would open and read: a valid, non-empty length record and
+/// redb's magic. An empty (fresh) region is not: opening it creates the
+/// tables, which the provisioning guard must not do to a card it may refuse.
+pub fn region_has_database(
+    head: &[[u8; SECTOR_SIZE]; LENGTH_SECTORS as usize + 1],
+    sectors: u32,
+) -> bool {
+    let Some(capacity) = sectors
+        .checked_sub(LENGTH_SECTORS)
+        .filter(|&n| n > 0)
+        .map(|n| u64::from(n) * SECTOR)
+    else {
+        return false;
+    };
+    let [first, second, file] = head;
+    matches!(
+        current(&[*first, *second], capacity),
+        Some((_, copy)) if is_redb_file(copy.len, file)
+    )
+}
+
 /// One decoded copy of the length record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Record {

@@ -386,9 +386,7 @@ async fn owner(
     }
     // Explicit provisioning build only: runs before any request is served.
     #[cfg(feature = "sd-provision")]
-    if let Some(io) = card.as_mut()
-        && provision::run(io, card_id).await
-    {
+    if provision::run(&mut card, card_id).await {
         // The card was being erased: keep it offline for this boot; the
         // normal firmware mounts the new layout.
         card = None;

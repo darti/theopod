@@ -6,12 +6,22 @@
 use core::fmt;
 use theo_storage::{
     card_layout::{CardLayout, LayoutError},
-    redb_backend::{LENGTH_SECTORS, region_is_corrupt},
+    redb_backend::{LENGTH_SECTORS, region_has_database, region_is_corrupt},
 };
+
+use crate::catalogue::Error as CatalogueError;
 
 /// The first sectors of a v3 card's database region: both length record
 /// copies, then the start of the redb file.
 pub type CatalogueHead = [[u8; 512]; LENGTH_SECTORS as usize + 1];
+
+/// Whether the firmware must open the catalogue and pass the outcome to
+/// [`Target::authorizes`]: the database region holds a redb database, so
+/// opening it only validates it. A corrupt or empty region is decided from
+/// `head` alone and is never opened (opening an empty one creates tables).
+pub fn should_probe(head: &CatalogueHead, database_sectors: u32) -> bool {
+    region_has_database(head, database_sectors)
+}
 
 /// An SD card's identity: CID manufacturer ID and product serial number.
 ///
@@ -84,8 +94,12 @@ impl Target {
     /// unknown version or a damaged descriptor does not. A valid v3 layout
     /// passes only if `catalogue`, the head of its database region (`None`
     /// if unread), shows a corrupt catalogue: no valid length record, or a
-    /// non-empty redb file without redb's magic. Nothing boot could open is
-    /// erased.
+    /// non-empty redb file without redb's magic. It also passes if `opened`,
+    /// the error of opening that catalogue (`None` if it opened or was not
+    /// probed, see [`should_probe`]), is `Schema`: an unknown schema or a
+    /// missing table keeps podcasts offline like corruption (t-152). Any
+    /// other open error (a device failure, say) is no reason to erase.
+    /// Nothing boot could open is erased.
     pub fn authorizes(
         &self,
         sectors: u64,
@@ -93,6 +107,7 @@ impl Target {
         first: &[u8; 512],
         second: &[u8; 512],
         catalogue: Option<&CatalogueHead>,
+        opened: Option<CatalogueError>,
     ) -> Result<(), Refusal> {
         if sectors != self.sectors {
             return Err(Refusal::Size(sectors));
@@ -104,6 +119,7 @@ impl Target {
             Ok(None) | Err(LayoutError::Obsolete) => Ok(()),
             Ok(Some(layout)) => match catalogue {
                 Some(head) if region_is_corrupt(head, layout.database().sectors()) => Ok(()),
+                Some(_) if opened == Some(CatalogueError::Schema) => Ok(()),
                 _ => Err(Refusal::AlreadyV3),
             },
             Err(error) => Err(Refusal::Descriptor(error)),

@@ -433,3 +433,24 @@ fn region_is_corrupt_without_record_or_with_a_file_without_magic() {
     assert!(!region_is_corrupt(&head(&disk), LENGTH_SECTORS + 4));
     assert!(region_is_corrupt(&head(&disk), LENGTH_SECTORS));
 }
+
+#[test]
+fn region_has_database_only_with_a_non_empty_file_with_magic() {
+    // Regression (t-152): the provisioning guard opens the catalogue only
+    // on a region that holds a database; opening an empty one creates it.
+    let blank = TestDisk::new(SECTORS);
+    assert!(!region_has_database(&head(&blank), SECTORS));
+    let disk = formatted();
+    assert!(!region_has_database(&head(&disk), SECTORS), "empty");
+    let b = backend(&disk);
+    b.set_len(4096).unwrap();
+    b.write(0, &[0x5a; 512]).unwrap();
+    b.sync_data().unwrap();
+    assert!(!region_has_database(&head(&disk), SECTORS), "no magic");
+    let mut file = [0x5a; 512];
+    file[..REDB_MAGIC.len()].copy_from_slice(&REDB_MAGIC);
+    b.write(0, &file).unwrap();
+    b.sync_data().unwrap();
+    assert!(region_has_database(&head(&disk), SECTORS));
+    assert!(!region_has_database(&head(&disk), LENGTH_SECTORS));
+}

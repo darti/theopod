@@ -17,7 +17,9 @@ use theo_storage::{
     sector::{SectorError as Error, SectorIo},
 };
 
-pub use crate::provision_guard::{CardId, CatalogueHead, Refusal, Request, Target, parse_request};
+pub use crate::provision_guard::{
+    CardId, CatalogueHead, Refusal, Request, Target, parse_request, should_probe,
+};
 
 /// Why provisioning stopped; no descriptor was published.
 #[derive(Debug)]

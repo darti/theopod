@@ -298,8 +298,11 @@ To give a card inside the board the v3 layout, use the explicit provisioning
 firmware with the card's exact sector count and identity, both printed at boot
 ("microSD capacity: N blocks", "microSD card id: ID"). It **erases the card**,
 including a whole-card LittleFS and its logs, or an obsolete v1/v2 layout. It
-does nothing on any other card, on a card already on v3, or on a card with an
-unknown or damaged descriptor; a malformed value fails the build (ADR-0021):
+does nothing on any other card, on a card already on v3 whose catalogue boot
+can open, or on a card with an unknown or damaged descriptor. A v3 card whose
+catalogue is corrupt, or is refused for an unknown schema (including one written by newer firmware) or a missing table
+(podcasts offline), is erased and provisioned again. A malformed value fails
+the build (ADR-0021, ADR-0022):
 
 ```sh
 just sd-provision-v3 122265600 1b1234abcd target/sd-provision-v3.log /dev/cu.usbmodem101

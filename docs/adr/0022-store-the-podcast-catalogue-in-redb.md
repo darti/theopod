@@ -2,7 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-11-12
-- Related: t-133; supersedes ADR-0011; amends ADR-0017, ADR-0021
+- Related: t-133, t-152; supersedes ADR-0011; amends ADR-0017, ADR-0021
 - Spec: `docs/superpowers/specs/2026-11-12-redb-catalogue-design.md`
 
 ## Context
@@ -70,5 +70,6 @@ ranges or multi-key transactions; file-per-key designs lack atomicity.
 - Fixed bug: the ekv `unit_ids` range scan returned `Corrupt` on show-index keys; separate tables remove it.
 - Fresh flag: `format` writes the length record with a distinct magic (`THEORDBF`, CRC-covered); while fresh, `Catalogue::open` resets a non-empty redb file without redb's magic (a cut first open) to length 0 and creates it again; the flag is cleared by a new record generation once the tables are durable, and a region that is not fresh is never reset (ADR-0015).
 - Provisioning guard: `sd-provision-v3` (exact card id and size) also accepts a valid v3 card whose catalogue region is corrupt (no valid length record, or a non-empty file without redb's magic, checked on the raw sectors); a healthy v3 card stays `AlreadyV3`.
+- Amendment (t-152, 2026-11-27, user decision): the guard also accepts a v3 card whose `Catalogue::open` is refused as `Schema` (unknown schema, or a missing table), which keeps podcasts offline just like corruption and was recoverable only by a manual erase. Only the accepted set grows: the exact card id and size, a valid v3 descriptor and the other refusals (`Size`, `Card`, `Descriptor`, healthy `AlreadyV3`) are unchanged, and no other open error (`Storage`, `Full`, `Corrupt` from redb, `Disabled`) counts as evidence to erase. The firmware opens the catalogue only on the target card whose region already holds a redb database (`should_probe`; an empty region would get its tables created), then passes the open error to `Target::authorizes`, which stays pure and host-tested. The probe may let redb rewrite its own header, as every boot does; a refused card is otherwise untouched.
 - Real capacity: redb doubles its file when it grows, so a 72 MiB growth request exceeds the 64 MiB region near ~8,600 episodes and the catalogue reports `Full` (podcasts disabled). Pruned at 6,000 episodes (ADR-0030, t-148).
 - Boot recovery is independent of the episode count (t-149): it walks only `MediaStore::list_ids` (`UNIT_EXTENTS` for the unit store), no longer every episode (about 3.7 min at 5,000 episodes before this change). Every episode that needs repair owns a unit record: `reset_temp` (which now owns at least one unit even for an unknown length) and the `Downloading` transition are one commit, and `Available`/`Deleting` keep their published record until the unlink and `Reclaimed` share one commit. `Missing`, `Reclaimed` and `Queued` episodes own no media. A `Queued` episode marked read stays `Queued` (inert: never selected for download) instead of being normalised to `Missing` at boot. The walk is not self-healing: a catalogue and unit table that diverge by other means (an older firmware's `Downloading` row without a record, manual repair) are not repaired. A `MediaStore` whose state can diverge from the catalogue must list every identity it must repair.

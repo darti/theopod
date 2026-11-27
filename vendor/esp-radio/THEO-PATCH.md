@@ -4,6 +4,8 @@ Decision record: ADR-0027 (task t-172, 2026-11-15).
 
 - Upstream: crates.io `esp-radio` 1.0.0-beta.1, from esp-hal commit
   `f769fcd27056b0837febe4209f3bae78ed764561` (`esp-radio/`).
+- Upstream `.crate` sha256 (crates.io index `cksum`):
+  `50247f4e91000fc87661e77254126c74acc4535f822ee247f7778807202dc938`.
 - The copy is byte for byte the published crate, except for the files
   listed below. `.cargo_vcs_info.json` and `.cargo-ok` are dropped. The
   crate is licensed MIT OR Apache-2.0, like this repository, whose
@@ -40,6 +42,19 @@ has the same code.
   through `rustc --test` (the crate itself does not build on the host).
 - `src/wifi/mod.rs`: `WIFI_TX_INFLIGHT` is replaced by the gate, and
   `can_send()` asks it and logs a warning when it heals.
+
+## Drift check
+
+`just vendor-check` (`tools/check-vendor-esp-radio.sh`, CI job "Vendor
+check", t-178) downloads the upstream version above, checks its sha256,
+and fails if any file differs other than the paths that start a bullet of
+the "Change" section, this note and the dropped `.cargo_vcs_info.json`. It
+also fails if the root `Cargo.toml` no longer patches esp-radio to this
+directory. Start a "Change" bullet with each new patched file, or the
+check fails. On pull requests the allowed paths come from this note on
+the base branch, so a new patched file needs its bullet merged first. It
+checks which files differ, not their content: review
+edits to the listed files, and to this note, like any other code.
 
 ## Removal
 

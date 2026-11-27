@@ -223,6 +223,11 @@ audit:
 security-audit:
     RUSTUP_TOOLCHAIN=stable cargo audit --file Cargo.lock
 
+# Diff vendor/esp-radio against its crates.io release; only the files
+# THEO-PATCH.md names may differ (t-178).
+vendor-check:
+    tools/check-vendor-esp-radio.sh
+
 # Preview unreleased notes; release-plz owns the versioned CHANGELOG.md.
 changelog:
     git-cliff --config cliff.toml --unreleased

@@ -1,8 +1,9 @@
 //! redb tables of the podcast catalogue (ADR-0022). Values keep the byte
-//! layouts of schema 2; keys are typed, so ranges keep their order.
+//! layouts of schema 2 (schema 4 adds tables only); keys are typed, so ranges
+//! keep their order.
 use redb::TableDefinition;
 
-pub(crate) const SCHEMA: u64 = 3;
+pub(crate) const SCHEMA: u64 = 4;
 
 /// Episode id → episode record.
 pub(crate) const EPISODES: TableDefinition<u64, &[u8]> = TableDefinition::new("episodes");
@@ -28,9 +29,17 @@ pub(crate) const UNIT_EXTENTS: TableDefinition<u64, &[u8]> = TableDefinition::ne
 /// import order = id); written in the same transaction as the episode.
 pub(crate) const EVICTABLE: TableDefinition<(u8, i64, u64), ()> = TableDefinition::new("evictable");
 /// Prune index: one entry per episode without audio on the card (`Missing`,
-/// `Queued` or `Reclaimed`), keyed oldest first like `EVICTABLE`. Created on
-/// first write, so a database without it is valid (ADR-0030).
-pub(crate) const PRUNABLE: TableDefinition<(u8, i64, u64), ()> = TableDefinition::new("prunable");
+/// `Queued` or `Reclaimed`), keyed by subscription, then oldest first like
+/// `EVICTABLE` (ADR-0030, ADR-0032).
+pub(crate) const PRUNABLE: TableDefinition<(u64, u8, i64, u64), ()> =
+    TableDefinition::new("subscription_prunable");
+/// Subscription id → its episode count (pruned ones excluded; ADR-0032).
+pub(crate) const SUBSCRIPTION_EPISODES: TableDefinition<u64, u64> =
+    TableDefinition::new("subscription_episodes");
+/// (episode count, subscription id) → (): the subscriptions by size, so the
+/// largest is the last entry (ADR-0032).
+pub(crate) const SUBSCRIPTION_SIZES: TableDefinition<(u64, u64), ()> =
+    TableDefinition::new("subscription_sizes");
 /// Named `u64` counters, keyed by the constants below.
 pub(crate) const COUNTERS: TableDefinition<&str, u64> = TableDefinition::new("counters");
 

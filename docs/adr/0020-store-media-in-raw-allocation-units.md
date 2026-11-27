@@ -63,10 +63,12 @@ No region-layout (v1) card exists, so the layout may change without migration.
    - `MediaStore<F>` takes the catalogue; `LittlefsMedia` is removed. Raw data
      I/O uses the existing `theo_storage::littlefs::SectorIo` on the media
      `RegionIo`, not the `UnitDevice` trait the spec first proposed.
-   - Trust assumption: open checks the bitmap against the counter, not against
-     the records; records are trusted to match the bitmap (unlink refuses an
-     extent whose units are not allocated as `Corrupt`). Verifying records
-     against a shadow bitmap at open is tracked in t-135.
+   - Open verifies records against the bitmap (t-135, replaces the earlier
+     trust assumption): after the counter check, every unit in every unit
+     record must be allocated, each unit is consumed once (so overlapping
+     records fail), and no allocated unit may remain unowned. The check
+     clears bits as it consumes them, then reloads the pages, so it needs no
+     second bitmap in RAM. Any mismatch is `Corrupt` and refuses to mount.
    - Playback: `active()` is always false. Playback must not read units
      (`read_at`) before leases exist, or reclaim could free units being read.
 3. **Failure scopes** (`theo_storage::scope`). A bus fault (card or HAL error,

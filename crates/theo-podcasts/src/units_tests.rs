@@ -1,5 +1,5 @@
 use super::*;
-use crate::tables::{COUNTERS, SCHEMA_KEY, UNIT_PAGES, UNITS_USED};
+use crate::tables::{COUNTERS, SCHEMA_KEY, UNIT_EXTENTS, UNIT_PAGES, UNITS_USED};
 use crate::{catalogue::*, test_support::Image};
 use allocator_api2::alloc::Global;
 
@@ -269,6 +269,125 @@ fn bit_beyond_units_is_corrupt() {
     });
     let mut fresh = UnitTable::new_in(100, Global).unwrap();
     assert!(matches!(cat.load_units(&mut fresh), Err(Error::Corrupt)));
+}
+
+/// Persist a bitmap with `bits` set and `counter`, plus raw `records`, behind
+/// the catalogue's back, then try to load a 100-unit table.
+fn load_damaged(bits: &[u32], counter: u64, records: &[(u64, &[u8])]) -> Result<(), Error> {
+    let image = Image::new();
+    let mut cat = image.create();
+    let mut page = [0u8; 4096];
+    for &unit in bits {
+        page[(unit / 8) as usize] |= 1 << (unit % 8);
+    }
+    write_raw(&cat, |tx| {
+        tx.open_table(UNIT_PAGES)
+            .unwrap()
+            .insert(0, &page[..])
+            .unwrap();
+        tx.open_table(COUNTERS)
+            .unwrap()
+            .insert(UNITS_USED, counter)
+            .unwrap();
+        let mut table = tx.open_table(UNIT_EXTENTS).unwrap();
+        for &(id, bytes) in records {
+            table.insert(id, bytes).unwrap();
+        }
+    });
+    let mut fresh = UnitTable::new_in(100, Global).unwrap();
+    cat.load_units(&mut fresh)
+}
+
+fn record(extents: &[Extent]) -> std::vec::Vec<u8> {
+    let mut buf = [0; 4096];
+    let n = encode_record(RecordState::Published, 1, extents, &mut buf).unwrap();
+    buf[..n].to_vec()
+}
+
+// Regression (t-135): open checks the unit records against the bitmap and
+// refuses a bitmap that differs.
+#[test]
+fn records_matching_the_bitmap_load() {
+    let a = record(&[Extent { start: 0, count: 2 }]);
+    let b = record(&[Extent { start: 5, count: 1 }]);
+    load_damaged(&[0, 1, 5], 3, &[(1, &a), (2, &b)]).unwrap();
+}
+
+// Regression (t-135): a record owning a unit the bitmap shows free.
+#[test]
+fn record_unit_missing_from_bitmap_is_corrupt() {
+    let a = record(&[Extent { start: 5, count: 1 }]);
+    assert!(matches!(
+        load_damaged(&[], 0, &[(1, &a)]),
+        Err(Error::Corrupt)
+    ));
+    // Counter and bitmap agree on one unit, the record covers another.
+    assert!(matches!(
+        load_damaged(&[4], 1, &[(1, &a)]),
+        Err(Error::Corrupt)
+    ));
+}
+
+// Regression (t-135): a bitmap bit that no record owns (leaked unit).
+#[test]
+fn bitmap_bit_without_record_is_corrupt() {
+    let a = record(&[Extent { start: 0, count: 1 }]);
+    assert!(matches!(
+        load_damaged(&[0, 1], 2, &[(1, &a)]),
+        Err(Error::Corrupt)
+    ));
+    assert!(matches!(load_damaged(&[7], 1, &[]), Err(Error::Corrupt)));
+}
+
+// Regression (t-135): two records claiming the same unit.
+#[test]
+fn overlapping_records_are_corrupt() {
+    let a = record(&[Extent { start: 0, count: 2 }]);
+    let b = record(&[Extent { start: 1, count: 1 }]);
+    assert!(matches!(
+        load_damaged(&[0, 1], 2, &[(1, &a), (2, &b)]),
+        Err(Error::Corrupt)
+    ));
+}
+
+// Regression (t-135): a record extent running past the media region, and an
+// undecodable record, both refuse to mount.
+#[test]
+fn out_of_range_or_undecodable_record_is_corrupt() {
+    let past = record(&[Extent {
+        start: 99,
+        count: 2,
+    }]);
+    assert!(matches!(
+        load_damaged(&[99], 1, &[(1, &past)]),
+        Err(Error::Corrupt)
+    ));
+    assert!(matches!(
+        load_damaged(&[], 0, &[(1, &[9u8, 0, 0][..])]),
+        Err(Error::Corrupt)
+    ));
+}
+
+// Regression (t-135): a successful check restores the loaded bitmap and
+// counter (the check consumes the bitmap, then reloads it).
+#[test]
+fn successful_check_keeps_loaded_bitmap() {
+    let image = Image::new();
+    let mut cat = image.create();
+    let mut t = UnitTable::new_in(100, Global).unwrap();
+    cat.load_units(&mut t).unwrap();
+    let run = t.find_run(0, 3).unwrap();
+    t.claim(run);
+    let mut rec = [0; 4096];
+    let n = encode_record(RecordState::Temp, 0, &[run], &mut rec).unwrap();
+    cat.commit_units(&t, &[0], EpisodeId(9), Some(&rec[..n]))
+        .unwrap();
+    let mut again = UnitTable::new_in(100, Global).unwrap();
+    cat.load_units(&mut again).unwrap();
+    assert_eq!(again.used(), 3);
+    assert!((0..3).all(|u| again.is_allocated(u)));
+    assert!(!again.is_allocated(3));
+    assert_eq!(again.cursor(), 0);
 }
 
 #[test]

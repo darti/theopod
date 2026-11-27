@@ -315,8 +315,25 @@ impl<'a> RecordView<'a> {
     }
 }
 
+/// Read every bitmap page from `pages` into `table`; absent pages are empty.
+fn load_pages<A: Allocator>(
+    pages: &impl ReadableTable<u16, &'static [u8]>,
+    table: &mut UnitTable<A>,
+) -> Result<(), Error> {
+    for p in 0..table.pages() {
+        let page = table.page_mut(p);
+        match copy(pages, p, page)? {
+            Some(PAGE_BYTES) => (),
+            Some(_) => return Err(Error::Corrupt),
+            None => page.fill(0),
+        }
+    }
+    Ok(())
+}
+
 impl Catalogue {
-    /// Fill `table` from the catalogue, checking bitmap against the counter.
+    /// Fill `table` from the catalogue, checking the bitmap against the counter
+    /// and the unit records (every unit owned by exactly one record).
     pub(crate) fn load_units<A: Allocator>(
         &mut self,
         table: &mut UnitTable<A>,
@@ -331,17 +348,32 @@ impl Catalogue {
             .and_then(|n| u32::try_from(n).ok())
             .ok_or(Error::Corrupt)?;
         let pages = tx.open_table(UNIT_PAGES).map_err(db_error)?;
-        for p in 0..table.pages() {
-            let page = table.page_mut(p);
-            match copy(&pages, p, page)? {
-                Some(PAGE_BYTES) => (),
-                Some(_) => return Err(Error::Corrupt),
-                None => page.fill(0),
-            }
-        }
+        load_pages(&pages, table)?;
         if table.recount() != Some(counter) {
             return Err(Error::Corrupt);
         }
+        // Check the records against the bitmap without a second bitmap: each
+        // record unit must be allocated, and clearing it as it is consumed
+        // makes an overlap or a bit no record owns show up as a mismatch.
+        table.used = counter;
+        let records = tx.open_table(UNIT_EXTENTS).map_err(db_error)?;
+        for entry in records.iter().map_err(db_error)? {
+            let value = entry.map_err(db_error)?.1;
+            let view = RecordView::decode(value.value()).ok_or(Error::Corrupt)?;
+            for extent in view.extents() {
+                let end = extent.end().ok_or(Error::Corrupt)?;
+                for unit in extent.start..end {
+                    if !table.release(unit) {
+                        return Err(Error::Corrupt);
+                    }
+                }
+            }
+        }
+        if table.used != 0 {
+            return Err(Error::Corrupt);
+        }
+        // The check consumed the bitmap; load it again for use.
+        load_pages(&pages, table)?;
         table.used = counter;
         table.cursor = 0;
         Ok(())

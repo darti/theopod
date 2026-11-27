@@ -32,7 +32,11 @@ recover, but would also cut every download in progress.
 - The in-flight count moves to a small, dependency-free gate
   (`src/wifi/tx_gate.rs`). When it has held frames for 200 ms without a
   tx-done callback, it resets the count and logs a warning. A callback
-  normally arrives within milliseconds, failed frames included.
+  normally arrives within milliseconds, failed frames included. The
+  warning is rate-limited (t-179): the first heal is logged at once, the
+  others are counted and reported with the first heal after 60 s: about
+  one line per minute (at most 17 in 16 minutes, against 54 before).
+  Heals after the last line stay counted until the next heal reports them.
 - The gate is unit-tested on the host by `just test` (`rustc --test`; the
   crate itself only builds for the ESP target).
 - esp-radio's `log-04` feature is enabled so that the heal warning, and

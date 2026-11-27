@@ -16,7 +16,11 @@ use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 /// Time held at the limit, without a done callback, before healing.
 pub(crate) const HEAL_MS: u32 = 200;
 
-/// Sentinel for "not held": a real hold start is stored as at least 1.
+/// Window over which heals are aggregated into one warning (t-179).
+pub(crate) const REPORT_MS: u32 = 60_000;
+
+/// Sentinel for "not held" (and for `HealLog`, "no window yet"): a real
+/// start is stored as at least 1.
 const NOT_HELD: u32 = 0;
 
 /// Outcome of [`TxGate::admit`].
@@ -89,6 +93,53 @@ impl TxGate {
             }
         }
         self.held_since.store(NOT_HELD, Ordering::SeqCst);
+    }
+}
+
+/// Rate limit for the heal warning (t-179): the first heal is reported at
+/// once, later ones are counted and reported with the first heal after
+/// `REPORT_MS`, so frequent heals stay visible without flooding the log.
+///
+/// Heals after the last report stay counted until the next heal reports
+/// them: the count of the final window is unreported if heals stop.
+/// Safe for racing callers: one caller wins each window with a CAS and
+/// drains the count, so no heal is lost or reported twice.
+pub(crate) struct HealLog {
+    /// Start of the current window, `NOT_HELD` before the first heal.
+    window_start: AtomicU32,
+    /// Heals not yet reported.
+    pending: AtomicU32,
+}
+
+impl HealLog {
+    /// A log that has seen no heal.
+    pub(crate) const fn new() -> Self {
+        Self {
+            window_start: AtomicU32::new(NOT_HELD),
+            pending: AtomicU32::new(0),
+        }
+    }
+
+    /// Records a heal at `now_ms` (wrapping). Returns the number of heals to
+    /// report now, or `None` while the current window is still open.
+    pub(crate) fn record(&self, now_ms: u32) -> Option<u32> {
+        self.pending.fetch_add(1, Ordering::SeqCst);
+        let start = self.window_start.load(Ordering::SeqCst);
+        if start != NOT_HELD && now_ms.wrapping_sub(start) < REPORT_MS {
+            return None;
+        }
+        // Only the caller that moves the window reports; a racing caller's
+        // heal stays in `pending` for this report or the next one.
+        self.window_start
+            .compare_exchange(start, now_ms.max(1), Ordering::SeqCst, Ordering::SeqCst)
+            .ok()?;
+        Some(self.pending.swap(0, Ordering::SeqCst))
+    }
+
+    /// Heals counted but not yet reported.
+    #[cfg(test)]
+    pub(crate) fn unreported(&self) -> u32 {
+        self.pending.load(Ordering::SeqCst)
     }
 }
 

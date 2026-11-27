@@ -300,22 +300,26 @@ impl Disk {
         }
     }
 }
-impl theo_storage::littlefs::SectorIo for Disk {
+impl theo_storage::sector::SectorIo for Disk {
     fn read_sector(
         &mut self,
         sector: u32,
         out: &mut [u8; 512],
-    ) -> Result<(), littlefs_rust::Error> {
+    ) -> Result<(), theo_storage::sector::SectorError> {
         if sector >= self.limit {
-            return Err(littlefs_rust::Error::Io);
+            return Err(theo_storage::sector::SectorError::Io);
         }
         self.reads += 1;
         *out = self.sectors.get(&sector).copied().unwrap_or([0; 512]);
         Ok(())
     }
-    fn write_sector(&mut self, sector: u32, data: &[u8; 512]) -> Result<(), littlefs_rust::Error> {
+    fn write_sector(
+        &mut self,
+        sector: u32,
+        data: &[u8; 512],
+    ) -> Result<(), theo_storage::sector::SectorError> {
         if sector >= self.limit {
-            return Err(littlefs_rust::Error::Io);
+            return Err(theo_storage::sector::SectorError::Io);
         }
         self.writes += 1;
         self.highest = self.highest.max(Some(sector));
@@ -324,39 +328,51 @@ impl theo_storage::littlefs::SectorIo for Disk {
         }
         Ok(())
     }
-    fn write_sectors(&mut self, first: u32, data: &[u8]) -> Result<(), littlefs_rust::Error> {
+    fn write_sectors(
+        &mut self,
+        first: u32,
+        data: &[u8],
+    ) -> Result<(), theo_storage::sector::SectorError> {
         self.batches.push((first, data.len() / 512));
         for (i, sector) in data.as_chunks::<512>().0.iter().enumerate() {
             self.write_sector(first + i as u32, sector)?;
         }
         Ok(())
     }
-    fn sync(&mut self) -> Result<(), littlefs_rust::Error> {
+    fn sync(&mut self) -> Result<(), theo_storage::sector::SectorError> {
         Ok(())
     }
-    fn check(&mut self) -> Result<(), littlefs_rust::Error> {
+    fn check(&mut self) -> Result<(), theo_storage::sector::SectorError> {
         Ok(())
     }
 }
 // Lets a test keep the disk across a simulated reboot.
-impl theo_storage::littlefs::SectorIo for &mut Disk {
+impl theo_storage::sector::SectorIo for &mut Disk {
     fn read_sector(
         &mut self,
         sector: u32,
         out: &mut [u8; 512],
-    ) -> Result<(), littlefs_rust::Error> {
+    ) -> Result<(), theo_storage::sector::SectorError> {
         (**self).read_sector(sector, out)
     }
-    fn write_sector(&mut self, sector: u32, data: &[u8; 512]) -> Result<(), littlefs_rust::Error> {
+    fn write_sector(
+        &mut self,
+        sector: u32,
+        data: &[u8; 512],
+    ) -> Result<(), theo_storage::sector::SectorError> {
         (**self).write_sector(sector, data)
     }
-    fn write_sectors(&mut self, first: u32, data: &[u8]) -> Result<(), littlefs_rust::Error> {
+    fn write_sectors(
+        &mut self,
+        first: u32,
+        data: &[u8],
+    ) -> Result<(), theo_storage::sector::SectorError> {
         (**self).write_sectors(first, data)
     }
-    fn sync(&mut self) -> Result<(), littlefs_rust::Error> {
+    fn sync(&mut self) -> Result<(), theo_storage::sector::SectorError> {
         Ok(())
     }
-    fn check(&mut self) -> Result<(), littlefs_rust::Error> {
+    fn check(&mut self) -> Result<(), theo_storage::sector::SectorError> {
         Ok(())
     }
 }

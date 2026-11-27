@@ -2,7 +2,8 @@ use super::*;
 use crate::{
     LogBuffer,
     card_layout::CardLayout,
-    littlefs::{Geometry, SectorIo, SectorStorage},
+    littlefs::{Geometry, SectorStorage},
+    sector::SectorIo,
 };
 use alloc::{collections::BTreeMap, rc::Rc, vec, vec::Vec};
 use core::cell::RefCell;

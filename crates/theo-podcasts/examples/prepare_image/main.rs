@@ -5,7 +5,7 @@ use std::{
     io::{Read, Seek, SeekFrom, Write},
     path::Path,
 };
-use theo_storage::littlefs::SectorIo;
+use theo_storage::sector::SectorIo;
 struct ImageIo(File);
 impl ImageIo {
     #[cfg(test)]

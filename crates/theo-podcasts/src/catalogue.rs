@@ -6,7 +6,7 @@ use redb::{
     TableDefinition, WriteTransaction,
 };
 use sha2::{Digest, Sha256};
-use theo_storage::{littlefs::SectorIo, redb_backend::RegionBackend};
+use theo_storage::{redb_backend::RegionBackend, sector::SectorIo};
 
 pub const MAX_RECORD_BYTES: usize = 4096;
 pub const MAX_SCAN_RECORDS: usize = 16;

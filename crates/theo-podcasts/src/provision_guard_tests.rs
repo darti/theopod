@@ -174,7 +174,7 @@ fn authorizes_refuses_an_unknown_theosd_descriptor() {
 /// A v3 card's database region head: `format`ted, then `set_len(len)` and
 /// `file` written at the start of the redb file.
 fn catalogue(len: u64, file: [u8; 512]) -> CatalogueHead {
-    use theo_storage::{littlefs::SectorIo, redb_backend::RegionBackend, test_disk::TestDisk};
+    use theo_storage::{redb_backend::RegionBackend, sector::SectorIo, test_disk::TestDisk};
     let sectors = theo_storage::card_layout::DATABASE_SECTORS;
     let mut disk = TestDisk::new(sectors);
     RegionBackend::format(&mut disk).unwrap();

@@ -12,8 +12,8 @@ use littlefs_rust::Error;
 use theo_podcasts::provision::{CardId, CatalogueHead, Target, parse_request, provision_v3};
 use theo_storage::{
     card_layout::{CardLayout, DESCRIPTOR_SECTORS},
-    littlefs::SectorIo,
     scope::OWNER_MARGIN_MS,
+    sector::SectorIo,
 };
 
 pub(super) use theo_podcasts::provision::Request;

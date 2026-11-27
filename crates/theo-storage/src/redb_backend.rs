@@ -18,7 +18,7 @@
 
 use crate::{
     crc::crc32,
-    littlefs::{SECTOR_SIZE, SectorIo},
+    sector::{SECTOR_SIZE, SectorIo},
 };
 use alloc::rc::Rc;
 use core::{cell::RefCell, fmt};

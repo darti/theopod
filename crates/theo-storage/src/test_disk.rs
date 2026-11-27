@@ -6,7 +6,7 @@
 
 extern crate std;
 
-use crate::littlefs::{SECTOR_SIZE, SectorIo};
+use crate::sector::{SECTOR_SIZE, SectorIo};
 use alloc::rc::Rc;
 use core::cell::{RefCell, RefMut};
 use littlefs_rust::Error;

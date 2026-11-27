@@ -26,7 +26,7 @@ use crate::{
 };
 use allocator_api2::{alloc::Allocator, boxed::Box, vec::Vec};
 use core::fmt;
-use theo_storage::littlefs::SectorIo;
+use theo_storage::sector::{SectorError, SectorIo};
 
 pub use crate::units::UNIT_BYTES;
 
@@ -47,7 +47,7 @@ pub enum UnitError {
     /// The catalogue failed or holds inconsistent unit records; disables the store.
     Catalogue(Error),
     /// A raw sector write or sync failed; disables the store.
-    Device(littlefs_rust::Error),
+    Device(SectorError),
     /// Not enough free units; the store stays enabled.
     Full,
     /// Bad input or state (wrong id, empty or oversize chunk, an episode

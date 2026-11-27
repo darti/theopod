@@ -3,6 +3,8 @@
 use littlefs_rust::{Config, Error, Filesystem, OpenFlags, SeekFrom, Storage};
 
 use crate::LogBuffer;
+// Compatibility re-export, kept only for `src/device/sd_worker.rs` (owned by t-103); remove once it imports from `sector`.
+pub use crate::sector::{SECTOR_SIZE, SectorIo, whole_sectors};
 use allocator_api2::{
     alloc::{Allocator, Global},
     vec::Vec,
@@ -44,7 +46,6 @@ impl Drop for RequestGuard<'_> {
     }
 }
 
-pub const SECTOR_SIZE: usize = 512;
 pub const BLOCK_SIZE: u32 = 4096;
 const SECTORS_PER_BLOCK: u32 = BLOCK_SIZE / SECTOR_SIZE as u32;
 
@@ -123,49 +124,6 @@ impl Geometry {
         config.block_cycles = -1;
         config
     }
-}
-
-/// Synchronous sector contract. Implementations must wait for card completion
-/// and impose their own operation deadline. A failed write may damage its
-/// sector, but must not affect other sectors; sync orders completed writes.
-///
-/// Implement this trait to back [`SectorStorage`] with a block device.
-pub trait SectorIo {
-    fn read_sector(&mut self, sector: u32, out: &mut [u8; SECTOR_SIZE]) -> Result<(), Error>;
-    fn write_sector(&mut self, sector: u32, data: &[u8; SECTOR_SIZE]) -> Result<(), Error>;
-    /// Writes whole consecutive sectors from `first`, in order.
-    ///
-    /// `data` must be a nonzero number of whole sectors, else `Invalid`
-    /// before any I/O. The default writes them one by one; a device that
-    /// can write several sectors in one command (SD CMD25) overrides it.
-    /// A failure may leave any prefix of the batch written.
-    fn write_sectors(&mut self, first: u32, data: &[u8]) -> Result<(), Error> {
-        whole_sectors(data)?;
-        for (i, sector) in data.as_chunks::<SECTOR_SIZE>().0.iter().enumerate() {
-            self.write_sector(first.checked_add(i as u32).ok_or(Error::Invalid)?, sector)?;
-        }
-        Ok(())
-    }
-    fn sync(&mut self) -> Result<(), Error>;
-    /// Fail without device I/O once the current operation may not proceed.
-    ///
-    /// [`SectorStorage`] calls this before serving a cached sector, so cache
-    /// hits stay bounded by the same deadline and disable state as real I/O.
-    /// Devices without deadlines return `Ok(())`; wrappers must forward it.
-    fn check(&mut self) -> Result<(), Error>;
-    /// True when the device itself is unusable (not merely past a deadline).
-    /// Wrappers that share a device use it to decide whether to drop it.
-    fn device_failed(&self) -> bool {
-        true
-    }
-}
-
-/// Sectors in `data`, which must be a nonzero number of whole sectors.
-pub fn whole_sectors(data: &[u8]) -> Result<u32, Error> {
-    if data.is_empty() || !data.len().is_multiple_of(SECTOR_SIZE) {
-        return Err(Error::Invalid);
-    }
-    u32::try_from(data.len() / SECTOR_SIZE).map_err(|_| Error::Invalid)
 }
 
 // Enough for two metadata blocks plus a file tail and verification reads.
@@ -414,4 +372,21 @@ pub fn log_tail<S: Storage>(fs: &Filesystem<S>, name: &str) -> Result<LogTail, E
     result?;
     closed?;
     Ok(tail)
+}
+
+/// Format a fresh LittleFS on `log` and create an empty `/theo.log`.
+///
+/// Destructive: erases the volume, so callers must have authorized it first.
+/// The read cache comes from `allocator`.
+pub fn format_log_volume<D: SectorIo, A: Allocator>(
+    log: D,
+    geometry: Geometry,
+    allocator: A,
+) -> Result<(), Error> {
+    let mut storage = SectorStorage::try_new_in(log, geometry, allocator)?;
+    Filesystem::format(&mut storage, &geometry.config())?;
+    let fs = Filesystem::mount(storage, geometry.config()).map_err(|(error, _)| error)?;
+    fs.open("/theo.log", OpenFlags::WRITE | OpenFlags::CREATE)?
+        .close()?;
+    fs.unmount().map(drop)
 }

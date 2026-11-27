@@ -10,7 +10,7 @@ use core::cell::Cell;
 use core::cell::RefCell;
 use embassy_time::Instant;
 use littlefs_rust::Error;
-use theo_storage::littlefs::SectorIo;
+use theo_storage::sector::SectorIo;
 
 #[cfg(feature = "sd-check")]
 use super::STACK_SIZE;
@@ -212,7 +212,7 @@ impl SectorIo for CardIo {
     /// Writes up to [`STAGED_SECTORS`] sectors per multi-block command
     /// (CMD25, t-153): the card programs them together.
     fn write_sectors(&mut self, first: u32, data: &[u8]) -> Result<(), Error> {
-        theo_storage::littlefs::whole_sectors(data)?;
+        theo_storage::sector::whole_sectors(data)?;
         for (group, bytes) in data.chunks(STAGED_SECTORS * 512).enumerate() {
             let at = first
                 .checked_add((group * STAGED_SECTORS) as u32)

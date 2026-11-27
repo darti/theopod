@@ -13,12 +13,12 @@ redb.workspace = true
 theo-storage.workspace = true
 allocator-api2.workspace = true
 sha2.workspace = true
-littlefs-rust.workspace = true
 
 # Host builds (tests, clippy) use redb's std mode, as in theo-storage.
 [target.'cfg(not(target_os = "none"))'.dependencies]
 redb = { workspace = true, features = ["std"] }
 
 [dev-dependencies]
+littlefs-rust.workspace = true
 theo-storage = { workspace = true, features = ["test-disk"] }
 futures = { version = "0.3", features = ["executor"] }

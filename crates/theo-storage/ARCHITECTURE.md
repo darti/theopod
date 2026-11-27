@@ -19,6 +19,7 @@ Used by the firmware (`src/device/sd_worker.rs`) and `theo-podcasts`.
   and 8) and `RegionIo`, one device split into database, log and media
   ranges; `discover` is for host tooling. Layouts are created only by
   `theo_podcasts::provision::provision_v3` (ADR-0021/0022).
+- `sector.rs`: `SectorIo` (the device contract), `SectorError`, `SECTOR_SIZE`.
 - `scope.rs`: failure scopes, the owner's `after_failure`, `OWNER_MARGIN_MS`.
 - `redb_backend.rs`: `RegionBackend`, redb's `StorageBackend` over the
   database region. Two alternating length-record sectors (magic, generation,
@@ -46,7 +47,7 @@ client. Layout, unit store and failure scopes: ADR-0020.
 
 ## Extension points
 
-- Implement `littlefs::SectorIo` to back `SectorStorage` with a device. It
+- Implement `sector::SectorIo` to back `SectorStorage` with a device. It
   must wait for completion, enforce its own deadline, and fail `check()`
   once the current operation may not proceed (cache hits rely on it).
   Override `device_failed()` to return `false` for errors that leave the

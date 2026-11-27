@@ -350,6 +350,11 @@ impl Catalogue {
         }
         self.commit()
     }
+    /// Lower the episode cap so tests outside this module can prune.
+    #[cfg(test)]
+    pub(crate) fn set_limit(&mut self, limit: u64) {
+        self.limit = limit;
+    }
     /// Commits made since open. A request compares it before and after a
     /// step to keep to one commit per request (ADR-0022).
     pub(crate) fn commits(&self) -> u64 {
@@ -890,6 +895,16 @@ fn same_identity(a: EpisodeMetadata<'_>, b: EpisodeMetadata<'_>) -> bool {
         _ => false,
     }
 }
+/// An episode identity within its subscription: kind (1 = guid, 2 =
+/// enclosure) and SHA-256 of the guid or enclosure URL.
+pub(crate) type IdentityKey = (u8, [u8; 32]);
+/// The identity an upsert of `metadata` uses within its subscription. It
+/// hashes again what `upsert` hashed; one SHA-256 per item is cheap next to
+/// the item's commit.
+pub(crate) fn identity_key(metadata: EpisodeMetadata<'_>) -> Result<IdentityKey, Error> {
+    let (_, kind, hash) = identity(SubscriptionId(0), normalized(metadata)?);
+    Ok((kind, hash))
+}
 fn identity(subscription: SubscriptionId, metadata: EpisodeMetadata<'_>) -> (u64, u8, [u8; 32]) {
     (
         subscription.0,
@@ -903,6 +918,8 @@ mod codec;
 use codec::{decode, encode};
 #[path = "catalogue_prune.rs"]
 mod prune;
+#[path = "catalogue_sweep.rs"]
+mod sweep;
 pub use prune::MAX_EPISODES;
 #[cfg(test)]
 #[path = "catalogue_create_tests.rs"]

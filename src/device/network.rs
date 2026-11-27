@@ -550,6 +550,9 @@ impl theo_podcasts::body::ChunkSink for Store<'_> {
 fn heapless_url(url: &str) -> Result<heapless::String<MAX_URL_BYTES>, Error> {
     url.try_into().map_err(|_| Error::Protocol)
 }
+/// Sweep steps one sync may take: 16 identities each, so 64 Ki identities,
+/// ten times the episode cap (ADR-0031).
+const MAX_SWEEP_STEPS: u32 = 4096;
 async fn synchronize(stack: embassy_net::Stack<'_>, buffers: &mut Buffers) -> Result<(), Error> {
     let mut after = None;
     loop {
@@ -564,7 +567,21 @@ async fn synchronize(stack: embassy_net::Stack<'_>, buffers: &mut Buffers) -> Re
         domain(Command::SyncStart(subscription.id, subscription.feed)).await?;
         loop {
             transfer(stack, &url, Purpose::Feed, buffers).await?;
-            match domain(Command::SyncEnd).await? {
+            // A full walk ends with bounded tombstone-sweep steps before its
+            // checkpoint (ADR-0031). Past the cap the sync fails: its
+            // checkpoint is not saved, so the next sync sweeps again from
+            // where the deletions left off.
+            let mut reply = domain(Command::SyncEnd).await?;
+            let mut steps = 0;
+            while matches!(reply, Reply::Pending) {
+                steps += 1;
+                if steps > MAX_SWEEP_STEPS {
+                    log::warn!("podcasts: tombstone sweep exceeded {MAX_SWEEP_STEPS} steps");
+                    return Err(Error::Protocol);
+                }
+                reply = domain(Command::SyncEnd).await?;
+            }
+            match reply {
                 Reply::Url(next) => url = next,
                 Reply::Synced(progress) => {
                     log::info!(

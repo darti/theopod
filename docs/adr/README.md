@@ -32,3 +32,4 @@
 | [0028](0028-fuzz-and-patch-opencore-aacdec-on-the-host.md) | Fuzz opencore-aacdec on the host and patch what it finds | Accepted |
 | [0029](0029-resume-interrupted-audio-downloads-within-a-boot.md) | Resume interrupted audio downloads within a boot | Accepted; amends ADR-0017 |
 | [0030](0030-prune-episodes-before-the-catalogue-fills.md) | Prune episodes before the catalogue fills | Accepted |
+| [0031](0031-collect-tombstones-after-a-complete-sync.md) | Collect tombstones after a complete sync | Accepted |

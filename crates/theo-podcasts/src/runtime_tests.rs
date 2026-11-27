@@ -43,7 +43,7 @@ fn owner_imports_downloads_and_marks_read_through_bounded_commands() {
         let xml = b"<rss><channel><item><guid>one</guid><title>Episode</title><enclosure url=\"https://media.radiofrance-podcast.net/audio.mp3\" length=\"4\"/></item></channel></rss>";
         sync_all(&mut owner, xml, &mut scratch).await;
         assert!(matches!(
-            owner.handle(Command::SyncEnd, &mut scratch).await.unwrap(),
+            end_sync(&mut owner, &mut scratch).await,
             Reply::Synced(_)
         ));
         let Reply::Job { job: Some(job), .. } = owner
@@ -247,7 +247,7 @@ fn a_second_sync_start_cannot_replace_an_unfinished_import() {
             Some(Error::Invalid)
         );
         assert!(matches!(
-            owner.handle(Command::SyncEnd, &mut scratch).await.unwrap(),
+            end_sync(&mut owner, &mut scratch).await,
             Reply::Synced(_)
         ));
     });
@@ -281,7 +281,7 @@ fn owner_exposes_committed_validators_and_accepts_not_modified() {
         let xml = b"<rss><channel></channel></rss>";
         sync_all(&mut owner, xml, &mut scratch).await;
         assert!(matches!(
-            owner.handle(Command::SyncEnd, &mut scratch).await.unwrap(),
+            end_sync(&mut owner, &mut scratch).await,
             Reply::Synced(_)
         ));
         owner
@@ -776,5 +776,100 @@ fn refused_reset_on_a_restart_recovers_the_episode() {
             cat.get(id, &mut scratch).unwrap().unwrap().state.audio,
             AudioState::Queued
         );
+    });
+}
+
+/// Send `SyncEnd` until it is no longer `Pending` (sweep steps, ADR-0031).
+async fn end_sync<M: MediaStore>(owner: &mut Runtime<M>, scratch: &mut [u8]) -> Reply {
+    loop {
+        match owner.handle(Command::SyncEnd, scratch).await.unwrap() {
+            Reply::Pending => {}
+            reply => return reply,
+        }
+    }
+}
+
+/// Start a sync of subscription 1 and feed it `xml` as one 200 page.
+async fn walk_feed<M: MediaStore>(owner: &mut Runtime<M>, xml: &[u8], scratch: &mut [u8]) {
+    owner
+        .handle(
+            Command::SyncStart(SubscriptionId(1), FEED.try_into().unwrap()),
+            scratch,
+        )
+        .await
+        .unwrap();
+    owner
+        .handle(
+            Command::SyncHeaders {
+                status: 200,
+                etag: Default::default(),
+                modified: Default::default(),
+            },
+            scratch,
+        )
+        .await
+        .unwrap();
+    sync_all(owner, xml, scratch).await;
+}
+
+#[test]
+fn sync_end_sweeps_in_pending_steps_before_its_checkpoint() {
+    // Regression (t-188): `SyncEnd` answers `Pending` while it sweeps, one
+    // commit at most per request, keeps the session, and a later sync
+    // re-imports the tombstones the sweep forgot.
+    block_on(async {
+        let image = Image::new();
+        let mut owner = Runtime::new(image.create(), HostMedia::new(root_for(&image)));
+        owner.catalogue.set_limit(1);
+        let mut scratch = [0; MAX_RECORD_BYTES];
+        let item = |g: &str| {
+            std::format!(
+                "<item><guid>{g}</guid><title>t</title><enclosure url=\"https://media.radiofrance-podcast.net/{g}.mp3\"/></item>"
+            )
+        };
+        let all = std::format!(
+            "<rss><channel>{}{}{}</channel></rss>",
+            item("a"),
+            item("b"),
+            item("c")
+        );
+        let last = std::format!("<rss><channel>{}</channel></rss>", item("c"));
+        walk_feed(&mut owner, all.as_bytes(), &mut scratch).await;
+        assert!(matches!(
+            owner.handle(Command::SyncEnd, &mut scratch).await,
+            Ok(Reply::Pending)
+        ));
+        assert_eq!(
+            owner
+                .handle(
+                    Command::SyncStart(SubscriptionId(1), FEED.try_into().unwrap()),
+                    &mut scratch
+                )
+                .await
+                .err(),
+            Some(Error::Invalid),
+            "a sweeping session stays active"
+        );
+        assert!(matches!(
+            end_sync(&mut owner, &mut scratch).await,
+            Reply::Synced(_)
+        ));
+        // a and b are tombstones; the feed now lists only c.
+        walk_feed(&mut owner, last.as_bytes(), &mut scratch).await;
+        loop {
+            let commits = owner.catalogue.commits();
+            let reply = owner.handle(Command::SyncEnd, &mut scratch).await.unwrap();
+            assert!(owner.catalogue.commits() - commits <= 1);
+            match reply {
+                Reply::Pending => (),
+                Reply::Synced(_) => break,
+                _ => panic!("unexpected reply"),
+            }
+        }
+        walk_feed(&mut owner, all.as_bytes(), &mut scratch).await;
+        let Reply::Synced(progress) = end_sync(&mut owner, &mut scratch).await else {
+            panic!("not synced")
+        };
+        assert_eq!(progress.created, 2, "a and b were forgotten");
     });
 }

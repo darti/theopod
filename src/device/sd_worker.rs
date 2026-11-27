@@ -599,6 +599,20 @@ pub async fn test_rotation(storage: &mut SdStorage) -> Result<(), Error> {
     Ok(())
 }
 
+/// Appends one isolated 2 KiB batch to the `sdtest2` rotation files.
+///
+/// `sd-check stress` calls it whenever the storage task is idle, so the card
+/// writes almost continuously while podcast and log requests keep priority:
+/// a physical power cut or card removal then lands on an active write (t-103).
+#[cfg(feature = "sd-check")]
+pub async fn stress_append(storage: &mut SdStorage) -> Result<(), Error> {
+    let mut payload = alloc::vec![b'S'; 2048];
+    payload[2047] = b'\n';
+    storage
+        .request_done(Command::Append(payload, LogTarget::Rotation), IO_BUDGET)
+        .await
+}
+
 type MediaStorage = SectorStorage<MediaIo, &'static esp_alloc::ExternalMemory>;
 type MediaFs = Filesystem<MediaStorage>;
 type UnitStore = UnitMedia<RegionIo<CardIo>, &'static esp_alloc::ExternalMemory>;

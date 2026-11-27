@@ -1,6 +1,7 @@
 //! HAL-independent SD storage: log buffering, LittleFS sectors, regions, redb backend.
 //!
 //! - [`LogBuffer`], [`rotation_needed`]: bounded, recoverable log batches.
+//! - [`sector`]: the `SectorIo` device contract.
 //! - [`littlefs`]: `SectorStorage`, `mount_for_writes`, `append_log`, `log_tail`.
 //! - [`card_layout`], [`regions`]: checked database/media card regions.
 //! - [`scope`]: which storage scope a failed request disables.
@@ -18,6 +19,7 @@ pub mod littlefs;
 pub mod redb_backend;
 pub mod regions;
 pub mod scope;
+pub mod sector;
 #[cfg(any(test, feature = "test-disk"))]
 pub mod test_disk;
 

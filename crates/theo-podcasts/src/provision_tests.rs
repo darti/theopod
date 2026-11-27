@@ -2,7 +2,7 @@ use super::*;
 use crate::catalogue::Catalogue;
 use allocator_api2::alloc::Global;
 use std::collections::HashMap;
-use theo_storage::littlefs::Geometry;
+use theo_storage::littlefs::{Geometry, SectorStorage};
 
 /// Smallest convenient v3 card: database, log and 66 media units.
 const CARD: u64 = 300_000;

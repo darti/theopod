@@ -3,7 +3,8 @@ use alloc::{rc::Rc, vec, vec::Vec};
 use core::cell::RefCell;
 use littlefs_rust::{Error, Filesystem, Storage};
 
-use crate::littlefs::{Geometry, SectorIo, SectorStorage, append_log, log_tail};
+use crate::littlefs::{Geometry, SectorStorage, append_log, log_tail};
+use crate::sector::SectorIo;
 
 #[derive(Clone)]
 struct Disk(Rc<RefCell<Image>>);

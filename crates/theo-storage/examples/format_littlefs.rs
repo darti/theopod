@@ -6,7 +6,10 @@ use std::{
     fs::{File, OpenOptions},
     io::{Read, Seek, SeekFrom, Write},
 };
-use theo_storage::littlefs::{Geometry, SectorIo, SectorStorage};
+use theo_storage::{
+    littlefs::{Geometry, SectorStorage},
+    sector::SectorIo,
+};
 
 struct HostDisk(File);
 impl SectorIo for HostDisk {

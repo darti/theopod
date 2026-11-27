@@ -9,12 +9,12 @@
 //! card the firmware may erase. Nothing else may call it.
 use allocator_api2::alloc::Allocator;
 use core::fmt;
-use littlefs_rust::{Error, Filesystem, OpenFlags};
 use theo_storage::{
     card_layout::{CardLayout, DESCRIPTOR_SECTORS, LayoutError},
-    littlefs::{Geometry, SectorIo, SectorStorage},
+    littlefs::{Geometry, format_log_volume},
     redb_backend::RegionBackend,
     regions::split,
+    sector::{SectorError as Error, SectorIo},
 };
 
 pub use crate::provision_guard::{CardId, CatalogueHead, Refusal, Request, Target, parse_request};
@@ -72,7 +72,7 @@ pub fn provision_v3<D: SectorIo, A: Allocator + Clone>(
     device.sync().map_err(ProvisionError::Unpublish)?;
     {
         let (mut db, log, _media) = split(Deferred(&mut *device), layout);
-        format_log(log, geometry, allocator).map_err(ProvisionError::Log)?;
+        format_log_volume(log, geometry, allocator).map_err(ProvisionError::Log)?;
         // An empty database: the first catalogue open creates the tables.
         RegionBackend::format(&mut db).map_err(ProvisionError::Database)?;
     }
@@ -86,19 +86,6 @@ pub fn provision_v3<D: SectorIo, A: Allocator + Clone>(
         device.sync().map_err(ProvisionError::Publish)?;
     }
     Ok(layout)
-}
-
-fn format_log<D: SectorIo, A: Allocator>(
-    log: D,
-    geometry: Geometry,
-    allocator: A,
-) -> Result<(), Error> {
-    let mut storage = SectorStorage::try_new_in(log, geometry, allocator)?;
-    Filesystem::format(&mut storage, &geometry.config())?;
-    let fs = Filesystem::mount(storage, geometry.config()).map_err(|(error, _)| error)?;
-    fs.open("/theo.log", OpenFlags::WRITE | OpenFlags::CREATE)?
-        .close()?;
-    fs.unmount().map(drop)
 }
 
 /// Lends the device to the region split and defers its syncs.

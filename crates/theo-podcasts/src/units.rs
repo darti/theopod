@@ -17,7 +17,7 @@ use redb::{ReadableDatabase, ReadableTable};
 
 pub(crate) use theo_storage::card_layout::UNIT_SECTORS;
 /// Bytes in one raw sector of the media region.
-pub(crate) const SECTOR: usize = theo_storage::littlefs::SECTOR_SIZE;
+pub(crate) const SECTOR: usize = theo_storage::sector::SECTOR_SIZE;
 /// Bytes in one media allocation unit (1 MiB).
 pub const UNIT_BYTES: u64 = UNIT_SECTORS as u64 * SECTOR as u64;
 /// Units covered by one bitmap page.

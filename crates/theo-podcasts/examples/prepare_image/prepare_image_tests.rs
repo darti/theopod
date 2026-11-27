@@ -32,8 +32,8 @@ fn new_image_publishes_only_initialized_catalogue_and_media() {
     let mut io = ImageIo::open(&path).unwrap();
     let mut first = [0; 512];
     let mut second = [0; 512];
-    theo_storage::littlefs::SectorIo::read_sector(&mut io, 0, &mut first).unwrap();
-    theo_storage::littlefs::SectorIo::read_sector(&mut io, 8, &mut second).unwrap();
+    theo_storage::sector::SectorIo::read_sector(&mut io, 0, &mut first).unwrap();
+    theo_storage::sector::SectorIo::read_sector(&mut io, 8, &mut second).unwrap();
     let layout = theo_storage::card_layout::CardLayout::select(&first, &second, CARD)
         .unwrap()
         .unwrap();
@@ -73,8 +73,8 @@ fn prepared_image_has_v3_log_region_and_empty_units() {
     let mut io = ImageIo::open(&path).unwrap();
     let mut first = [0; 512];
     let mut second = [0; 512];
-    theo_storage::littlefs::SectorIo::read_sector(&mut io, 0, &mut first).unwrap();
-    theo_storage::littlefs::SectorIo::read_sector(&mut io, 8, &mut second).unwrap();
+    theo_storage::sector::SectorIo::read_sector(&mut io, 0, &mut first).unwrap();
+    theo_storage::sector::SectorIo::read_sector(&mut io, 8, &mut second).unwrap();
     let layout = CardLayout::select(&first, &second, CARD).unwrap().unwrap();
     assert_eq!(layout.log().sectors(), LOG_SECTORS);
     let (db, log, media) = theo_storage::regions::split(io, layout);

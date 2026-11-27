@@ -1,0 +1,37 @@
+name: Vendor check
+
+# The vendored esp-radio must match its crates.io release except for the
+# files THEO-PATCH.md names (t-178, ADR-0027).
+on:
+  pull_request:
+    paths:
+      - 'vendor/esp-radio/**'
+      - 'tools/check-vendor-esp-radio.sh'
+      - 'Cargo.toml'
+      - '.github/workflows/vendor-check.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'vendor/esp-radio/**'
+      - 'tools/check-vendor-esp-radio.sh'
+      - 'Cargo.toml'
+      - '.github/workflows/vendor-check.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  esp-radio:
+    name: esp-radio matches upstream
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          # The base commit holds the allowlist on pull requests.
+          fetch-depth: 0
+      - run: tools/check-vendor-esp-radio.sh
+        env:
+          ALLOWLIST_REF: ${{ github.event.pull_request.base.sha }}

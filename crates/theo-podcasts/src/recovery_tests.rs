@@ -4,6 +4,34 @@ use crate::{
     test_support::Image,
 };
 use futures::executor::block_on;
+/// Recover every episode in the catalogue, then every media owner: the
+/// pre-t-149 boot walk. `HostMedia` keeps its files apart from the
+/// catalogue, so its states can diverge from them (a deleted file, an unlink
+/// whose commit failed), which the unit store's atomic records cannot do;
+/// these tests check `recover_one` on such states.
+async fn recover_db(
+    cat: &mut Catalogue,
+    media: &mut HostMedia,
+    scratch: &mut [u8],
+) -> Result<(), MediaError<std::io::Error>> {
+    let mut after = None;
+    loop {
+        let mut ids = heapless::Vec::<EpisodeId, MAX_SCAN_RECORDS>::new();
+        let page = cat
+            .scan(after, scratch, |e| {
+                let _ = ids.push(e.id);
+            })
+            .map_err(MediaError::Catalogue)?;
+        for id in ids {
+            recover_one(cat, media, id, scratch).await?;
+        }
+        if !page.has_more {
+            break;
+        }
+        after = page.resume_after;
+    }
+    recover_all(cat, media, scratch).await
+}
 #[test]
 fn unfinished_files_are_removed_by_local_id_and_read_state_survives() {
     // Regression (t-109): a reset must not publish a partial or requeue read audio.
@@ -87,7 +115,7 @@ fn deleting_intent_survives_each_unlink_boundary_without_unread_loss() {
             drop(cat);
             let mut cat = image.reopen();
             media.reopen();
-            recover_all(&mut cat, &mut media, &mut scratch)
+            recover_db(&mut cat, &mut media, &mut scratch)
                 .await
                 .unwrap();
             let old_state = cat.get(old, &mut scratch).unwrap().unwrap().state;
@@ -144,7 +172,7 @@ fn missing_or_short_completed_file_is_not_available_and_active_files_are_protect
         std::fs::write(media.path(short, false), b"cut").unwrap();
         std::fs::remove_file(media.path(absent, false)).unwrap();
         media.active.insert(active.0);
-        recover_all(&mut cat, &mut media, &mut scratch)
+        recover_db(&mut cat, &mut media, &mut scratch)
             .await
             .unwrap();
         assert_eq!(
@@ -191,7 +219,7 @@ fn failure_after_unlink_retains_read_deletion_intent_until_reopen() {
         let e = cat.get(id, &mut scratch).unwrap().unwrap();
         assert!(e.state.read);
         assert_eq!(e.state.audio, AudioState::Deleting);
-        recover_all(&mut cat, &mut media, &mut scratch)
+        recover_db(&mut cat, &mut media, &mut scratch)
             .await
             .unwrap();
         let e = cat.get(id, &mut scratch).unwrap().unwrap();

@@ -69,29 +69,20 @@ async fn reset_identity<M: MediaStore>(
     }
     Ok(())
 }
+
+/// Recover every identity that owns media, in time independent of the
+/// episode count.
+///
+/// Only `MediaStore::list_ids` is walked (`UNIT_EXTENTS` for the unit store,
+/// ADR-0022). Every episode that needs repair owns a unit record:
+/// `reset_temp` (which owns at least one unit) and the `Downloading`
+/// transition share one commit, and `Available`/`Deleting` keep their
+/// published record until the unlink and `Reclaimed` share another.
 pub async fn recover_all<M: MediaStore>(
     cat: &mut Catalogue,
     media: &mut M,
     scratch: &mut [u8],
 ) -> Result<(), MediaError<M::Error>> {
-    let mut after = None;
-    loop {
-        let mut ids = heapless::Vec::<EpisodeId, MAX_SCAN_RECORDS>::new();
-        let page = cat
-            .scan(after, scratch, |e| {
-                let _ = ids.push(e.id);
-            })
-            .map_err(MediaError::Catalogue)?;
-        for id in ids {
-            recover_one(cat, media, id, scratch).await?;
-        }
-        if !page.has_more {
-            break;
-        }
-        after = page.resume_after;
-    }
-    // Include orphan files without DB entries; persisted intent may have failed
-    // before first file creation, so DB traversal alone is insufficient.
     let mut after = None;
     let mut ids = [EpisodeId(0); FILE_PAGE];
     loop {
@@ -106,7 +97,7 @@ pub async fn recover_all<M: MediaStore>(
             break;
         }
         for &id in &ids[..n] {
-            if after.is_some_and(|a| id.0 <= a.0) {
+            if id.0 == 0 || after.is_some_and(|a| id.0 <= a.0) {
                 return Err(MediaError::InvalidState);
             }
             recover_one(cat, media, id, scratch).await?;
@@ -119,13 +110,13 @@ pub async fn recover_all<M: MediaStore>(
 #[path = "recovery_tests.rs"]
 mod tests;
 
-/// Incremental mount recovery. Each admission scans one bounded page or repairs
-/// one identity, so the owner can admit logs and shutdown between units.
+/// Incremental mount recovery. Each admission lists one bounded page of
+/// media-owning ids or repairs one identity, so the owner can admit logs and
+/// shutdown between units. Terminal episodes without media are never visited.
 pub struct Recovery {
     after: Option<EpisodeId>,
     ids: heapless::Vec<EpisodeId, FILE_PAGE>,
     at: usize,
-    files: bool,
     end: bool,
 }
 impl Default for Recovery {
@@ -139,7 +130,6 @@ impl Recovery {
             after: None,
             ids: heapless::Vec::new(),
             at: 0,
-            files: false,
             end: false,
         }
     }
@@ -155,41 +145,26 @@ impl Recovery {
             return Ok(false);
         }
         if self.end {
-            if self.files {
-                return Ok(true);
-            }
-            self.files = true;
-            self.after = None;
-            self.end = false;
+            return Ok(true);
         }
         self.ids.clear();
         self.at = 0;
-        if self.files {
-            let mut ids = [EpisodeId(0); FILE_PAGE];
-            let n = media
-                .list_ids(cat, self.after, &mut ids)
-                .await
-                .map_err(MediaError::Media)?;
-            if n > FILE_PAGE {
+        let mut ids = [EpisodeId(0); FILE_PAGE];
+        let n = media
+            .list_ids(cat, self.after, &mut ids)
+            .await
+            .map_err(MediaError::Media)?;
+        if n > FILE_PAGE {
+            return Err(MediaError::InvalidState);
+        }
+        for &id in &ids[..n] {
+            if id.0 == 0 || self.after.is_some_and(|a| id.0 <= a.0) {
                 return Err(MediaError::InvalidState);
             }
-            for &id in &ids[..n] {
-                if id.0 == 0 || self.after.is_some_and(|a| id.0 <= a.0) {
-                    return Err(MediaError::InvalidState);
-                }
-                self.ids.push(id).map_err(|_| MediaError::InvalidState)?;
-                self.after = Some(id);
-            }
-            self.end = n == 0;
-        } else {
-            let page = cat
-                .scan(self.after, scratch, |e| {
-                    let _ = self.ids.push(e.id);
-                })
-                .map_err(MediaError::Catalogue)?;
-            self.after = page.resume_after;
-            self.end = !page.has_more;
+            self.ids.push(id).map_err(|_| MediaError::InvalidState)?;
+            self.after = Some(id);
         }
+        self.end = n == 0;
         Ok(false)
     }
 }

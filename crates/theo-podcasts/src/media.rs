@@ -81,7 +81,9 @@ pub trait MediaStore {
         cat: &mut Catalogue,
         id: EpisodeId,
     ) -> Result<Option<u64>, Self::Error>;
-    /// Bounded sorted unique local IDs holding temporary or published audio.
+    /// Bounded sorted unique local IDs that may need boot recovery: every
+    /// identity holding temporary or published audio, and any other whose
+    /// catalogue state could need repair (recovery visits no other episode).
     /// Zero means end; resume strictly after the last returned ID. Never
     /// remote paths.
     async fn list_ids(

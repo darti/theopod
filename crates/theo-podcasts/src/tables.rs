@@ -6,7 +6,9 @@ pub(crate) const SCHEMA: u64 = 3;
 
 /// Episode id → episode record.
 pub(crate) const EPISODES: TableDefinition<u64, &[u8]> = TableDefinition::new("episodes");
-/// (subscription, 1 = guid / 2 = enclosure, SHA-256) → episode id.
+/// (subscription, 1 = guid / 2 = enclosure, SHA-256) → episode id. An entry
+/// whose episode is gone is a tombstone (ADR-0030), collected once a
+/// complete sync no longer lists it (ADR-0031).
 pub(crate) const EPISODE_IDENTITY: TableDefinition<(u64, u8, [u8; 32]), u64> =
     TableDefinition::new("episode_identity");
 /// Episode id → published audio length (bytes, non-zero).

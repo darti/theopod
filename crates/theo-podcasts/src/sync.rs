@@ -1,6 +1,6 @@
 //! Replayable bounded history reconciliation and durable all-pages checkpoints.
 use crate::{
-    catalogue::{Catalogue, Error, MAX_URL_BYTES, SubscriptionId},
+    catalogue::{Catalogue, Error, IdentityKey, MAX_URL_BYTES, SubscriptionId, identity_key},
     radio_france::{FeedError, RadioFranceFeed},
 };
 use heapless::String;
@@ -45,6 +45,9 @@ enum Phase {
     Body,
     NotModified,
     Ready,
+    /// Full walk done, checkpoint not yet saved: collecting tombstones
+    /// (ADR-0031). Back to `Ready` once done.
+    Sweep,
     Failed,
 }
 pub struct SyncSession {
@@ -57,6 +60,10 @@ pub struct SyncSession {
     page: u32,
     progress: Progress,
     unchanged: bool,
+    /// The identities this sync met.
+    seen: Seen,
+    /// The sweep's next step starts after this identity.
+    cursor: Option<IdentityKey>,
 }
 impl SyncSession {
     pub fn new(
@@ -86,10 +93,12 @@ impl SyncSession {
             page: 0,
             progress: Progress::default(),
             unchanged: false,
+            seen: Seen::new(),
+            cursor: None,
         }
     }
     /// Starts a sync in place, as [`Self::new`] would; on error `self` is
-    /// unchanged. Building a new session is a 20 KB stack temporary, which
+    /// unchanged. Building a new session is a 28 KB stack temporary, which
     /// core1's SD owner cannot afford (t-133).
     pub fn restart(
         &mut self,
@@ -121,6 +130,8 @@ impl SyncSession {
             page,
             progress,
             unchanged,
+            seen,
+            cursor,
         } = self;
         *session_id = id;
         *session_url = url;
@@ -142,6 +153,8 @@ impl SyncSession {
         *page = 0;
         *progress = Progress::default();
         *unchanged = false;
+        seen.reset(generation);
+        *cursor = None;
         Ok(())
     }
     pub fn url(&self) -> &str {
@@ -215,6 +228,8 @@ impl SyncSession {
                 let outcome = cat
                     .upsert(self.id, item.metadata(), scratch)
                     .map_err(SyncError::Catalogue)?;
+                self.seen
+                    .insert(&identity_key(item.metadata()).map_err(SyncError::Catalogue)?);
                 self.progress.entries += 1;
                 self.progress.created += u64::from(outcome.created);
                 self.progress.queued += u64::from(outcome.queued);
@@ -260,8 +275,9 @@ impl SyncSession {
             }
         }
     }
-    /// Saves the checkpoint.
     /// Saves the checkpoint once: the session is then spent until `restart`.
+    /// Sweep first ([`Self::begin_sweep`]): an interrupted sweep then leaves
+    /// the old checkpoint, so the next sync walks and sweeps again.
     pub fn complete(
         &mut self,
         cat: &mut Catalogue,
@@ -270,12 +286,62 @@ impl SyncSession {
         if self.phase != Phase::Ready {
             return Err(SyncError::Incomplete);
         }
+        self.phase = Phase::Failed;
         if !self.unchanged {
             cat.save_sync_checkpoint(self.id, &self.checkpoint, scratch)
                 .map_err(SyncError::Catalogue)?;
         }
-        self.phase = Phase::Failed;
         Ok(self.progress)
+    }
+    /// After the last page, start the tombstone sweep if this walk can
+    /// vouch for the feed: it was not a 304, met at least one item, and the
+    /// seen set is within its rated load. Returns whether it started.
+    pub fn begin_sweep(&mut self) -> bool {
+        let inserted = self.seen.inserted();
+        let trusted = !self.unchanged && inserted > 0 && inserted <= SEEN_CAPACITY;
+        if self.phase != Phase::Ready || !trusted {
+            return false;
+        }
+        self.phase = Phase::Sweep;
+        self.cursor = None;
+        true
+    }
+    /// Whether [`Self::sweep`] has steps left.
+    pub fn sweeping(&self) -> bool {
+        self.phase == Phase::Sweep
+    }
+    /// Whether the last page is done and [`Self::complete`] may run.
+    pub fn ready(&self) -> bool {
+        self.phase == Phase::Ready
+    }
+    /// What the sync imported.
+    pub fn progress(&self) -> Progress {
+        self.progress
+    }
+    /// One bounded step (at most one commit) of the tombstone sweep: forget
+    /// pruned episodes this full walk no longer listed (ADR-0031). Returns
+    /// true once the sweep is done; [`Self::complete`] is then due. An error
+    /// spends the session.
+    pub fn sweep(&mut self, cat: &mut Catalogue) -> Result<bool, SyncError> {
+        if self.phase != Phase::Sweep {
+            return Err(SyncError::Protocol);
+        }
+        self.phase = Phase::Failed;
+        let seen = &self.seen;
+        match cat
+            .sweep_tombstones(self.id, self.cursor, |key| seen.contains(key))
+            .map_err(SyncError::Catalogue)?
+        {
+            Some(cursor) => {
+                self.cursor = Some(cursor);
+                self.phase = Phase::Sweep;
+                Ok(false)
+            }
+            None => {
+                self.phase = Phase::Ready;
+                Ok(true)
+            }
+        }
     }
 }
 fn header<const N: usize>(s: Option<&str>) -> Result<String<N>, FeedError> {
@@ -348,6 +414,12 @@ impl Checkpoint {
         Some(out)
     }
 }
+#[path = "sync_seen.rs"]
+mod seen;
+use seen::{SEEN_CAPACITY, Seen};
+#[cfg(test)]
+#[path = "sync_sweep_tests.rs"]
+mod sweep_tests;
 #[cfg(test)]
 #[path = "sync_tests.rs"]
 mod tests;

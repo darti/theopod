@@ -95,12 +95,13 @@ pub enum Reply {
     Downloaded(DownloadOutcome),
     /// `SyncChunk`: bytes consumed; send the rest again.
     Consumed(usize),
-    /// `DownloadStart` or `DownloadChunk` made one bounded step (a commit
-    /// or a reclaim scan): send the same command again.
+    /// `DownloadStart`, `DownloadChunk` or `SyncEnd` made one bounded step
+    /// (a commit, a reclaim scan or a tombstone sweep step): send the same
+    /// command again.
     Pending,
 }
 /// The one sync session, kept in place in the runtime (PSRAM): starting or
-/// ending a sync never moves its 20 KB through core1's stack (t-133).
+/// ending a sync never moves its 28 KB through core1's stack (t-133).
 struct SyncSlot {
     session: SyncSession,
     active: bool,
@@ -275,18 +276,32 @@ impl<M: MediaStore> Runtime<M> {
             Command::SyncEnd => {
                 apart(async move {
                     let sync = self.sync.get_mut().ok_or(Error::Invalid)?;
-                    let reply = match sync.end_page() {
-                        Ok(true) => String::try_from(sync.url())
-                            .map(Reply::Url)
-                            .map_err(|_| Error::Invalid),
-                        Ok(false) => sync
-                            .complete(&mut self.catalogue, scratch)
+                    // A full walk sweeps tombstones before its checkpoint
+                    // commit, one bounded step per request (ADR-0022,
+                    // ADR-0031); `Pending` asks for the next step.
+                    let reply = if sync.sweeping() {
+                        sync.sweep(&mut self.catalogue)
+                            .map(|_| Reply::Pending)
+                            .map_err(sync_error)
+                    } else if sync.ready() {
+                        sync.complete(&mut self.catalogue, scratch)
                             .map(Reply::Synced)
-                            .map_err(sync_error),
-                        Err(error) => Err(sync_error(error)),
+                            .map_err(sync_error)
+                    } else {
+                        match sync.end_page() {
+                            Ok(true) => String::try_from(sync.url())
+                                .map(Reply::Url)
+                                .map_err(|_| Error::Invalid),
+                            Ok(false) if sync.begin_sweep() => Ok(Reply::Pending),
+                            Ok(false) => sync
+                                .complete(&mut self.catalogue, scratch)
+                                .map(Reply::Synced)
+                                .map_err(sync_error),
+                            Err(error) => Err(sync_error(error)),
+                        }
                     };
-                    // Only a next page keeps the session.
-                    if !matches!(reply, Ok(Reply::Url(_))) {
+                    // Only a next page or a sweep step keeps the session.
+                    if !matches!(reply, Ok(Reply::Url(_) | Reply::Pending)) {
                         self.sync.active = false;
                     }
                     reply

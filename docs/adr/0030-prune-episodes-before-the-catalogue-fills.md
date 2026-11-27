@@ -40,8 +40,8 @@ that count.
 - **Tombstone.** The identity entry (`EPISODE_IDENTITY`) outlives the
   episode. A sync meeting a pruned episode finds it known and returns
   `created: false`, `queued: false`, so re-syncing a history longer than the
-  cap neither re-imports nor churns. Tombstones cost ~50 bytes each and are
-  bounded by the feeds' total history.
+  cap neither re-imports nor churns. Tombstones cost ~50 bytes each; those of
+  episodes that left their feed are collected (ADR-0031).
 
 ## Consequences
 
@@ -49,8 +49,8 @@ that count.
   disappear from the catalogue once more than 6,000 exist.
 - Pruning is global and oldest-first across subscriptions, and a pruned
   episode is not imported again; a quiet feed can lose old unread episodes to
-  a prolific one. Per-subscription fairness and tombstone garbage collection
-  are accepted limits (follow-up).
+  a prolific one. Per-subscription fairness is an accepted limit (follow-up);
+  tombstone collection is ADR-0031.
 - Ids are never reused (`next_episode` only grows).
 - An identity whose episode is missing is no longer reported as `Corrupt`;
   it is read as pruned.

@@ -198,7 +198,7 @@ test: opencore-aacdec
 # region). Release only: redb walks every page on open under debug
 # assertions.
 test-catalogue-bounds:
-    RUSTUP_TOOLCHAIN=stable cargo test --release -p theo-storage -p theo-podcasts --target {{host_target}} -- open_after_crash_reads open_at_scale scan_page_and_commit upsert_commit_stays first_open_on_a_fresh_region download_end_is_one_commit recover_one_is_one_commit sync_chunk_requests make_space_steps prune_at_scale
+    RUSTUP_TOOLCHAIN=stable cargo test --release -p theo-storage -p theo-podcasts --target {{host_target}} -- open_after_crash_reads open_at_scale scan_page_and_commit upsert_commit_stays first_open_on_a_fresh_region download_end_is_one_commit recover_one_is_one_commit sync_chunk_requests make_space_steps prune_at_scale recovery_walk_does_not_visit
 
 # Run the driver tests under Miri, to catch undefined behaviour in their
 # unsafe code (`rustup +nightly component add miri rust-src` once). Cargo

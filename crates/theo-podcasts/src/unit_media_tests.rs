@@ -202,7 +202,9 @@ fn unknown_length_grows_in_doubling_batches() {
         let mut media = open(&mut cat, Disk::counting(200 * SECTORS), 200);
         let id = EpisodeId(1);
         media.reset_temp(&mut cat, id, None).await.unwrap();
-        assert_eq!(media.commits, 0);
+        // Regression (t-149): an unknown length owns its first unit at once,
+        // so boot recovery finds the identity through `UNIT_EXTENTS`.
+        assert_eq!((media.commits, media.temp.owned), (1, 1));
         let mut owned = Vec::new();
         for _ in 0..(129 * UNIT_BYTES as usize / AUDIO_CHUNK) {
             let commits = media.commits;
@@ -215,7 +217,7 @@ fn unknown_length_grows_in_doubling_batches() {
                 owned.push(media.temp.owned);
             }
         }
-        assert_eq!(owned, [1, 2, 4, 8, 16, 32, 64, 128, 192]);
+        assert_eq!(owned, [2, 4, 8, 16, 32, 64, 128, 192]);
         assert_eq!(used(&mut cat, 200), 192);
         assert_eq!(media.temp.extents.len(), 1);
         // The unused tail of the batch counts as free.
@@ -472,6 +474,9 @@ impl<M: MediaStore> MediaStore for Probe<'_, M> {
     fn active(&self, id: EpisodeId) -> bool {
         self.inner.active(id)
     }
+    fn temp_len(&self, id: EpisodeId) -> Option<u64> {
+        self.inner.temp_len(id)
+    }
     async fn space(&mut self, cat: &mut Cat) -> Result<Space, M::Error> {
         probed!(self, self.inner.space(cat))
     }
@@ -529,7 +534,15 @@ async fn cut_history<M: MediaStore>(
     else {
         return Err(());
     };
-    session.response(200, Some(CUT_LEN), None).map_err(|_| ())?;
+    session
+        .response(
+            200,
+            Some(CUT_LEN),
+            None,
+            None,
+            &mut crate::resume::Resume::new(),
+        )
+        .map_err(|_| ())?;
     let mut left = CUT_LEN;
     while left > 0 {
         let n = left.min(AUDIO_CHUNK as u64) as usize;
@@ -655,6 +668,41 @@ fn cut_once(base: usize, cut: usize) -> bool {
         assert_eq!(record.total_units(), used, "cut {cut}");
         true
     })
+}
+
+// Regression (t-149): a download of unknown length interrupted right after
+// `Downloading` is found by the `UNIT_EXTENTS`-only boot walk and requeued.
+#[test]
+fn unknown_length_downloading_is_recovered_at_boot() {
+    let mut scratch = [0; MAX_RECORD_BYTES];
+    block_on(async {
+        let image = Image::new();
+        let mut cat = image.create();
+        let job = queued(&mut cat, "unknown", None, &mut scratch);
+        let id = job.id;
+        let mut disk = Disk::counting(CUT_UNITS * SECTORS);
+        {
+            let mut media = open(&mut cat, &mut disk, CUT_UNITS);
+            let Start::Ready(_session) = start_all(&mut cat, &mut media, job, &mut scratch)
+                .await
+                .unwrap()
+            else {
+                panic!("download did not start");
+            };
+            let state = cat.get(id, &mut scratch).unwrap().unwrap().state;
+            assert_eq!(state.audio, AudioState::Downloading);
+        }
+        image.crash();
+        drop(cat);
+        let mut cat = image.reopen();
+        let mut media = open(&mut cat, &mut disk, CUT_UNITS);
+        crate::recovery::recover_all(&mut cat, &mut media, &mut scratch)
+            .await
+            .unwrap();
+        let state = cat.get(id, &mut scratch).unwrap().unwrap().state;
+        assert_eq!(state.audio, AudioState::Queued);
+        assert_eq!(media.table.used(), 0);
+    });
 }
 
 // Regression (t-121): a full card is `Full` before any change, and the
@@ -805,7 +853,7 @@ fn invalid_input_leaves_the_store_enabled() {
             media.publish_temp(&mut cat, id).await,
             Err(UnitError::Invalid)
         ));
-        assert_eq!((media.commits, media.table.used()), (0, 0));
+        assert_eq!(media.commits, 1); // the reset only
         fill(&mut cat, &mut media, id, 10).await;
     });
 }
@@ -882,13 +930,13 @@ fn reset_frees_a_previous_temp() {
             .reset_temp(&mut cat, EpisodeId(2), None)
             .await
             .unwrap(); // other id
-        assert_eq!(used(&mut cat, 4), 0);
+        assert_eq!(used(&mut cat, 4), 1); // id 2's first unit only
         append_all(&mut cat, &mut media, EpisodeId(2), 1).await;
         media
             .reset_temp(&mut cat, EpisodeId(2), None)
             .await
             .unwrap(); // same id
-        assert_eq!(used(&mut cat, 4), 0);
+        assert_eq!(used(&mut cat, 4), 1);
         assert_eq!(space(&mut cat, &mut media).await.free, 4 * UNIT_BYTES);
         // Freed units count toward a reservation.
         append_all(&mut cat, &mut media, EpisodeId(2), 1).await;

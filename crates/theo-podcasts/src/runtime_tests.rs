@@ -66,7 +66,9 @@ fn owner_imports_downloads_and_marks_read_through_bounded_commands() {
                 Command::DownloadHeaders {
                     status: 200,
                     length: Some(4),
-                    partial: false,
+                    range: None,
+                    etag: Default::default(),
+                    modified: Default::default(),
                 },
                 &mut scratch,
             )
@@ -138,9 +140,11 @@ fn malformed_feed_does_not_disable_owner_but_storage_failure_does() {
             .await
             .unwrap();
         owner.media.fail_at = Some(owner.media.steps);
+        // t-149: recovery lists media first, so the first call hits the
+        // injected failure (it used to scan the catalogue and touch none).
         assert_eq!(
             owner.handle(Command::Recover, &mut scratch).await.err(),
-            None
+            Some(Error::Storage)
         );
         assert_eq!(
             owner.handle(Command::Recover, &mut scratch).await.err(),
@@ -349,7 +353,9 @@ fn cancelled_audio_append_stays_unpublished_and_recovery_requeues_after_reopen()
                 Command::DownloadHeaders {
                     status: 200,
                     length: None,
-                    partial: false,
+                    range: None,
+                    etag: Default::default(),
+                    modified: Default::default(),
                 },
                 &mut scratch,
             )
@@ -395,6 +401,8 @@ fn cancelled_audio_append_stays_unpublished_and_recovery_requeues_after_reopen()
 struct Classified {
     inner: HostMedia,
     fail: Option<bool>,
+    /// `reset_temp` refuses (non-fatal) and changes nothing.
+    refuse_reset: bool,
 }
 #[derive(Debug)]
 enum ClassifiedError {
@@ -409,6 +417,9 @@ impl MediaStore for Classified {
     fn active(&self, id: EpisodeId) -> bool {
         MediaStore::active(&self.inner, id)
     }
+    fn temp_len(&self, id: EpisodeId) -> Option<u64> {
+        self.inner.temp_len(id)
+    }
     async fn space(&mut self, cat: &mut Catalogue) -> Result<Space, ClassifiedError> {
         match self.fail {
             Some(true) => Err(ClassifiedError::Io),
@@ -422,6 +433,9 @@ impl MediaStore for Classified {
         id: EpisodeId,
         expected: Option<u64>,
     ) -> Result<(), ClassifiedError> {
+        if self.refuse_reset {
+            return Err(ClassifiedError::Refused);
+        }
         let r = self.inner.reset_temp(cat, id, expected).await;
         r.map_err(|_| ClassifiedError::Io)
     }
@@ -513,6 +527,7 @@ fn non_fatal_media_error_is_rejected_not_disabling() {
         let media = Classified {
             inner: HostMedia::new(root_for(&image)),
             fail: Some(false),
+            refuse_reset: false,
         };
         let mut owner = Runtime::new(cat, media);
         assert_eq!(
@@ -563,4 +578,203 @@ async fn sync_all<M: MediaStore>(owner: &mut Runtime<M>, mut xml: &[u8], scratch
         assert!(used > 0 && used <= xml.len());
         xml = &xml[used..];
     }
+}
+
+/// Send `command` again while the owner answers `Pending`.
+async fn settle<M: MediaStore>(
+    owner: &mut Runtime<M>,
+    command: Command,
+    scratch: &mut [u8],
+) -> Reply {
+    loop {
+        let reply = match &command {
+            Command::DownloadStart(job) => Command::DownloadStart(job.clone()),
+            Command::DownloadChunk(bytes) => Command::DownloadChunk(bytes.clone()),
+            _ => unreachable!(),
+        };
+        match owner.handle(reply, scratch).await.unwrap() {
+            Reply::Pending => (),
+            reply => return reply,
+        }
+    }
+}
+
+#[test]
+fn next_job_and_start_offer_the_kept_partial_with_its_range() {
+    // Regression (t-156): after a network failure the owner prefers the kept job and asks for its tail.
+    use crate::{media_test_support::queued, network_policy::ContentRange};
+    block_on(async {
+        let image = Image::new();
+        let mut cat = image.create();
+        let mut scratch = [0; MAX_RECORD_BYTES];
+        let job = queued(&mut cat, "a", Some(8), &mut scratch);
+        let later = queued(&mut cat, "b", Some(8), &mut scratch);
+        let mut media = HostMedia::new(root_for(&image));
+        media.physical_sync = false;
+        let mut owner = Runtime::new(cat, media);
+        let headers = |status, length, range| Command::DownloadHeaders {
+            status,
+            length,
+            range,
+            etag: "\"v1\"".try_into().unwrap(),
+            modified: Default::default(),
+        };
+        assert!(matches!(
+            settle(
+                &mut owner,
+                Command::DownloadStart(job.clone()),
+                &mut scratch
+            )
+            .await,
+            Reply::Ready
+        ));
+        let Reply::Range { from: 0, .. } = owner
+            .handle(Command::DownloadRange, &mut scratch)
+            .await
+            .unwrap()
+        else {
+            panic!("a fresh download asks for the whole body")
+        };
+        owner
+            .handle(headers(200, Some(8), None), &mut scratch)
+            .await
+            .unwrap();
+        settle(
+            &mut owner,
+            Command::DownloadChunk(crate::test_support::audio_chunk(b"1234")),
+            &mut scratch,
+        )
+        .await;
+        owner.handle(Command::Abort, &mut scratch).await.unwrap();
+        // The worker's cursor is past the failed job; the kept one still comes first.
+        let Reply::Job {
+            job: Some(offered),
+            done: false,
+            ..
+        } = owner
+            .handle(Command::NextJob(Some(later.id)), &mut scratch)
+            .await
+            .unwrap()
+        else {
+            panic!("kept job not offered")
+        };
+        assert_eq!(offered.id, job.id);
+        assert!(matches!(
+            settle(&mut owner, Command::DownloadStart(offered), &mut scratch).await,
+            Reply::Ready
+        ));
+        let Reply::Range { from, validator } = owner
+            .handle(Command::DownloadRange, &mut scratch)
+            .await
+            .unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!((from, validator.as_str()), (4, "\"v1\""));
+        owner
+            .handle(
+                headers(
+                    206,
+                    Some(4),
+                    Some(ContentRange {
+                        first: 4,
+                        last: 7,
+                        total: 8,
+                    }),
+                ),
+                &mut scratch,
+            )
+            .await
+            .unwrap();
+        settle(
+            &mut owner,
+            Command::DownloadChunk(crate::test_support::audio_chunk(b"5678")),
+            &mut scratch,
+        )
+        .await;
+        assert!(matches!(
+            owner
+                .handle(Command::DownloadEnd(true), &mut scratch)
+                .await
+                .unwrap(),
+            Reply::Downloaded(DownloadOutcome::Complete)
+        ));
+        assert_eq!(
+            std::fs::read(owner.media.path(job.id, false)).unwrap(),
+            b"12345678"
+        );
+        // Nothing kept any more: the scan resumes normally.
+        let Reply::Job {
+            job: Some(next), ..
+        } = owner
+            .handle(Command::NextJob(Some(job.id)), &mut scratch)
+            .await
+            .unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(next.id, later.id);
+    });
+}
+
+#[test]
+fn refused_reset_on_a_restart_recovers_the_episode() {
+    // Regression (t-156): a non-fatal refusal of the restart's reset poisoned the session and stranded the episode in Downloading.
+    use crate::{
+        download::{DownloadOutcome, Start},
+        media_test_support::{queued, start_with},
+        resume::Resume,
+    };
+    block_on(async {
+        let image = Image::new();
+        let mut cat = image.create();
+        let mut media = Classified {
+            inner: HostMedia::new(root_for(&image)),
+            fail: None,
+            refuse_reset: false,
+        };
+        let mut scratch = [0; MAX_RECORD_BYTES];
+        let mut resume = Resume::new();
+        let job = queued(&mut cat, "r", Some(8), &mut scratch);
+        let id = job.id;
+        let mut reclaim = crate::reclaim::Reclaim::new();
+        let Start::Ready(mut s) =
+            start_with(&mut cat, &mut media, &mut resume, job.clone(), &mut scratch)
+                .await
+                .unwrap()
+        else {
+            panic!()
+        };
+        s.response(200, Some(8), None, Some("\"v1\""), &mut resume)
+            .unwrap();
+        s.push(&mut cat, &mut media, &mut reclaim, b"1234", &mut scratch)
+            .await
+            .unwrap();
+        s.abort(&mut cat, &mut media, &mut resume, &mut scratch)
+            .await
+            .unwrap();
+        assert_eq!(resume.kept(), Some(id));
+        let Start::Ready(mut s) = start_with(&mut cat, &mut media, &mut resume, job, &mut scratch)
+            .await
+            .unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(s.from(), 4);
+        s.response(200, Some(8), None, Some("\"v2\""), &mut resume)
+            .unwrap();
+        media.refuse_reset = true;
+        assert!(s.restart(&mut cat, &mut media).await.is_err());
+        assert_eq!(
+            s.abort(&mut cat, &mut media, &mut resume, &mut scratch)
+                .await
+                .unwrap(),
+            DownloadOutcome::RetryLater
+        );
+        assert!(resume.kept().is_none());
+        assert_eq!(
+            cat.get(id, &mut scratch).unwrap().unwrap().state.audio,
+            AudioState::Queued
+        );
+    });
 }

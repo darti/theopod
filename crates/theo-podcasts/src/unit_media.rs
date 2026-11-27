@@ -404,7 +404,9 @@ impl<D: SectorIo, A: Allocator + Clone> UnitMedia<D, A> {
             return Err(UnitError::Invalid);
         }
         let want = match expected.map(|n| n.div_ceil(UNIT_BYTES)) {
-            None | Some(0) => 0,
+            // Unknown length still owns one unit now, so the identity is in
+            // `UNIT_EXTENTS` as soon as it is `Downloading` (t-149).
+            None | Some(0) => 1,
             Some(n) => u32::try_from(n).map_err(|_| UnitError::Full)?,
         };
         // Read-only checks first: `Exists` and `Full` change nothing.
@@ -632,6 +634,10 @@ impl<D: SectorIo, A: Allocator + Clone> MediaStore for UnitMedia<D, A> {
     /// (ADR-0020), so nothing is ever active.
     fn active(&self, _: EpisodeId) -> bool {
         false
+    }
+    fn temp_len(&self, id: EpisodeId) -> Option<u64> {
+        self.check().ok()?;
+        (self.temp.id == Some(id)).then_some(self.temp.len)
     }
     async fn space(&mut self, _: &mut Catalogue) -> Result<Space, Self::Error> {
         self.check()?;

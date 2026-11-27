@@ -45,6 +45,10 @@ pub trait MediaStore {
     }
     /// Whether `id`'s audio is leased for playback.
     fn active(&self, id: EpisodeId) -> bool;
+    /// Length of `id`'s temporary audio while it is the store's current
+    /// one, from RAM without I/O; `None` otherwise. A partial kept for a
+    /// same-boot resume continues from it (t-156).
+    fn temp_len(&self, id: EpisodeId) -> Option<u64>;
     /// Capacity and free bytes.
     async fn space(&mut self, cat: &mut Catalogue) -> Result<Space, Self::Error>;
     /// Discard any temporary audio (of `id` or of the previous download) and
@@ -81,7 +85,9 @@ pub trait MediaStore {
         cat: &mut Catalogue,
         id: EpisodeId,
     ) -> Result<Option<u64>, Self::Error>;
-    /// Bounded sorted unique local IDs holding temporary or published audio.
+    /// Bounded sorted unique local IDs that may need boot recovery: every
+    /// identity holding temporary or published audio, and any other whose
+    /// catalogue state could need repair (recovery visits no other episode).
     /// Zero means end; resume strictly after the last returned ID. Never
     /// remote paths.
     async fn list_ids(

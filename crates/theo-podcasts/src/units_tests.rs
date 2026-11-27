@@ -316,3 +316,123 @@ fn unit_ids_ignore_subscriptions() {
     assert_eq!(cat.unit_ids(None, &mut out).unwrap(), 1);
     assert_eq!(out[0], EpisodeId(3));
 }
+
+fn commit_temp(cat: &mut Catalogue, t: &mut UnitTable<Global>, id: u64) {
+    let (unit, _) = allocate(t, 1).unwrap();
+    let mut rec = [0; 4096];
+    let n = encode_record(
+        RecordState::Temp,
+        0,
+        &[Extent {
+            start: unit,
+            count: 1,
+        }],
+        &mut rec,
+    )
+    .unwrap();
+    cat.commit_units(t, &[t.page_of(unit)], EpisodeId(id), Some(&rec[..n]))
+        .unwrap();
+}
+
+// Regression (t-136): listing pages through more than one `FILE_PAGE` of
+// records, in order and without repeats or gaps.
+#[test]
+fn unit_ids_paginate_over_many_records() {
+    const PAGE: usize = crate::media::FILE_PAGE;
+    let total = PAGE * 2 + 3;
+    let image = Image::new();
+    let mut cat = image.create();
+    let mut t = UnitTable::new_in(100, Global).unwrap();
+    cat.load_units(&mut t).unwrap();
+    for id in 1..=total as u64 {
+        commit_temp(&mut cat, &mut t, id);
+    }
+    let mut seen = std::vec::Vec::new();
+    let mut after = None;
+    let mut sizes = std::vec::Vec::new();
+    loop {
+        let mut out = [EpisodeId(0); PAGE];
+        let n = cat.unit_ids(after, &mut out).unwrap();
+        if n == 0 {
+            break;
+        }
+        sizes.push(n);
+        seen.extend_from_slice(&out[..n]);
+        after = Some(out[n - 1]);
+    }
+    assert_eq!(sizes, [PAGE, PAGE, 3]);
+    assert_eq!(
+        seen,
+        (1..=total as u64)
+            .map(EpisodeId)
+            .collect::<std::vec::Vec<_>>()
+    );
+    // Resuming past the last id yields nothing.
+    let mut out = [EpisodeId(0); PAGE];
+    assert_eq!(
+        cat.unit_ids(Some(EpisodeId(total as u64)), &mut out)
+            .unwrap(),
+        0
+    );
+}
+
+// Regression (t-136): damaged or absent data is refused, never trusted.
+#[test]
+fn negative_paths_are_refused() {
+    let image = Image::new();
+    let mut cat = image.create();
+    let mut buf = [0; 4096];
+    // An unknown id has no record.
+    assert!(cat.unit_record(EpisodeId(9), &mut buf).unwrap().is_none());
+    // A zero id key is damage, not an episode.
+    write_raw(&cat, |tx| {
+        tx.open_table(UNIT_EXTENTS)
+            .unwrap()
+            .insert(0, &[0u8; 1][..])
+            .unwrap();
+    });
+    let mut out = [EpisodeId(0); crate::media::FILE_PAGE];
+    assert!(matches!(cat.unit_ids(None, &mut out), Err(Error::Corrupt)));
+}
+
+// Regression (t-136): a page of the wrong size is corrupt.
+#[test]
+fn wrong_sized_bitmap_page_is_corrupt() {
+    let image = Image::new();
+    let mut cat = image.create();
+    write_raw(&cat, |tx| {
+        tx.open_table(UNIT_PAGES)
+            .unwrap()
+            .insert(0, &[0u8; 10][..])
+            .unwrap();
+    });
+    let mut t = UnitTable::new_in(100, Global).unwrap();
+    assert!(matches!(cat.load_units(&mut t), Err(Error::Corrupt)));
+}
+
+// Regression (t-136): a schema-1 database (counters only, none of the schema
+// 2 tables) is refused as `Schema` and left without new tables.
+#[test]
+fn schema_one_header_without_tables_is_rejected() {
+    let image = Image::new();
+    {
+        let db = redb::Database::builder()
+            .create_with_backend(image.backend())
+            .unwrap();
+        let tx = db.begin_write().unwrap();
+        tx.open_table(COUNTERS)
+            .unwrap()
+            .insert(SCHEMA_KEY, 1)
+            .unwrap();
+        tx.commit().unwrap();
+    }
+    assert!(matches!(
+        Catalogue::open(image.backend()),
+        Err(Error::Schema)
+    ));
+    let db = redb::Database::builder()
+        .create_with_backend(image.backend())
+        .unwrap();
+    let tx = db.begin_read().unwrap();
+    assert_eq!(tx.list_tables().unwrap().count(), 1);
+}

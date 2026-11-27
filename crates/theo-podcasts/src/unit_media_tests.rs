@@ -670,6 +670,50 @@ fn cut_once(base: usize, cut: usize) -> bool {
     })
 }
 
+// Regression (t-136): a media device write that fails at any point stops the
+// store; after a reboot recovery leaves no unit leaked and no stale record.
+#[test]
+fn media_write_failure_at_each_write_leaks_no_unit() {
+    let mut scratch = [0; MAX_RECORD_BYTES];
+    let total = block_on(async {
+        let image = Image::new();
+        let mut cat = image.create();
+        let job = queued(&mut cat, "fail", Some(CUT_LEN), &mut scratch);
+        let mut disk = Disk::counting(CUT_UNITS * SECTORS);
+        {
+            let mut media = open(&mut cat, &mut disk, CUT_UNITS);
+            cut_history(&mut cat, &mut media, job, &mut scratch)
+                .await
+                .unwrap();
+        }
+        disk.writes
+    });
+    assert!(total > 2, "{total}");
+    for fail in 0..total {
+        block_on(async {
+            let image = Image::new();
+            let mut cat = image.create();
+            let job = queued(&mut cat, "fail", Some(CUT_LEN), &mut scratch);
+            let mut disk = Disk::counting(CUT_UNITS * SECTORS);
+            disk.fail_at = Some(fail);
+            {
+                let mut media = open(&mut cat, &mut disk, CUT_UNITS);
+                let history = cut_history(&mut cat, &mut media, job, &mut scratch).await;
+                assert!(history.is_err(), "fail {fail}");
+            }
+            image.crash();
+            drop(cat);
+            let mut cat = image.reopen();
+            let mut media = open(&mut cat, &mut disk, CUT_UNITS);
+            crate::recovery::recover_all(&mut cat, &mut media, &mut scratch)
+                .await
+                .unwrap();
+            assert_eq!(media.table.used() + media.table.free(), CUT_UNITS);
+            assert_bitmap_matches_records(&mut cat, &mut media).await;
+        });
+    }
+}
+
 // Regression (t-149): a download of unknown length interrupted right after
 // `Downloading` is found by the `UNIT_EXTENTS`-only boot walk and requeued.
 #[test]

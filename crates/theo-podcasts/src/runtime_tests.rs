@@ -138,9 +138,11 @@ fn malformed_feed_does_not_disable_owner_but_storage_failure_does() {
             .await
             .unwrap();
         owner.media.fail_at = Some(owner.media.steps);
+        // t-149: recovery lists media first, so the first call hits the
+        // injected failure (it used to scan the catalogue and touch none).
         assert_eq!(
             owner.handle(Command::Recover, &mut scratch).await.err(),
-            None
+            Some(Error::Storage)
         );
         assert_eq!(
             owner.handle(Command::Recover, &mut scratch).await.err(),

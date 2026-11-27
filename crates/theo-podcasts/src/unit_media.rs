@@ -404,7 +404,9 @@ impl<D: SectorIo, A: Allocator + Clone> UnitMedia<D, A> {
             return Err(UnitError::Invalid);
         }
         let want = match expected.map(|n| n.div_ceil(UNIT_BYTES)) {
-            None | Some(0) => 0,
+            // Unknown length still owns one unit now, so the identity is in
+            // `UNIT_EXTENTS` as soon as it is `Downloading` (t-149).
+            None | Some(0) => 1,
             Some(n) => u32::try_from(n).map_err(|_| UnitError::Full)?,
         };
         // Read-only checks first: `Exists` and `Full` change nothing.

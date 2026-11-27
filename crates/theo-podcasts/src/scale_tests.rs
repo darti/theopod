@@ -469,3 +469,42 @@ fn sync_chunk_requests_stay_within_the_io_budget() {
 fn sync_chunk_requests_stay_within_the_io_budget_cold() {
     sync_chunk_requests(true);
 }
+
+// Regression (t-149): the boot recovery walk visits only identities that
+// own media (`UNIT_EXTENTS`), never the 5,000 terminal episodes: one
+// interrupted download is recovered in a handful of steps and a constant
+// number of sector commands, each admitted unit within a request's budget.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "sector bounds are release-only")]
+fn recovery_walk_does_not_visit_terminal_episodes() {
+    let image = fill();
+    let mut cat = image.reopen();
+    let mut media = media(&mut cat, 64);
+    let mut scratch = [0; MAX_RECORD_BYTES];
+    let id = EpisodeId(2_500);
+    drop(started(&image, &mut cat, &mut media, id, AUDIO_LEN));
+    let mut recovery = crate::recovery::Recovery::new();
+    let (mut steps, mut total) = (0, (0, 0));
+    loop {
+        reset(&image, &mut media);
+        let done =
+            futures::executor::block_on(recovery.step(&mut cat, &mut media, &mut scratch)).unwrap();
+        let (r, w) = commands(&image, &media);
+        within_budget("recovery step", (r, w));
+        total = (total.0 + r, total.1 + w);
+        steps += 1;
+        if done {
+            break;
+        }
+    }
+    eprintln!(
+        "recovery: {steps} steps, {} reads + {} writes",
+        total.0, total.1
+    );
+    // List page, the one id, the end marker; a scan would need ~350 pages.
+    assert!(steps == 4, "{steps} steps");
+    assert!(total.0 + total.1 <= 2 * REQUEST_COMMANDS, "{total:?}");
+    let episode = cat.get(id, &mut scratch).unwrap().unwrap();
+    assert_eq!(episode.state.audio, AudioState::Queued);
+    assert_eq!(media.table.used(), 0);
+}

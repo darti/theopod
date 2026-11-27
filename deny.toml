@@ -14,6 +14,11 @@ ignore = [
     { id = "RUSTSEC-2023-0071", reason = "RSA public signature verification only, no private key; see docs/podcast-security-assessment.md" },
     { id = "RUSTSEC-2024-0436", reason = "paste: proc-macro via esp-hal and riscv, no replacement upstream" },
     { id = "RUSTSEC-2024-0449", reason = "unsafe-libyaml: build time only, via esp-config and serde_yaml" },
+    # Slint dependencies (t-138): unmaintained, not vulnerable, no replacement
+    # upstream. slint 1.19.1 (latest on 2026-11-27) still depends on both.
+    # Reassess before 2027-01-01, or when a slint release drops them.
+    { id = "RUSTSEC-2026-0441", reason = "pin-utils: unmaintained (repository archived); via slint-build and slint-macros -> spin_on, build time only" },
+    { id = "RUSTSEC-2026-0543", reason = "chrono: unmaintained, all versions affected; via i-slint-core" },
 ]
 
 [licenses]

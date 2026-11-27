@@ -30,3 +30,4 @@
 | [0026](0026-decode-podcast-audio-on-the-storage-core.md) | Decode podcast audio on the storage core and output it through I2S DMA | Proposed |
 | [0027](0027-heal-the-wifi-tx-in-flight-count.md) | Heal the Wi-Fi TX in-flight count and disable AMPDU RX | Accepted |
 | [0028](0028-fuzz-and-patch-opencore-aacdec-on-the-host.md) | Fuzz opencore-aacdec on the host and patch what it finds | Accepted |
+| [0030](0030-prune-episodes-before-the-catalogue-fills.md) | Prune episodes before the catalogue fills | Accepted |

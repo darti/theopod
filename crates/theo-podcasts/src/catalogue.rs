@@ -162,6 +162,8 @@ pub struct Catalogue {
     batch: bool,
     /// Commits made so far: a request checks whether a step committed.
     commits: u64,
+    /// Episodes kept before the oldest prunable one is deleted (ADR-0030).
+    limit: u64,
 }
 
 /// Reads see the last committed state, or a batch's held writes.
@@ -254,6 +256,7 @@ impl Catalogue {
             enabled: true,
             batch: false,
             commits: 0,
+            limit: MAX_EPISODES,
         };
         let fresh = {
             let tx = catalogue.db.begin_read().map_err(db_error)?;
@@ -591,7 +594,10 @@ impl Catalogue {
         let existing = self.view()?.number(EPISODE_IDENTITY, index)?.map(EpisodeId);
         let mut old = None;
         let (id, mut state, created) = if let Some(id) = existing {
-            let (episode, _) = self.load(id, scratch)?.ok_or(Error::Corrupt)?;
+            // An identity without its episode is a pruned one (ADR-0030).
+            let Some((episode, _)) = self.load(id, scratch)? else {
+                return Ok(prune::pruned(id));
+            };
             old = Some((episode.state, episode.metadata.published));
             if episode.subscription != subscription || !same_identity(episode.metadata, metadata) {
                 return Err(Error::IdentityCollision);
@@ -620,17 +626,21 @@ impl Catalogue {
         if queued {
             state.audio = AudioState::Queued;
         }
-        let n = encode(
-            Episode {
-                id,
-                subscription,
-                source: Source::RadioFrance,
-                state,
-                metadata,
-            },
-            scratch,
-        )
-        .ok_or(Error::BufferTooSmall)?;
+        let record = Episode {
+            id,
+            subscription,
+            source: Source::RadioFrance,
+            state,
+            metadata,
+        };
+        let mut n = encode(record, scratch).ok_or(Error::BufferTooSmall)?;
+        if created {
+            // Prune only once the record is known to encode, then encode again
+            // (pruning reuses `scratch`): a failed creation deletes nothing.
+            let limit = self.limit;
+            prune::make_room(self.write()?, limit, scratch)?;
+            n = encode(record, scratch).ok_or(Error::BufferTooSmall)?;
+        }
         let next = self.next;
         let tx = self.write()?;
         tx.open_table(EPISODES)
@@ -814,6 +824,7 @@ fn reindex(
     old: Option<(EpisodeState, Option<i64>)>,
     (state, published): (EpisodeState, Option<i64>),
 ) -> Result<(), Error> {
+    prune::reindex(tx, id, old, (state, published))?;
     let old = old
         .filter(|&(s, _)| evictable(s))
         .map(|(_, p)| evict_key(id, p));
@@ -1042,6 +1053,9 @@ fn decode(bytes: &[u8]) -> Option<Episode<'_>> {
         },
     })
 }
+#[path = "catalogue_prune.rs"]
+mod prune;
+pub use prune::MAX_EPISODES;
 #[cfg(test)]
 #[path = "catalogue_create_tests.rs"]
 mod create_tests;

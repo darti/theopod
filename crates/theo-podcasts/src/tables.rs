@@ -25,6 +25,10 @@ pub(crate) const UNIT_EXTENTS: TableDefinition<u64, &[u8]> = TableDefinition::ne
 /// in the reclaim policy's order (no publication date last, oldest date,
 /// import order = id); written in the same transaction as the episode.
 pub(crate) const EVICTABLE: TableDefinition<(u8, i64, u64), ()> = TableDefinition::new("evictable");
+/// Prune index: one entry per episode without audio on the card (`Missing`,
+/// `Queued` or `Reclaimed`), keyed oldest first like `EVICTABLE`. Created on
+/// first write, so a database without it is valid (ADR-0030).
+pub(crate) const PRUNABLE: TableDefinition<(u8, i64, u64), ()> = TableDefinition::new("prunable");
 /// Named `u64` counters, keyed by the constants below.
 pub(crate) const COUNTERS: TableDefinition<&str, u64> = TableDefinition::new("counters");
 

@@ -23,6 +23,8 @@ mod media_test_support;
 pub mod network_policy;
 pub mod provision;
 mod provision_guard;
+#[cfg(test)]
+mod prune_scale_tests;
 pub mod reclaim;
 pub mod recovery;
 #[cfg(test)]

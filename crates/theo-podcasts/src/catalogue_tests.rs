@@ -857,6 +857,8 @@ fn full_region_maps_to_full_and_disables() {
     // SAFETY: single-threaded test.
     let backend = unsafe { RegionBackend::new(disk, LENGTH_SECTORS + 4096) }.unwrap();
     let mut cat = Catalogue::open(backend).unwrap();
+    // Unpruned: this tests the last resort behind the episode limit.
+    cat.limit = u64::MAX;
     let mut scratch = [0; MAX_RECORD_BYTES];
     let mut result = Ok(());
     for i in 0..10_000 {

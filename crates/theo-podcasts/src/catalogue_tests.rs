@@ -364,7 +364,7 @@ fn schema_rejection_does_not_write_or_reformat() {
     tamper(&image, |tx| {
         tx.open_table(crate::tables::COUNTERS)
             .unwrap()
-            .insert(crate::tables::SCHEMA_KEY, 4)
+            .insert(crate::tables::SCHEMA_KEY, crate::tables::SCHEMA + 1)
             .unwrap();
     });
     assert!(matches!(
@@ -373,7 +373,7 @@ fn schema_rejection_does_not_write_or_reformat() {
     ));
     // redb itself writes its header on open and its allocator state on
     // close; the catalogue writes nothing: the schema is still unknown.
-    assert_eq!(stored_schema(&image), Some(4));
+    assert_eq!(stored_schema(&image), Some(crate::tables::SCHEMA + 1));
     assert!(matches!(
         Catalogue::open(image.backend()),
         Err(Error::Schema)
@@ -865,7 +865,8 @@ fn full_region_maps_to_full_and_disables() {
     cat.limit = u64::MAX;
     let mut scratch = [0; MAX_RECORD_BYTES];
     let mut result = Ok(());
-    for i in 0..10_000 {
+    // Bound well past the point where this region reaches `Full`.
+    for i in 0..20_000 {
         let guid = std::format!("guid-{i}");
         if let Err(e) = cat.upsert(
             SubscriptionId(1),
@@ -876,7 +877,7 @@ fn full_region_maps_to_full_and_disables() {
             break;
         }
     }
-    assert!(matches!(result, Err(Error::Full)));
+    assert!(matches!(result, Err(Error::Full)), "{result:?}");
     assert!(matches!(
         cat.get(EpisodeId(1), &mut scratch),
         Err(Error::Disabled)

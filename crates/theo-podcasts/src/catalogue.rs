@@ -162,7 +162,8 @@ pub struct Catalogue {
     batch: bool,
     /// Commits made so far: a request checks whether a step committed.
     commits: u64,
-    /// Episodes kept before the oldest prunable one is deleted (ADR-0030).
+    /// Episodes kept before one is pruned from the largest subscription
+    /// (ADR-0030, ADR-0032).
     limit: u64,
 }
 
@@ -281,6 +282,9 @@ impl Catalogue {
         tx.open_table(UNIT_PAGES).map_err(db_error)?;
         tx.open_table(UNIT_EXTENTS).map_err(db_error)?;
         tx.open_table(EVICTABLE).map_err(db_error)?;
+        tx.open_table(PRUNABLE).map_err(db_error)?;
+        tx.open_table(SUBSCRIPTION_EPISODES).map_err(db_error)?;
+        tx.open_table(SUBSCRIPTION_SIZES).map_err(db_error)?;
         {
             let mut counters = tx.open_table(COUNTERS).map_err(db_error)?;
             for (key, value) in [
@@ -318,6 +322,8 @@ impl Catalogue {
         tx.open_table(UNIT_PAGES).map_err(db_error)?;
         tx.open_table(UNIT_EXTENTS).map_err(db_error)?;
         tx.open_table(EVICTABLE).map_err(db_error)?;
+        // The pruning tables (ADR-0032) are not opened: each costs ~8 reads
+        // against the open bound (t-133), and write transactions create them.
         self.next = next;
         Ok(())
     }
@@ -485,6 +491,7 @@ impl Catalogue {
             return Err(Error::InvalidState);
         }
         let (before, published) = (episode.state, episode.metadata.published);
+        let subscription = episode.subscription;
         let after = EpisodeState {
             audio: AudioState::Available,
             ..before
@@ -499,7 +506,13 @@ impl Catalogue {
             .map_err(db_error)?
             .insert(id.0, &scratch[..n])
             .map_err(db_error)?;
-        reindex(tx, id, Some((before, published)), (after, published))?;
+        reindex(
+            tx,
+            subscription,
+            id,
+            Some((before, published)),
+            (after, published),
+        )?;
         self.done()
     }
     /// Last completely reconciled history. Partial imports never replace this.
@@ -652,8 +665,9 @@ impl Catalogue {
             .map_err(db_error)?
             .insert(id.0, &scratch[..n])
             .map_err(db_error)?;
-        reindex(tx, id, old, (state, metadata.published))?;
+        reindex(tx, subscription, id, old, (state, metadata.published))?;
         if created {
+            prune::count_created(tx, subscription)?;
             tx.open_table(EPISODE_IDENTITY)
                 .map_err(db_error)?
                 .insert(index, id.0)
@@ -752,9 +766,14 @@ impl Catalogue {
         next: Option<AudioState>,
         scratch: &mut [u8],
     ) -> Result<(), Error> {
-        let (mut state, n, published) = {
+        let (mut state, n, published, subscription) = {
             let (episode, n) = self.load(id, scratch)?.ok_or(Error::NotFound)?;
-            (episode.state, n, episode.metadata.published)
+            (
+                episode.state,
+                n,
+                episode.metadata.published,
+                episode.subscription,
+            )
         };
         let previous = state;
         if let Some(next) = next {
@@ -781,7 +800,13 @@ impl Catalogue {
             .map_err(db_error)?
             .insert(id.0, &scratch[..n])
             .map_err(db_error)?;
-        reindex(tx, id, Some((previous, published)), (state, published))?;
+        reindex(
+            tx,
+            subscription,
+            id,
+            Some((previous, published)),
+            (state, published),
+        )?;
         self.done()
     }
     /// The first evictable episode in the reclaim policy's order whose audio
@@ -825,11 +850,12 @@ pub(crate) fn evict_key(id: EpisodeId, published: Option<i64>) -> (u8, i64, u64)
 /// Keep `EVICTABLE` in step with an episode write, in its transaction.
 fn reindex(
     tx: &WriteTransaction,
+    subscription: SubscriptionId,
     id: EpisodeId,
     old: Option<(EpisodeState, Option<i64>)>,
     (state, published): (EpisodeState, Option<i64>),
 ) -> Result<(), Error> {
-    prune::reindex(tx, id, old, (state, published))?;
+    prune::reindex(tx, subscription, id, old, (state, published))?;
     let old = old
         .filter(|&(s, _)| evictable(s))
         .map(|(_, p)| evict_key(id, p));

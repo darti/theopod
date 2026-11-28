@@ -28,7 +28,8 @@ that count.
   pruned, so downloaded or in-progress audio is safe. If nothing is
   prunable the creation goes one over; the next one tries again, and `Full`
   remains the last resort.
-- **Index.** `PRUNABLE` (same key as `EVICTABLE`) is maintained by `reindex`
+- **Index.** `PRUNABLE` (same key as `EVICTABLE`; keyed by subscription
+  first since ADR-0032) is maintained by `reindex`
   in the transaction of every episode write, so pruning reads at most 16
   index entries and never scans episodes. The table is created on first
   write; a database without it stays valid (schema stays 3). Episodes written
@@ -47,10 +48,10 @@ that count.
 
 - The unread backlog is bounded: the oldest unread episodes without audio
   disappear from the catalogue once more than 6,000 exist.
-- Pruning is global and oldest-first across subscriptions, and a pruned
-  episode is not imported again; a quiet feed can lose old unread episodes to
-  a prolific one. Per-subscription fairness is an accepted limit (follow-up);
-  tombstone collection is ADR-0031.
+- A pruned episode is not imported again; tombstone collection is ADR-0031.
+  Pruning was global and oldest-first across subscriptions, so a quiet feed
+  could lose old unread episodes to a prolific one; ADR-0032 now prunes from
+  the largest subscription (schema 4).
 - Ids are never reused (`next_episode` only grows).
 - An identity whose episode is missing is no longer reported as `Corrupt`;
   it is read as pruned.

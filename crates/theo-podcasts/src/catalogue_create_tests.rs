@@ -81,7 +81,7 @@ fn damage_header(image: &Image) {
     backend.sync_data().unwrap();
 }
 
-/// A usable empty catalogue: schema 3, every table present (`open`
+/// A usable empty catalogue: the current schema, every table present (`open`
 /// validates them), nothing stored, and the region no longer fresh.
 fn assert_empty(image: &Image, cat: &mut Catalogue, context: &str) {
     let mut scratch = [0; MAX_RECORD_BYTES];
@@ -93,7 +93,7 @@ fn assert_empty(image: &Image, cat: &mut Catalogue, context: &str) {
         let counters = tx.open_table(crate::tables::COUNTERS).unwrap();
         let schema = number(&counters, crate::tables::SCHEMA_KEY).unwrap();
         assert_eq!(schema, Some(crate::tables::SCHEMA), "{context}");
-        assert_eq!(crate::tables::SCHEMA, 3);
+        assert_eq!(crate::tables::SCHEMA, 4);
     }
     assert!(!image.backend().is_fresh(), "{context}");
 }

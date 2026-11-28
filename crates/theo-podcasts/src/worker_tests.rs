@@ -278,3 +278,39 @@ fn download_start_is_repeated_while_pending() {
     assert_eq!(io.starts, 3);
     assert!(io.replies.is_empty());
 }
+
+/// Answers every start with `Pending`, counting the requests.
+struct Stuck {
+    starts: u32,
+}
+impl DownloadIo for Stuck {
+    async fn command(&mut self, command: Command) -> Result<Reply, Error> {
+        Ok(match command {
+            Command::NextJob(_) => Reply::Job {
+                job: Some(crate::download::DownloadJob {
+                    id: EpisodeId(1),
+                    enclosure: "https://cdn.example/a".try_into().unwrap(),
+                    expected_bytes: None,
+                }),
+                after: None,
+                done: false,
+            },
+            _ => {
+                self.starts += 1;
+                Reply::Pending
+            }
+        })
+    }
+    async fn transfer(&mut self, _: &str) -> Result<(), Error> {
+        unreachable!("a stuck start never transfers")
+    }
+}
+
+#[test]
+fn download_start_that_never_progresses_stops_at_the_step_bound() {
+    // Regression (t-150): `Pending` forever must not spin the network task.
+    let mut io = Stuck { starts: 0 };
+    let result = block_on(download_one(&mut io, &mut None));
+    assert_eq!(result, Err(Error::Protocol));
+    assert_eq!(io.starts, MAX_PENDING_STEPS + 1);
+}

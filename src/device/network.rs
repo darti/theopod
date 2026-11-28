@@ -497,6 +497,7 @@ impl theo_podcasts::body::ChunkSink for Store<'_> {
         let (purpose, n) = (self.purpose, bytes.len());
         let store = Instant::now();
         let mut at = 0;
+        let mut pending = 0;
         // One commit per podcast request (ADR-0022): the owner consumes
         // a feed chunk in parts and makes space in steps, so resend
         // what it did not take. Each request is bounded by the
@@ -523,8 +524,21 @@ impl theo_podcasts::body::ChunkSink for Store<'_> {
                 (Purpose::Feed, Reply::Consumed(used)) if used > 0 && used <= piece => {
                     at += used;
                 }
-                (Purpose::Audio, Reply::Done) => at += piece,
-                (Purpose::Audio, Reply::Pending) => (),
+                (Purpose::Audio, Reply::Done) => {
+                    at += piece;
+                    pending = 0;
+                }
+                // Resend the same piece, but not forever (t-150).
+                (Purpose::Audio, Reply::Pending) if pending < worker::MAX_PENDING_STEPS => {
+                    pending += 1;
+                }
+                (Purpose::Audio, Reply::Pending) => {
+                    log::warn!(
+                        "network: audio chunk still pending after {} steps",
+                        worker::MAX_PENDING_STEPS
+                    );
+                    return Err(Error::Protocol);
+                }
                 (Purpose::Audio, Reply::Downloaded(DownloadOutcome::WaitingForSpace)) => {
                     return Err(Error::Waiting);
                 }

@@ -35,6 +35,19 @@ pub async fn cancellable<T>(
         embassy_futures::select::Either::Second(()) => Err(Error::Stopped),
     }
 }
+
+/// `Pending` replies accepted for one request before giving up (t-150).
+///
+/// Each `Pending` is one committed step: an eviction takes two, at most one
+/// per catalogue episode, plus a few discards. A request past this bound
+/// is not progressing, and resending it would spin the network task. It
+/// bounds spinning, not latency: legitimate steps up to it can take
+/// minutes, past the TLS idle timeout, and the transfer then fails as usual.
+pub const MAX_PENDING_STEPS: u32 = {
+    assert!(crate::catalogue::MAX_EPISODES < (u32::MAX as u64 - 8) / 2);
+    2 * crate::catalogue::MAX_EPISODES as u32 + 8
+};
+
 pub async fn download_one<I: DownloadIo>(
     io: &mut I,
     after: &mut Option<EpisodeId>,
@@ -55,9 +68,11 @@ pub async fn download_one<I: DownloadIo>(
             *after = Some(job.id);
             let url = job.enclosure.clone();
             // Each start request makes one bounded step; repeat it.
+            let mut pending = 0;
             loop {
                 match io.command(Command::DownloadStart(job.clone())).await? {
-                    Reply::Pending => continue,
+                    Reply::Pending if pending < MAX_PENDING_STEPS => pending += 1,
+                    Reply::Pending => return Err(Error::Protocol),
                     Reply::Ready => break,
                     Reply::Downloaded(crate::download::DownloadOutcome::WaitingForSpace) => {
                         return Err(Error::Waiting);

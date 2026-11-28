@@ -202,10 +202,10 @@ impl DownloadSession {
                 return Ok(Admit::Pending);
             }
         }
-        let episode = cat
-            .get(job.id, scratch)
-            .map_err(MediaError::Catalogue)?
-            .ok_or(MediaError::InvalidInput)?;
+        // Pruned since it was queued (ADR-0030): nothing to download.
+        let Some(episode) = cat.get(job.id, scratch).map_err(MediaError::Catalogue)? else {
+            return Ok(Admit::Skip);
+        };
         if episode.state.read || episode.state.audio != AudioState::Queued || media.active(job.id) {
             return Ok(Admit::Skip);
         }

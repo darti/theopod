@@ -838,3 +838,24 @@ fn push_rejects_more_than_one_record() {
         assert!(matches!(pushed, Err(MediaError::InvalidInput)));
     });
 }
+
+#[test]
+fn start_of_a_pruned_queued_episode_skips() {
+    // Regression (t-190): a queued episode pruned before its download
+    // starts (ADR-0030) is skipped, not reported as invalid input.
+    block_on(async {
+        let image = Image::new();
+        let mut cat = image.create();
+        let mut media = HostMedia::new(root_for(&image));
+        let mut scratch = [0; MAX_RECORD_BYTES];
+        cat.set_limit(1);
+        let job = queued(&mut cat, "a", Some(3), &mut scratch);
+        let id = job.id;
+        queued(&mut cat, "b", Some(3), &mut scratch);
+        assert!(cat.get(id, &mut scratch).unwrap().is_none(), "a was pruned");
+        assert!(matches!(
+            start_all(&mut cat, &mut media, job, &mut scratch).await,
+            Ok(Start::Skip)
+        ));
+    });
+}

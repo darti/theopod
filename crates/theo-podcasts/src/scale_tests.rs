@@ -155,27 +155,42 @@ fn job(cat: &mut Catalogue, id: EpisodeId) -> crate::download::DownloadJob {
     crate::download::DownloadJob::from_episode(episode).unwrap()
 }
 
+/// Replace the catalogue with a cold one ([`chill`]) when `cold`.
+fn rechill(image: &Image, cat: &mut Option<Catalogue>, cold: bool) {
+    if cold {
+        drop(cat.take());
+        *cat = Some(chill(image));
+    }
+}
+
 /// Start, stream `len` bytes (known length) and return the session ready to
-/// finish; each start step must fit a request.
+/// finish. Each start step and each `DownloadChunk` push must fit a request
+/// with at most one commit; `cold` chills the catalogue before every start
+/// step and every push that enters a new unit (where pushes commit).
 fn started(
     image: &Image,
-    cat: &mut Catalogue,
+    cat: &mut Option<Catalogue>,
     media: &mut Media,
     id: EpisodeId,
     len: u64,
+    cold: bool,
 ) -> crate::download::DownloadSession {
     use crate::{
         download::{DownloadSession, Start},
         media::AUDIO_CHUNK,
         reclaim::Reclaim,
+        units::UNIT_BYTES,
     };
     let mut scratch = [0; MAX_RECORD_BYTES];
-    let job = job(cat, id);
+    let job = job(cat.as_mut().unwrap(), id);
     let mut reclaim = Reclaim::new();
     let mut session = loop {
+        rechill(image, cat, cold);
+        let c = cat.as_mut().unwrap();
         reset(image, media);
+        let commits = c.commits();
         let start = futures::executor::block_on(DownloadSession::start(
-            cat,
+            c,
             media,
             &mut reclaim,
             &mut crate::resume::Resume::new(),
@@ -183,7 +198,11 @@ fn started(
             &mut scratch,
         ))
         .unwrap();
-        within_budget("download start step", commands(image, media));
+        assert!(c.commits() - commits <= 1);
+        within_budget(
+            &std::format!("download start step cold={cold}"),
+            commands(image, media),
+        );
         match start {
             Start::Ready(session) => break session,
             Start::Pending => (),
@@ -199,18 +218,30 @@ fn started(
             &mut crate::resume::Resume::new(),
         )
         .unwrap();
-    let mut left = len;
-    while left > 0 {
-        let n = left.min(AUDIO_CHUNK as u64) as usize;
-        futures::executor::block_on(session.push(
-            cat,
+    let mut sent = 0;
+    while sent < len {
+        let n = (len - sent).min(AUDIO_CHUNK as u64);
+        if sent % UNIT_BYTES + n > UNIT_BYTES || sent % UNIT_BYTES == 0 {
+            rechill(image, cat, cold);
+        }
+        let c = cat.as_mut().unwrap();
+        reset(image, media);
+        let commits = c.commits();
+        let outcome = futures::executor::block_on(session.push(
+            c,
             media,
             &mut reclaim,
-            &[7; AUDIO_CHUNK][..n],
+            &[7; AUDIO_CHUNK][..n as usize],
             &mut scratch,
         ))
         .unwrap();
-        left -= n as u64;
+        assert_eq!(outcome, crate::download::ChunkOutcome::Written);
+        assert!(c.commits() - commits <= 1);
+        within_budget(
+            &std::format!("download chunk cold={cold} at {sent}"),
+            commands(image, media),
+        );
+        sent += n;
     }
     session
 }
@@ -218,55 +249,83 @@ fn started(
 /// The fill's announced length; every episode is left `Queued`.
 const AUDIO_LEN: u64 = 30_000_000;
 
-// Regression (t-133): `DownloadEnd` publishes and marks the episode
-// `Available` in one commit, within a request's IO budget at scale.
+// Regression (t-133, t-151): `DownloadStart` steps and `DownloadChunk`
+// pushes fit a request, and `DownloadEnd` publishes and marks the episode
+// `Available` in one commit within a request's IO budget at scale; `cold`
+// chills the catalogue before each request.
+fn download_end(cold: bool) {
+    let image = fill();
+    let mut cat = Some(image.reopen());
+    let mut media = media(cat.as_mut().unwrap(), 64);
+    let mut scratch = [0; MAX_RECORD_BYTES];
+    let id = EpisodeId(2_500);
+    let session = started(&image, &mut cat, &mut media, id, AUDIO_LEN, cold);
+    rechill(&image, &mut cat, cold);
+    let c = cat.as_mut().unwrap();
+    reset(&image, &mut media);
+    let commits = c.commits();
+    let outcome =
+        futures::executor::block_on(session.finish(c, &mut media, true, &mut scratch)).unwrap();
+    assert_eq!(outcome, crate::download::DownloadOutcome::Complete);
+    assert_eq!(c.commits() - commits, 1);
+    within_budget(
+        &std::format!("download end cold={cold}"),
+        commands(&image, &media),
+    );
+    let episode = c.get(id, &mut scratch).unwrap().unwrap();
+    assert_eq!(episode.state.audio, AudioState::Available);
+}
 #[test]
 #[cfg_attr(debug_assertions, ignore = "sector bounds are release-only")]
 fn download_end_is_one_commit_within_the_io_budget() {
-    let image = fill();
-    let mut cat = image.reopen();
-    let mut media = media(&mut cat, 64);
-    let mut scratch = [0; MAX_RECORD_BYTES];
-    let id = EpisodeId(2_500);
-    let session = started(&image, &mut cat, &mut media, id, AUDIO_LEN);
-    reset(&image, &mut media);
-    let commits = cat.commits();
-    let outcome =
-        futures::executor::block_on(session.finish(&mut cat, &mut media, true, &mut scratch))
-            .unwrap();
-    assert_eq!(outcome, crate::download::DownloadOutcome::Complete);
-    assert_eq!(cat.commits() - commits, 1);
-    within_budget("download end", commands(&image, &media));
-    let episode = cat.get(id, &mut scratch).unwrap().unwrap();
-    assert_eq!(episode.state.audio, AudioState::Available);
+    download_end(false);
 }
-
-// Regression (t-133): recovering an interrupted download (both files, then
-// `Missing` and `Queued`) is one commit, within a request's IO budget.
 #[test]
 #[cfg_attr(debug_assertions, ignore = "sector bounds are release-only")]
-fn recover_one_is_one_commit_within_the_io_budget() {
+fn download_end_is_one_commit_within_the_io_budget_cold() {
+    download_end(true);
+}
+
+// Regression (t-133, t-151): recovering an interrupted download (both
+// files, then `Missing` and `Queued`) is one commit, within a request's IO
+// budget; `cold` chills the catalogue before each request.
+fn recover_one(cold: bool) {
     let image = fill();
-    let mut cat = image.reopen();
-    let mut media = media(&mut cat, 64);
+    let mut cat = Some(image.reopen());
+    let mut media = media(cat.as_mut().unwrap(), 64);
     let mut scratch = [0; MAX_RECORD_BYTES];
     let id = EpisodeId(2_500);
-    let session = started(&image, &mut cat, &mut media, id, AUDIO_LEN);
+    let session = started(&image, &mut cat, &mut media, id, AUDIO_LEN, cold);
     drop(session);
+    rechill(&image, &mut cat, cold);
+    let c = cat.as_mut().unwrap();
     reset(&image, &mut media);
-    let commits = cat.commits();
+    let commits = c.commits();
     futures::executor::block_on(crate::recovery::recover_one(
-        &mut cat,
+        c,
         &mut media,
         id,
         &mut scratch,
     ))
     .unwrap();
-    assert_eq!(cat.commits() - commits, 1);
-    within_budget("recover one", commands(&image, &media));
-    let episode = cat.get(id, &mut scratch).unwrap().unwrap();
+    assert_eq!(c.commits() - commits, 1);
+    within_budget(
+        &std::format!("recover one cold={cold}"),
+        commands(&image, &media),
+    );
+    let episode = c.get(id, &mut scratch).unwrap().unwrap();
     assert_eq!(episode.state.audio, AudioState::Queued);
     assert_eq!(media.table.used(), 0);
+}
+#[test]
+#[cfg_attr(debug_assertions, ignore = "sector bounds are release-only")]
+fn recover_one_is_one_commit_within_the_io_budget() {
+    recover_one(false);
+}
+#[test]
+#[cfg_attr(debug_assertions, ignore = "sector bounds are release-only")]
+fn recover_one_is_one_commit_within_the_io_budget_cold() {
+    recover_one(true);
 }
 
 // Regression (t-133): with every episode read and `Available`, each
@@ -487,11 +546,12 @@ fn sync_chunk_requests_stay_within_the_io_budget_cold() {
 #[cfg_attr(debug_assertions, ignore = "sector bounds are release-only")]
 fn recovery_walk_does_not_visit_terminal_episodes() {
     let image = fill();
-    let mut cat = image.reopen();
-    let mut media = media(&mut cat, 64);
+    let mut cat = Some(image.reopen());
+    let mut media = media(cat.as_mut().unwrap(), 64);
     let mut scratch = [0; MAX_RECORD_BYTES];
     let id = EpisodeId(2_500);
-    drop(started(&image, &mut cat, &mut media, id, AUDIO_LEN));
+    drop(started(&image, &mut cat, &mut media, id, AUDIO_LEN, false));
+    let mut cat = cat.unwrap();
     let mut recovery = crate::recovery::Recovery::new();
     let (mut steps, mut total) = (0, (0, 0));
     loop {
